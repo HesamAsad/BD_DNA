@@ -176,3 +176,4 @@ misc_internal/
 sample_logs/
 varlen_sample_logs/
 logs/
+data_cache/

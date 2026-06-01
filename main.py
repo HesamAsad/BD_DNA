@@ -118,11 +118,16 @@ def _ppl_eval(config, logger, tokenizer):
     logger.info('Disabling EMA.')
     model.ema = None
 
-  wandb_logger = None
+  # Log to Weights & Biases when `wandb` is configured, else a lightweight CSV
+  # logger. We avoid `logger=None` (Lightning falls back to TensorBoardLogger,
+  # which imports tensorflow) and `logger=False` (breaks LearningRateMonitor).
   if config.get('wandb', None) is not None:
     wandb_logger = L.pytorch.loggers.WandbLogger(
       config=omegaconf.OmegaConf.to_object(config),
       ** config.wandb)
+  else:
+    wandb_logger = L.pytorch.loggers.CSVLogger(
+      save_dir=os.getcwd(), name='csv_logs')
   callbacks = []
   if 'callbacks' in config:
     for _, callback in config.callbacks.items():
@@ -142,11 +147,16 @@ def _ppl_eval(config, logger, tokenizer):
 
 def _train(config, logger, tokenizer):
   logger.info('Starting Training.')
-  wandb_logger = None
+  # Log to Weights & Biases when `wandb` is configured, else a lightweight CSV
+  # logger. We avoid `logger=None` (Lightning falls back to TensorBoardLogger,
+  # which imports tensorflow) and `logger=False` (breaks LearningRateMonitor).
   if config.get('wandb', None) is not None:
     wandb_logger = L.pytorch.loggers.WandbLogger(
       config=omegaconf.OmegaConf.to_object(config),
       ** config.wandb)
+  else:
+    wandb_logger = L.pytorch.loggers.CSVLogger(
+      save_dir=os.getcwd(), name='csv_logs')
 
   if (config.checkpointing.resume_from_ckpt
       and config.checkpointing.resume_ckpt_path is not None
@@ -206,6 +216,13 @@ def _train(config, logger, tokenizer):
             config_name='config')
 def main(config):
   """Main entry point for training."""
+  # In DDP, Lightning re-executes this script once per rank (setting LOCAL_RANK)
+  # and the model is built *before* Lightning assigns each rank its GPU. The
+  # BD3-LM flex block mask is created on the current CUDA device in
+  # DIT.__init__, so without this every rank would build on cuda:0 and collide
+  # (fatal under gpu `mode=exclusive_process`). Pin each rank to its own GPU.
+  if torch.cuda.is_available() and 'LOCAL_RANK' in os.environ:
+    torch.cuda.set_device(int(os.environ['LOCAL_RANK']))
   L.seed_everything(config.seed)
   _print_config(config, resolve=True, save_cfg=True)
   

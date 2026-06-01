@@ -1,0 +1,23 @@
+# Carbon pretraining corpus -- 10B-token eukaryote subset, single-nucleotide
+# tokenization for BD3-LM discrete diffusion. Loaded from local parquet via
+# dataloader.get_carbon_dna_dataset (no download / no HF hub access needed).
+train: carbon-eukaryote10b
+valid: carbon-eukaryote10b
+tokenizer_name_or_path: dna
+cache_dir: /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/data_cache/carbon
+wrap: True
+streaming: False
+# BD3-LM recipe: keep per-document EOS in train, but no per-chunk BOS/EOS
+# special-token insertion (matches scripts/train/train_owt_bd3lm.sh).
+insert_train_eos: True
+insert_valid_eos: False
+insert_train_special: False
+insert_valid_special: False
+
+# --- Carbon DNA corpus options (consumed by get_carbon_dna_dataset) ---
+dna_corpus_dir: /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/carbon/carbon-pretraining-corpus
+dna_subset: eukaryote_generator_10B_subset
+dna_seq_column: sequence   # eukaryote shards store DNA in 'sequence'
+dna_valid_frac: 0.01
+dna_num_files: null        # set e.g. 1 to use a single shard (quick runs)
+dna_max_rows: null         # set e.g. 5000 to cap rows (smoke tests)

@@ -1,0 +1,21 @@
+# Carbon pretraining corpus -- prokaryote subset (GTDB + IMG/PR), single-
+# nucleotide tokenization for BD3-LM. DNA is stored in the 'text' column.
+# Long chromosomal chunks -> good for long-context experiments.
+train: carbon-prokaryote
+valid: carbon-prokaryote
+tokenizer_name_or_path: dna
+cache_dir: /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/data_cache/carbon
+wrap: True
+streaming: False
+insert_train_eos: True
+insert_valid_eos: False
+insert_train_special: False
+insert_valid_special: False
+
+# --- Carbon DNA corpus options (consumed by get_carbon_dna_dataset) ---
+dna_corpus_dir: /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/carbon/carbon-pretraining-corpus
+dna_subset: prokaryote_evo2
+dna_seq_column: text       # prokaryote/mrna shards store DNA in 'text' (not 'sequence')
+dna_valid_frac: 0.01
+dna_num_files: null        # cap for quick/long-context tests (tokenizing all 34 shards is slow)
+dna_max_rows: null

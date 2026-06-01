@@ -14,7 +14,7 @@
 #SBATCH --requeue                     # Requeue upon preemption
 
 BLOCK_SIZE=16
-PRETRAIN_CKPT=kuleshov-group/bd3lm-owt-block_size1024-pretrain # to train from scratch, set to null
+PRETRAIN_CKPT=null # to train from scratch, set to null
 
 python -u main.py \
     loader.global_batch_size=512 \

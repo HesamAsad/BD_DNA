@@ -1,4 +1,5 @@
 import itertools
+import time
 from dataclasses import dataclass
 
 import hydra.utils
@@ -359,12 +360,50 @@ class Diffusion(L.LightningModule):
     losses = self._loss(batch['input_ids'],
                         batch['attention_mask'])
     self.metrics.train_nlls.update(losses.nlls, losses.token_mask)
+    loss_val = losses.loss.item()
     self.log(name='trainer/loss',
-             value=losses.loss.item(),
+             value=loss_val,
              on_step=True,
              on_epoch=False,
              sync_dist=True)
+    self._log_train_telemetry(loss_val, batch['input_ids'].shape[0])
     return losses.loss
+
+  def _log_train_telemetry(self, loss_val, micro_batch_size):
+    """Log cluster-wide throughput/compute/quality telemetry, multi-GPU aware
+    (scaled by accumulate_grad_batches * world_size). FLOPs per sequence:
+    2*N*tokens (linear) + 4*n_layers*pairs*d (attention over the block-diffusion
+    mask, ~L^2 attended pairs for cross-attn), times 3 for the backward pass.
+    FlopCounterMode can't see the compiled flex kernel, hence the estimate."""
+    if not hasattr(self, '_flops_per_micro'):
+      L = self.config.model.length
+      d = self.config.model.hidden_size
+      n_layers = self.config.model.n_blocks
+      n_params = sum(p.numel() for p in self.backbone.parameters())
+      seq = 2 * L if self.cross_attn else L  # backbone sees [x_t; x_0] for cross-attn
+      pairs = (L * L + 2 * L * self.block_size) if self.cross_attn \
+          else (seq * (seq + 1) // 2)
+      fwd = 2 * n_params * seq + 4 * n_layers * pairs * d
+      self._flops_per_micro = 3 * fwd * micro_batch_size
+      self._tokens_per_micro = micro_batch_size * L  # loss tokens per sequence
+      self._flops_t0 = time.time()
+    # bits per base: the loss is a NELBO upper bound on NLL (nats/token);
+    # for ACGT, uniform random is 2.0, so lower is better.
+    self.log('trainer/train_bpb', loss_val / 0.6931471805599453,
+             on_step=True, on_epoch=False, sync_dist=True)
+    scale = self.trainer.accumulate_grad_batches * self.trainer.world_size
+    steps = max(self.trainer.global_step, 1)
+    elapsed = max(time.time() - self._flops_t0, 1e-6)
+    total_flop = self._flops_per_micro * scale * steps
+    total_tok = self._tokens_per_micro * scale * steps
+    log = lambda k, v: self.log(k, v, on_step=True, on_epoch=False,
+                                rank_zero_only=True)
+    log('trainer/total_pflop', total_flop / 1e15)
+    log('trainer/pflop_per_s', total_flop / elapsed / 1e15)
+    log('trainer/total_gtokens', total_tok / 1e9)
+    log('trainer/tokens_per_s', total_tok / elapsed)
+    if torch.cuda.is_available():
+      log('trainer/gpu_mem_gb', torch.cuda.max_memory_allocated() / 2**30)
 
   def on_validation_epoch_start(self):
     self.metrics.reset()

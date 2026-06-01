@@ -1,4 +1,5 @@
 import functools
+import glob
 import itertools
 import json
 import math
@@ -144,6 +145,69 @@ class Text8Tokenizer(transformers.PreTrainedTokenizer):
 
   def _tokenize(self, text: str, **kwargs) -> typing.List[str]:
     return list(text.lower())
+
+  def _convert_token_to_id(self, token: str) -> int:
+    return self._vocab_str_to_int.get(
+      token, self._vocab_str_to_int['[UNK]'])
+
+  def _convert_id_to_token(self, index: int) -> str:
+    return self._vocab_int_to_str[index]
+
+  def convert_tokens_to_string(self, tokens):
+    return ''.join(tokens)
+
+  def get_vocab(self) -> typing.Dict[str, int]:
+    return self._vocab_str_to_int
+
+
+class DNATokenizer(transformers.PreTrainedTokenizer):
+  """Single-nucleotide tokenizer for DNA (A/C/G/T/N).
+
+  Mirrors `Text8Tokenizer`: a fixed vocabulary of special tokens followed by
+  the five nucleotide characters. Used for BD3-LM discrete diffusion on the
+  Carbon pretraining corpus, which stores raw uppercase ACGT(N) strings. No
+  `<dna>` tag or k-mer merging is used -- diffusion happens at single-base
+  resolution. `[MASK]` is in-vocab (id 4) and serves as the absorbing state.
+  """
+  def __init__(
+    self,
+    bos_token='[BOS]',
+    eos_token='[EOS]',
+    sep_token='[SEP]',
+    cls_token='[CLS]',
+    pad_token='[PAD]',
+    mask_token='[MASK]',
+    unk_token='[UNK]',
+    **kwargs):
+    self.characters = list('ACGTN')
+    self._vocab_str_to_int = {
+      '[CLS]': 0,
+      '[SEP]': 1,
+      '[BOS]': 2,
+      '[EOS]': 3,
+      '[MASK]': 4,
+      '[PAD]': 5,
+      '[RESERVED]': 6,
+      '[UNK]': 7,
+      ** {ch: i + 8 for i, ch in enumerate(self.characters)}}
+    self._vocab_int_to_str = {
+      v: k for k, v in self._vocab_str_to_int.items()}
+    super().__init__(
+      bos_token=bos_token,
+      eos_token=eos_token,
+      sep_token=sep_token,
+      cls_token=cls_token,
+      pad_token=pad_token,
+      mask_token=mask_token,
+      unk_token=unk_token,
+      **kwargs)
+
+  @property
+  def vocab_size(self) -> int:
+    return len(self._vocab_str_to_int)
+
+  def _tokenize(self, text: str, **kwargs) -> typing.List[str]:
+    return list(text.upper())
 
   def _convert_token_to_id(self, token: str) -> int:
     return self._vocab_str_to_int.get(
@@ -310,19 +374,66 @@ def _group_texts(examples, block_size, bos, eos, insert_special_tokens=True):
   return result
 
 
+def get_carbon_dna_dataset(
+    corpus_dir, subset, seq_column, cache_dir,
+    valid_frac=0.01, num_files=None, max_rows=None, seed=42):
+  """Loads a subset of the Carbon pretraining corpus from local parquet.
+
+  Returns a `datasets.DatasetDict` with 'train'/'validation' splits holding a
+  single 'text' column of raw DNA strings, so it flows through the standard
+  `preprocess_and_tokenize` + `_group_texts` pipeline unchanged.
+
+    Args:
+      corpus_dir: path to the `carbon-pretraining-corpus` directory.
+      subset: subset folder, e.g. 'eukaryote_generator_10B_subset'.
+      seq_column: column holding the DNA string ('sequence' or 'text').
+      valid_frac: fraction of rows held out for validation.
+      num_files: if set, only use the first N parquet shards (quick runs).
+      max_rows: if set, cap the total number of rows (smoke tests).
+      seed: split/shuffle seed (kept fixed so train/valid calls agree).
+  """
+  base = os.path.join(corpus_dir, subset)
+  files = sorted(
+    glob.glob(os.path.join(base, '**', '*.parquet'), recursive=True))
+  if not files:
+    raise FileNotFoundError(f'No parquet files found under {base}')
+  if num_files is not None:
+    files = files[:num_files]
+  LOGGER.info(f'Loading {len(files)} Carbon parquet shard(s) from {base}')
+  dataset = datasets.load_dataset(
+    'parquet', data_files=files, split='train', cache_dir=cache_dir)
+  dataset = dataset.select_columns([seq_column])
+  if seq_column != 'text':
+    dataset = dataset.rename_column(seq_column, 'text')
+  if max_rows is not None and max_rows < dataset.num_rows:
+    dataset = dataset.shuffle(seed=seed).select(range(max_rows))
+  split = dataset.train_test_split(test_size=valid_frac, seed=seed)
+  return datasets.DatasetDict(
+    {'train': split['train'], 'validation': split['test']})
+
+
 def get_dataset(
     dataset_name, tokenizer, wrap, mode, cache_dir,
     block_size=1024, num_proc=len(os.sched_getaffinity(0)),
-    streaming=False, revision : Optional[str]=None, insert_eos=True, insert_special_tokens=True):
+    streaming=False, revision : Optional[str]=None, insert_eos=True, insert_special_tokens=True,
+    dna_corpus_dir=None, dna_subset=None, dna_seq_column='sequence',
+    dna_valid_frac=0.01, dna_num_files=None, dna_max_rows=None):
   eos_tag = ''
   if not insert_eos:
     eos_tag = '_eosFalse'
   if not insert_special_tokens:
     eos_tag = '_specialFalse'
+  # Distinguish subsampled Carbon caches so a smoke run can't shadow a full run.
+  dna_tag = ''
+  if dataset_name.startswith('carbon-'):
+    if dna_num_files is not None:
+      dna_tag += f'_nf{dna_num_files}'
+    if dna_max_rows is not None:
+      dna_tag += f'_mr{dna_max_rows}'
   if wrap:
-    filename = f'{dataset_name}_{mode}_bs{block_size}_wrapped{eos_tag}.dat'
+    filename = f'{dataset_name}_{mode}_bs{block_size}_wrapped{eos_tag}{dna_tag}.dat'
   else:
-    filename = f'{dataset_name}_{mode}_bs{block_size}_unwrapped{eos_tag}.dat'
+    filename = f'{dataset_name}_{mode}_bs{block_size}_unwrapped{eos_tag}{dna_tag}.dat'
   _path = os.path.join(cache_dir, filename)
   
   if utils.fsspec_exists(_path):
@@ -400,6 +511,16 @@ def get_dataset(
       cache_dir=cache_dir,
       streaming=streaming,
       revision=revision)
+  elif dataset_name.startswith('carbon-'):
+    assert wrap, 'Carbon DNA datasets require data.wrap=True'
+    dataset = get_carbon_dna_dataset(
+      corpus_dir=dna_corpus_dir,
+      subset=dna_subset,
+      seq_column=dna_seq_column,
+      cache_dir=cache_dir,
+      valid_frac=dna_valid_frac,
+      num_files=dna_num_files,
+      max_rows=dna_max_rows)
   else:
     dataset = datasets.load_dataset(
       dataset_name,
@@ -526,6 +647,8 @@ def get_dataset(
 def get_tokenizer(config):
   if config.data.tokenizer_name_or_path == 'text8':
     tokenizer = Text8Tokenizer()
+  elif config.data.tokenizer_name_or_path == 'dna':
+    tokenizer = DNATokenizer()
   elif config.data.tokenizer_name_or_path == 'bert-base-uncased':
     tokenizer = transformers.BertTokenizer.\
       from_pretrained('bert-base-uncased')
@@ -598,7 +721,13 @@ def get_dataloaders(config, tokenizer, skip_train=False,
       cache_dir=config.data.cache_dir,
       block_size=config.model.length,
       streaming=config.data.streaming,
-      revision=config.data.get("train_revision", None))
+      revision=config.data.get("train_revision", None),
+      dna_corpus_dir=config.data.get("dna_corpus_dir", None),
+      dna_subset=config.data.get("dna_subset", None),
+      dna_seq_column=config.data.get("dna_seq_column", "sequence"),
+      dna_valid_frac=config.data.get("dna_valid_frac", 0.01),
+      dna_num_files=config.data.get("dna_num_files", None),
+      dna_max_rows=config.data.get("dna_max_rows", None))
   
   if config.data.valid in ['text8', 'lm1b', 'ag_news']:
     validation_split = 'test'
@@ -617,7 +746,13 @@ def get_dataloaders(config, tokenizer, skip_train=False,
       cache_dir=config.data.cache_dir,
       block_size=config.model.length,
       streaming=config.data.streaming,
-      revision=config.data.get("valid_revision", None))
+      revision=config.data.get("valid_revision", None),
+      dna_corpus_dir=config.data.get("dna_corpus_dir", None),
+      dna_subset=config.data.get("dna_subset", None),
+      dna_seq_column=config.data.get("dna_seq_column", "sequence"),
+      dna_valid_frac=config.data.get("dna_valid_frac", 0.01),
+      dna_num_files=config.data.get("dna_num_files", None),
+      dna_max_rows=config.data.get("dna_max_rows", None))
 
   if skip_train:
     train_loader = None

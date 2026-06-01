@@ -1,4 +1,5 @@
 import math
+import os
 import typing
 
 import einops
@@ -49,32 +50,48 @@ def block_diff_mask(b, h, q_idx, kv_idx, block_size=None, n=None):
   x0_flag_q = (q_idx >= n)
   x0_flag_kv = (kv_idx >= n)
 
-  # Compute block indices
-  block_q = torch.where(x0_flag_q == 1,
+  # Compute block indices. Use the bool flags directly (not `== 1`/`== 0`):
+  # comparing a bool to an int breaks inductor's range analysis when the mask
+  # is built with create_block_mask(_compile=True). Semantics are identical.
+  block_q = torch.where(x0_flag_q,
                         (q_idx - n) // block_size,
                         q_idx // block_size)
-  block_kv = torch.where(x0_flag_kv == 1,
+  block_kv = torch.where(x0_flag_kv,
                         (kv_idx - n) // block_size,
                         kv_idx // block_size)
 
   # **1. Block Diagonal Mask (M_BD) **
-  block_diagonal = (block_q == block_kv) & (x0_flag_q == x0_flag_kv)
+  # `x0_flag_q == x0_flag_kv` would be Eq on two bools, which inductor's range
+  # analysis lowers as bool>bool (illegal); express the same as bitwise XNOR.
+  same_flag = ~(x0_flag_q ^ x0_flag_kv)
+  block_diagonal = (block_q == block_kv) & same_flag
 
   # **2. Offset Block-Causal Mask (M_OBC) **
   offset_block_causal = (
     (block_q > block_kv)
-    & (x0_flag_kv == 1)
-    & (x0_flag_q == 0)
+    & x0_flag_kv
+    & (~x0_flag_q)
   )
 
   # **3. Block-Causal Mask (M_BC) **
-  block_causal = (block_q >= block_kv) & (x0_flag_kv == 1) & (x0_flag_q == 1)
+  block_causal = (block_q >= block_kv) & x0_flag_kv & x0_flag_q
 
   # **4. Combine Masks **
   return block_diagonal | offset_block_causal | block_causal
 
-@torch.compile(fullgraph=True, mode="max-autotune-no-cudagraphs")
-def fused_flex_attention(q, k, v, mask=None):
+# Compile mode for the flex-attention kernel. The default
+# `max-autotune-no-cudagraphs` benchmarks many kernel variants but allocates
+# large scratch buffers at compile time, which can OOM at long context. Set
+# BD3LM_FLEX_COMPILE_MODE=default (or 'none' for eager) to trade some kernel
+# speed for far less compile-time memory.
+_FLEX_COMPILE_MODE = os.environ.get(
+    'BD3LM_FLEX_COMPILE_MODE', 'max-autotune-no-cudagraphs')
+if _FLEX_COMPILE_MODE.lower() in ('none', 'off', 'eager'):
+  def fused_flex_attention(q, k, v, mask=None):
+    return flex_attention(q, k, v, block_mask=mask)
+else:
+  @torch.compile(fullgraph=True, mode=_FLEX_COMPILE_MODE)
+  def fused_flex_attention(q, k, v, mask=None):
     return flex_attention(q, k, v, block_mask=mask)
 
 
@@ -706,9 +723,14 @@ class DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
   def gen_mask(self, seqlen, block_size, attn_backend='sdpa'):
     """Genererates attention mask"""
     if attn_backend == 'flex' and FLEX_ATTN_AVAILABLE:
+      # BD3LM_COMPILE_MASK=1 builds the mask block-wise (compiled), avoiding the
+      # dense (2L x 2L) grid that OOMs at long context. Default off = eager build
+      # (the proven path for normal-length training).
+      compile_mask = os.environ.get('BD3LM_COMPILE_MASK', '0') == '1'
       self.block_diff_mask = create_block_mask(
         partial(block_diff_mask, block_size=block_size, n=seqlen),
-        B=None, H=None, Q_LEN=seqlen*2, KV_LEN=seqlen*2)
+        B=None, H=None, Q_LEN=seqlen*2, KV_LEN=seqlen*2,
+        _compile=compile_mask)
     elif attn_backend == 'sdpa':
       self.block_diff_mask = block_diff_mask(
         b=None, h=None, q_idx=torch.arange(seqlen*2)[:, None], 
@@ -759,6 +781,18 @@ class DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
       rotary_cos_sin = self.rotary_emb(x)
       mask = None
 
+    # Optional per-block GPU memory profiling (BD3LM_LOG_BLOCK_MEM=1). Logs once
+    # on the first forward, rank 0 only, to show how memory accumulates through
+    # the transformer blocks and scales with context length.
+    log_mem = (os.environ.get('BD3LM_LOG_BLOCK_MEM', '0') == '1'
+               and torch.cuda.is_available()
+               and os.environ.get('LOCAL_RANK', '0') == '0'
+               and not getattr(self, '_block_mem_logged', False))
+    if log_mem:
+      torch.cuda.synchronize()
+      torch.cuda.reset_peak_memory_stats()
+      print(f'[block-mem] seqlen={x.shape[1]} batch={x.shape[0]} '
+            f'start={torch.cuda.memory_allocated() / 2**30:.2f}GiB', flush=True)
     with torch.amp.autocast('cuda', dtype=torch.bfloat16):
       for i in range(len(self.blocks)):
         x = self.blocks[i](
@@ -769,7 +803,15 @@ class DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
           sample_mode=sample_mode,
           mask=mask,
           store_kv=store_kv)
+        if log_mem:
+          torch.cuda.synchronize()
+          print(f'[block-mem] after block {i:2d}: '
+                f'alloc={torch.cuda.memory_allocated() / 2**30:.2f}GiB '
+                f'peak={torch.cuda.max_memory_allocated() / 2**30:.2f}GiB',
+                flush=True)
       x = self.output_layer(x, t_cond)
+    if log_mem:
+      self._block_mem_logged = True
     if cross_attn and not sample_mode:
       x = x[:, :self.n]
     return x
