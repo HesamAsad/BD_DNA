@@ -177,3 +177,14 @@ sample_logs/
 varlen_sample_logs/
 logs/
 data_cache/
+
+# Large artifacts — keep OUT of git history (data, checkpoints, wheels, vendored repos)
+# (gitignore has no inline comments; patterns must be on their own line)
+# Carbon pretraining corpus (~1 TB, its own git repo)
+carbon/
+# vendored MDLM/BD3-LM reference checkout (its own git repo)
+mdlm/
+# SSD-LM training outputs / checkpoints (multi-GB .pt/.bin)
+ssd-lm/logging/
+# prebuilt wheels (e.g. flash_attn-*.whl, ~177 MB)
+*.whl
