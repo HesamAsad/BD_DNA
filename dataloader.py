@@ -20,7 +20,30 @@ import transformers
 
 import utils
 
+# Re-export the k-mer encoder used by the dual-stream backbone (Variant 2). The
+# dual model derives coarse tokens internally from the x_0 half of the batched
+# fine input, so the standard fine-tokenization pipeline is unchanged. This
+# re-export lets callers reach `dataloader.encode_kmer(...)` for inspection /
+# debugging / precomputation if they want to override the in-model encoding.
+from models.dit_dual import encode_kmer, coarse_vocab_size  # noqa: F401
+
 LOGGER = utils.get_logger(__name__)
+
+
+def _assert_dual_stream_compat(config) -> None:
+  """Fail fast when the dual-stream backbone is selected but the data setup
+  would break it (length divisibility / wrong tokenizer)."""
+  if config.algo.get('backbone', 'dit') != 'dit_dual':
+    return
+  k = config.model.get('k_coarse', 6)
+  if config.model.length % k != 0:
+    raise ValueError(
+      f"algo.backbone=dit_dual requires model.length ({config.model.length}) "
+      f"divisible by k_coarse ({k}).")
+  if config.data.tokenizer_name_or_path != 'dna':
+    raise ValueError(
+      "algo.backbone=dit_dual requires data.tokenizer_name_or_path='dna' "
+      "(the in-model k-mer encoder assumes DNATokenizer's ACGT id range).")
 
 
 def wt_detokenizer(string):
@@ -685,6 +708,7 @@ def get_tokenizer(config):
 
 def get_dataloaders(config, tokenizer, skip_train=False,
                     skip_valid=False, valid_seed=None):
+  _assert_dual_stream_compat(config)
   num_gpus = torch.cuda.device_count()
   if config.trainer.accumulate_grad_batches > 1:
     assert (config.loader.global_batch_size

@@ -1,0 +1,37 @@
+# DualStreamDIT (Variant 2) — fine local self-attention + coarse global
+# encoder via non-overlapping k-mer tokens, with cross-attention from fine to
+# coarse. Diffusion target stays at single-nucleotide resolution.
+#
+# Requirements on model.length:
+#   - divisible by `block_size` (BD3-LM block grain).
+#   - divisible by `k_coarse` (coarse tokenization grain).
+#   KEEP block_size divisible by k_coarse (12/18/24 with k_coarse=6). Exact
+#   cross-attn alignment AND required for sampling: the coarse encode calls
+#   encode_kmer on the partial buffer, which asserts length % k_coarse == 0,
+#   and the sliding window is only snapped to a block_size multiple. A
+#   block_size not divisible by k_coarse (e.g. 16) trains fine (leak-free, just
+#   tiny coarse under-coverage at block boundaries) but CRASHES at sampling
+#   stride 0 (L_curr=block_size not divisible by k_coarse). To use such a
+#   block_size end-to-end, pad/trim the coarse encode to a multiple of k_coarse.
+#
+# Override on the CLI for long-context runs, e.g.
+#   model=small_dual model.length=98304 block_size=18
+name: small_dual
+type: ddit
+hidden_size: 768
+cond_dim: 128
+length: 1024
+n_blocks: 12             # fine layers
+n_heads: 12              # fine heads
+scale_by_sigma: True
+dropout: 0.1
+tie_word_embeddings: True
+adaln: False
+attn_backend: flex       # required: fine self-attn + cross-attn use flex
+
+# Dual-stream specific:
+k_coarse: 6              # non-overlapping k-mer size for coarse stream
+window_blocks: 8         # fine local-attn window measured in BLOCKS
+d_coarse: 384            # coarse hidden dim (smaller than d_fine)
+n_coarse_layers: 4       # coarse encoder depth
+n_heads_coarse: 6        # coarse heads (d_coarse / n_heads_coarse = head_dim)

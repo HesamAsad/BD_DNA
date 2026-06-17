@@ -70,6 +70,9 @@ class Diffusion(L.LightningModule):
     if self.config.algo.backbone == 'dit':
       self.backbone = models.dit.DIT(
         self.config, vocab_size=self.vocab_size)
+    elif self.config.algo.backbone == 'dit_dual':
+      self.backbone = models.dit_dual.DualStreamDIT(
+        self.config, vocab_size=self.vocab_size)
     elif self.config.algo.backbone == 'dimamba':
       self.backbone = models.dimamba.DiMamba(
         self.config,
@@ -135,7 +138,7 @@ class Diffusion(L.LightningModule):
         self.config.sampling.first_hitting:
       assert self.config.loader.eval_batch_size == 1
     assert self.config.algo.backbone in {
-      'dit', 'ar', 'hf_dit'}
+      'dit', 'ar', 'hf_dit', 'dit_dual'}
     if self.config.algo.parameterization == 'ar':
       assert not self.config.algo.time_conditioning
     if self.config.sampling.kv_cache:
@@ -1049,6 +1052,12 @@ class Diffusion(L.LightningModule):
       # compute logits in a sliding window (context passed to model can't exceed context_size)
       end_idx = (stride_num + 1) * self.block_size
       start_idx = max(end_idx - context_size, 0)
+      # Snap the window start down to a block boundary so (a) the fine block grid
+      # stays aligned with the global block structure and (b) the coarse k-mer
+      # boundaries match training (start_idx % k_coarse == 0, since the dual
+      # backbone requires block_size % k_coarse == 0). No-op when block_size
+      # divides context_size (e.g. all single-block / power-of-two configs).
+      start_idx -= start_idx % self.block_size
       fwd_idx = torch.arange(start_idx, end_idx)
       if mdlm_semi_ar and stride_num > 0: # MDLM
         fwd_idx = torch.arange(512*(stride_num), (512*(stride_num))+self.block_size)
