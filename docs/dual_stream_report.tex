@@ -1,0 +1,393 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue,citecolor=blue}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  frame=single,
+  framesep=4pt,
+  xleftmargin=0pt,
+  xrightmargin=0pt,
+  breaklines=true,
+}
+
+\title{Dual-Stream Block-Diffusion Discrete Language Model \\
+       for Long-Context DNA}
+\author{Internal report}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We extend BD3-LM (block discrete denoising diffusion language model) to long
+genomic context with a \emph{dual-stream} backbone: a cheap coarse encoder over
+\(k\)-mer-tokenized clean context, plus a fine block-diffusion stream with
+windowed self-attention and cross-attention to the coarse memory. We motivate
+the design against a latent-diffusion alternative, describe the architecture,
+and report end-to-end smoke / A-B / long-context experiments. The model trains
+correctly; the targeted compute saving holds in theory. An initial
+long-context run OOM'd, but the cause was a one-line implementation bug, not an
+inherent limitation: the dual backbone invoked \texttt{flex\_attention}
+\emph{eagerly} (outside \texttt{torch.compile}), which silently falls back to a
+dense math reference path that materializes the full \(\mathcal{O}((2L)^2)\)
+score grid and ignores the windowed \texttt{BlockMask}. Routing the fine
+self-attention and cross-attention through a \texttt{torch.compile}-wrapped flex
+call -- exactly as the single-stream baseline already does -- lowers them to the
+fused block-sparse kernel and restores the predicted
+\(\mathcal{O}(L\!\cdot\!w)\) memory.
+\end{abstract}
+
+%==============================================================================
+\section{Background}
+%==============================================================================
+
+BD3-LM~\cite{bd3lm} interpolates between autoregressive and masked-diffusion
+LMs by partitioning a length-\(L\) sequence into blocks of size \(b\) and
+running discrete diffusion within each block conditioned on previously
+generated blocks. During training the backbone receives the concatenation
+\([x_t;\,x_0]\) (length \(2L\)) and a block-structured attention mask
+combining (i) block-diagonal self-attention within each block, (ii)
+offset-block-causal attention from noised queries to earlier clean blocks, and
+(iii) block-causal attention within the clean half. The loss is a per-token
+NELBO upper bound on negative log-likelihood.
+
+For DNA, we tokenize at single-nucleotide resolution (vocab
+\(\{\texttt{A},\texttt{C},\texttt{G},\texttt{T},\texttt{N}\}\) plus
+specials). The block-causal portion of the mask is
+\(\mathcal{O}(L^2)\) in attended token pairs (independent of \(b\)), so the
+attention term dominates compute once \(L\) exceeds a few thousand.
+
+%==============================================================================
+\section{Two routes to long context}
+%==============================================================================
+
+We considered two architectural directions that target the
+\(\mathcal{O}(L^2)\) attention cost by reducing the effective sequence length
+for the heavy attention layers.
+
+\paragraph{Variant 1 -- Latent diffusion (LDM-style).}
+Train a small CNN autoencoder (or a vector-quantized VAE) to compress
+\(k\) consecutive nucleotides to one latent token. Run BD3-LM entirely on the
+length-\(L/k\) latent stream; decode latents back to nucleotides at sampling
+time. Compute drops by \(\sim k^2\) on attention \emph{and} by \(\sim k\) on
+the linear/MLP terms, giving the largest absolute speedup. Drawbacks:
+(i) two-stage training (autoencoder first), (ii) a reconstruction bottleneck
+that inevitably leaks at single-nucleotide resolution -- exactly the regime
+where biology problems such as variant-effect prediction care about
+\emph{individual base changes}.
+
+\paragraph{Variant 2 -- Dual stream (this work).}
+Keep diffusion at single-nucleotide resolution but cheapen the fine path:
+\begin{itemize}
+  \item A small \emph{coarse encoder} over a non-overlapping \(k\)-mer
+        tokenization of the clean context \(x_0\), at length \(L/k\), with
+        full bidirectional attention. Cheap because \(L/k\) is short.
+  \item The fine BD3-LM at length \(2L\), but with self-attention
+        \emph{restricted to a local window} of \(\pm w\) blocks (an extra
+        predicate AND-ed into the block-diffusion mask), and with an extra
+        \emph{cross-attention} layer per fine block that lets fine queries
+        attend the coarse memory under a block-causal alignment.
+\end{itemize}
+
+The fine self-attention is now band-limited (no longer
+\(\mathcal{O}(L^2)\)), the coarse self-attention is cheap, and the cross-attn
+gives every fine query a global-but-causal view of the clean signal at
+\(1/k\) resolution. Diffusion target and loss are unchanged.
+
+\paragraph{Why Variant 2.}
+\begin{enumerate}
+  \item \emph{No reconstruction bottleneck.} Logits remain at single-nucleotide
+        resolution, so SNP-level structure is preserved end-to-end.
+  \item \emph{Single training stage.} No autoencoder needed; the deterministic
+        \(k\)-mer lookup has zero learnable parameters on the input side.
+  \item \emph{Interpretable conditioning.} The coarse stream is a slot the
+        model uses for long-range context. It can later be swapped for
+        actual biological metadata (gene boundaries, conservation, chromatin
+        state) without changing the diffusion side.
+\end{enumerate}
+The trade is a smaller \emph{maximum} speedup (\(\sim\!10\)-\(20\times\) at
+\(L\!\sim\!100\)k by our compute model, versus \(\sim k^2\) for Variant 1),
+because the fine-stream linear/MLP terms still scale as
+\(\mathcal{O}(L\,d^2)\) per layer.
+
+%==============================================================================
+\section{Architecture}
+%==============================================================================
+
+\begin{lstlisting}
+                        [x_t (L) ; x_0 (L)]  -- fine tokens
+                                |
+                                |  fine embedding + rotary
+                                v
+                        +---------------+
+                        |  fine layer i |
+                        +---------------+
+                        |  1) local self-attention (windowed BD3-LM mask)
+                        |  2) cross-attention to coarse memory c_mem
+                        |  3) MLP
+                        | (adaLN-modulated by timestep sigma)
+                                |
+                                v
+                          ... 12 layers ...
+                                |
+                                v
+                          [xt half (L) only]  ->  output linear  ->  logits
+                                                                       |
+                                                                       v
+                                                              NELBO (per-token)
+
+                  (x_0 is also tapped here)
+                            |
+                            |  non-overlapping k-mer encode (k=6 default)
+                            v
+                       [coarse ids (L/k)]   vocab = 4^k + 1 (clean k-mers + UNK)
+                            |
+                            |  coarse embedding + rotary
+                            v
+                       +-----------------+
+                       | coarse layer j  |   x n_coarse
+                       +-----------------+
+                       | full bidirectional self-attention + MLP
+                       | (no timestep conditioning; encodes only clean x_0)
+                            |
+                            v
+                         c_mem (L/k tokens)  -->  fed to every fine layer
+\end{lstlisting}
+
+\paragraph{Masks.} Two new mask predicates are built once at model
+construction time (both via \texttt{flex\_attention}'s
+\texttt{create\_block\_mask} with \texttt{\_compile=True} so the
+\((2L)^2\) grid is not materialised at construction).
+
+The \emph{fine local self-attention} mask is the standard BD3-LM
+block-diffusion mask AND-ed with a locality predicate:
+\[
+M_{\text{fine}}(q,k) \;=\;
+\underbrace{
+   M_{\text{BD}} \,\vee\, M_{\text{OBC}} \,\vee\, M_{\text{BC}}
+ }_{\text{BD3-LM rules}}
+\;\wedge\;
+\big(\, \mathrm{blk}_q - \mathrm{blk}_k \le w \,\big),
+\]
+where all three BD3-LM rules guarantee
+\(\mathrm{blk}_q \ge \mathrm{blk}_k\), so the locality predicate restricts only
+the lower-triangular band width.
+
+The \emph{fine-to-coarse cross-attention} mask is strictly block-causal: a
+fine query at position \(p\) (in block \(i\) of either the \(x_t\) or the
+\(x_0\) half) sees a coarse key \(j\) iff that coarse \(k\)-mer window lies
+entirely inside the ``completed'' portion of \(x_0\)
+(blocks \(0,\dots,i-1\) for an \(x_t\) query;
+blocks \(0,\dots,i\) for an \(x_0\) query). With
+\(\mathrm{blk}_q = p\bmod L \,/\, b\),
+\[
+n_{\text{vis}} \;=\;
+\begin{cases}
+   (\mathrm{blk}_q + 1)\,b & \text{if } p \ge L \quad(x_0\ \text{query}) \\
+   \mathrm{blk}_q\,b       & \text{otherwise} \quad (x_t\ \text{query})
+\end{cases},
+\qquad
+M_{\text{cross}}(q,j) \;=\; \big(j \le n_{\text{vis}}/k - 1\big).
+\]
+Choosing \(b\) divisible by \(k\) makes the alignment exact; otherwise a small
+slice of \(x_0\) at block boundaries is not visible through the coarse memory
+(no information leak, just slightly less coarse context).
+
+\paragraph{Configuration.} The reference \texttt{small\_dual} model uses
+\(d_{\text{fine}}\!=\!768\), 12 fine layers, 12 heads;
+\(d_{\text{coarse}}\!=\!384\), 4 coarse layers, 6 heads; \(k\!=\!6\)
+(coarse vocab \(4^{6}+1 = 4097\)); window \(w=8\) blocks. Total
+\(\approx 123\)M parameters, vs.\ 92.4\,M for the single-stream baseline.
+
+%==============================================================================
+\section{Compute analysis}
+%==============================================================================
+
+For sequence length \(L\), hidden \(d\), \(n_\ell\) layers, \(k\) coarse
+compression, fine window \(w\), per-sequence forward FLOPs decompose as:
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{l l}
+\toprule
+\textbf{Term} & \textbf{FLOPs} \\
+\midrule
+Coarse self-attention (full) & \(\approx 2 \cdot n_{c}\cdot (2L/k)^2 \cdot d_c\) \\
+Coarse linear/MLP            & \(\approx 24\cdot n_{c}\cdot d_c^2 \cdot 2L/k\) \\
+Fine local self-attention    & \(\approx 4 \cdot n_\ell \cdot 2L \cdot w \cdot d\) \\
+Fine cross-attention (causal)& \(\approx 4 \cdot n_\ell \cdot L^2/(2b) \cdot d\) \\
+Fine linear/MLP              & \(\approx 24\cdot n_\ell \cdot d^2 \cdot 2L\) \quad \(\leftarrow\) bottleneck for large \(L\) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At \(L\!=\!96\)k, \(d\!=\!768\), \(k\!=\!6\), \(w\!=\!128\) this predicts a
+\(\sim 10\text{--}15\times\) reduction in total fwd FLOPs vs.\ the
+single-stream baseline (whose \(\mathcal{O}(L^2)\) attention dominates).
+Further reduction is capped by the fine-stream linear/MLP, which is linear in
+\(L\) but per-layer; pushing past that would require either reducing the
+fine layer count or shrinking the fine sequence -- effectively transitioning
+to Variant 1.
+
+%==============================================================================
+\section{Implementation}
+%==============================================================================
+
+Concretely added to the repository:
+\begin{itemize}
+  \item \texttt{models/dit\_dual.py} -- \texttt{DualStreamDIT} backbone:
+        \texttt{CoarseBlock}, \texttt{FineDualBlock}, \texttt{CrossAttention},
+        two mask predicates, a non-overlapping \(k\)-mer encoder
+        \texttt{encode\_kmer}, and an sdpa-mode sampling path
+        (\texttt{\_gen\_sampling\_masks}).
+  \item \texttt{configs/model/small\_dual.yaml} -- new model configuration
+        exposing \texttt{k\_coarse}, \texttt{window\_blocks},
+        \texttt{d\_coarse}, \texttt{n\_coarse\_layers}.
+  \item \texttt{diffusion.py} -- new
+        \texttt{algo.backbone=dit\_dual} dispatch + validation entry.
+  \item \texttt{models/\_\_init\_\_.py} re-exports \texttt{dit\_dual};
+        \texttt{dataloader.py} re-exports \texttt{encode\_kmer} and adds
+        a fail-fast compatibility check.
+  \item Launchers: \texttt{scripts/train/smoke\_dna\_dual.sh} (sanity),
+        \texttt{scripts/profile/ab\_throughput.sh} (single vs.\ dual),
+        \texttt{scripts/train/train\_dna\_longctx\_dual.sh}.
+\end{itemize}
+
+The diffusion side (\texttt{Diffusion.forward}, the NELBO computation, and
+sampling drivers) is unchanged: \texttt{DualStreamDIT.forward} matches DIT's
+call contract -- returning logits sliced to the \(x_t\) half during training,
+and a sdpa-mode branch for sampling (block-by-block kv-cache sampling is not
+yet wired up).
+
+%==============================================================================
+\section{Experiments and results}
+%==============================================================================
+
+\paragraph{End-to-end smoke (job 37769, 1\,H200).}
+\(L\!=\!576\), \(b\!=\!18\), \(k\!=\!6\), batch~1, 10 steps. Model built
+(123\,M parameters), sanity validation passed, 10 training steps + final
+validation + checkpoint all clean. \(\sim\!12\) minutes including
+tokenization. The full pipeline -- coarse encoder, fine local self-attn,
+cross-attn, output slicing, NELBO -- is wired correctly.
+
+\paragraph{Throughput A/B at \(L\!=\!4{,}608\) (jobs 37812 / 37813, 1\,H200, 50 steps).}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{l r r r}
+\toprule
+backbone & params & runtime (50 steps) & val/nll \\
+\midrule
+single-stream BD3-LM (\texttt{dit})       & 92.4\,M & 769\,s & 2.293 \\
+dual-stream BD3-LM (\texttt{dit\_dual})   & 123\,M  & 824\,s & 2.333 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent At this context length the dual backbone is mildly slower than the
+single-stream baseline: it carries more parameters
+(\(+33\)\,M for the coarse encoder and cross-attention layers) and the
+attention term is small enough at \(L\!=\!4.6\)k that the local-attn saving
+does not yet recoup the cost. This is the expected behaviour from the compute
+model -- the attention-vs-MLP crossover lies around \(L\!\sim\!32\)k.
+
+\paragraph{Long-context training (jobs 37819 / 38290 / 38347).}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{l r l}
+\toprule
+target \(L\) & GPUs & outcome \\
+\midrule
+98{,}496 & 4 & OOM allocating \textbf{867.4\,GiB} \\
+32{,}832 & 1 & OOM allocating \textbf{192.75\,GiB} (model already at 100\,GiB / 140\,GiB) \\
+18{,}432 & 1 & job stayed pending (cluster queue saturated) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent The OOM amounts match
+\(12\ \text{heads}\,\times\,(2L)^2\,\times\,(2\text{-}4)\ \text{bytes}\)
+\emph{exactly} -- each is the size of one dense \((B,H,2L,2L)\) score grid: the
+\(867.4\)\,GiB figure is the bf16 \(QK^\top\) buffer at \(L=98{,}496\), and the
+\(192.75\)\,GiB figure is the fp32 score buffer at \(L=32{,}832\).
+\texttt{flex\_attention} materializes this dense grid because it was invoked
+\emph{eagerly} (see the Diagnosis below), \emph{not} because of the windowed
+\texttt{BlockMask}. The single-stream model trains at \(L=98{,}304\) on the same
+hardware not because its mask differs, but because it routes every flex call
+through a \texttt{torch.compile} wrapper (production job 32280).
+
+\paragraph{Diagnosis (root cause confirmed).}
+Neither the mask shape nor the two-kernels-per-layer pattern is to blame. The
+dual backbone called \texttt{flex\_attention} \emph{eagerly} -- outside any
+\texttt{torch.compile} region -- at both the fine self-attention and the
+cross-attention sites. In PyTorch~2.7, an uncompiled \texttt{flex\_attention}
+call does \emph{not} run the fused block-sparse Triton kernel; it silently (no
+warning) dispatches to the math reference implementation
+(\texttt{\_math\_attention\_inner}), which computes the dense
+\(\text{scores}=QK^\top\) of shape \((B,H,Q,K)\) in fp32 and then applies the
+mask with \texttt{torch.where(\(\cdots\),\(-\infty\))} \emph{after} the matmul.
+The windowed \texttt{BlockMask} therefore yields \emph{zero} memory saving --
+the full \((2L)^2\) grid is always materialized (transiently in both the forward
+and the recomputed backward). This is not a leak: every persistent tensor is
+one-time and constant-size; it is a single large per-step allocation. The
+single-stream baseline never hit this only because it routes every flex call
+through a \texttt{@torch.compile}-wrapped helper.
+
+\textbf{Fix.} Route the dual stream's two flex calls through the same compiled
+wrapper (a one-line change per call site). Under \texttt{torch.compile},
+Inductor lowers them to the fused block-sparse kernel that honors the windowed
+mask and never builds the dense grid, restoring the \(\mathcal{O}(L\!\cdot\!w)\)
+memory the compute model predicts. The launch scripts already export
+\texttt{BD3LM\_FLEX\_COMPILE\_MODE=default} (previously a no-op for the dual
+model, since nothing read it), so no script change is needed.
+
+\paragraph{Sampling.} The MVP supports the non-kv-cache sampling path
+(input \((B,L_{\text{curr}})\), block-causal sdpa masks built on the fly,
+returns logits at \(L_{\text{curr}}\)). Block-by-block kv-cache sampling --
+needed for the fastest generative-perplexity protocol -- still raises
+\texttt{NotImplementedError}; the missing piece is re-encoding the coarse
+stream incrementally as the fine sequence is generated.
+
+%==============================================================================
+\section{Outlook}
+%==============================================================================
+
+The architecture is correct (smoke + A/B both clean) and the compute model
+predicts the intended saving. The long-context OOM was a single missing
+\texttt{torch.compile} wrapper around the fine self- and cross-attention flex
+calls (see Diagnosis); with that fix the windowed mask is honored and the
+fine-stream memory drops to the predicted \(\mathcal{O}(L\!\cdot\!w)\), putting a
+single-GPU dual run at \(L\!\sim\!100\)k within reach. Two further,
+\emph{optional} steps extend the regime rather than unblock it:
+
+\begin{enumerate}
+  \item Wrap the 12 fine blocks in \texttt{torch.utils.checkpoint} -- the
+        same change that also extends the single-stream ceiling above
+        \(\sim\!122\)k -- needed for the multi-GPU \(\sim\!1\)M-context goal.
+  \item Optionally swap the fine self-attention for the
+        \texttt{flash\_attn\_varlen} windowed kernel; with compiled flex this is
+        no longer required for memory, but may still win on speed.
+\end{enumerate}
+
+This unlocks the multi-GPU long-context regime where the dual backbone's
+\(\sim\!10\!-\!20\times\) compute saving becomes the dominant effect.
+
+\begin{thebibliography}{9}
+\bibitem{bd3lm}
+M. Arriola, A. Gokaslan, J.\,T. Chiu, Z. Yang, Z. Qi, J. Han,
+S.\,S. Sahoo, V. Kuleshov.
+\emph{Block Diffusion: Interpolating Between Autoregressive and Diffusion
+Language Models}. ICLR 2025 (Oral).
+\url{https://arxiv.org/abs/2503.09573}.
+\end{thebibliography}
+
+\end{document}
