@@ -188,8 +188,15 @@ class CrossAttention(nn.Module):
     self.q_proj = nn.Linear(d_q, d_q, bias=False)
     self.kv_proj = nn.Linear(d_kv, 2 * d_q, bias=False)
     self.out_proj = nn.Linear(d_q, d_q)
-    self.out_proj.weight.data.zero_()
-    self.out_proj.bias.data.zero_()
+    # IMPORTANT: do NOT zero-init out_proj. The cross-attn residual in
+    # FineDualBlock is `gate_cross * out_proj(...)`, where `gate_cross` comes
+    # from a zero-init adaLN modulation. Zero-init'ing the projection TOO makes
+    # the product a dead zero: grad w.r.t. the gate is proportional to the
+    # projection output (=0) and grad w.r.t. the projection is proportional to
+    # the gate (=0), so neither ever leaves zero and cross-attention is
+    # permanently disabled. Standard adaLN-zero zeroes ONLY the gate; the output
+    # projection uses normal init (as the MLP here does), which lets the gate
+    # receive gradient and open. (See longctx marginal-collapse diagnosis.)
 
   def forward(self, q, kv, mask, use_sdpa: bool = False):
     """`mask` is a flex BlockMask when use_sdpa=False, else a dense bool tensor
@@ -286,8 +293,12 @@ class FineDualBlock(nn.Module):
     self.norm1 = LayerNorm(dim)
     self.qkv = nn.Linear(dim, 3 * dim, bias=False)
     self.self_proj = nn.Linear(dim, dim)
-    self.self_proj.weight.data.zero_()
-    self.self_proj.bias.data.zero_()
+    # IMPORTANT: do NOT zero-init self_proj (same deadlock as
+    # CrossAttention.out_proj). The self-attn residual is `gate1 * self_proj(...)`
+    # with `gate1` from a zero-init adaLN modulation; zeroing both factors pins
+    # self-attention at zero for the whole run, degenerating the fine stream into
+    # position-wise MLPs that collapse to the unigram marginal. Keep normal init;
+    # the zero-init gate opens via gradient (exactly as gate2/MLP already do).
 
     self.cross_attn = CrossAttention(dim, d_coarse, n_heads, dropout)
 

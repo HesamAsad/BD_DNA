@@ -441,6 +441,15 @@ def get_dataset(
     streaming=False, revision : Optional[str]=None, insert_eos=True, insert_special_tokens=True,
     dna_corpus_dir=None, dna_subset=None, dna_seq_column='sequence',
     dna_valid_frac=0.01, dna_num_files=None, dna_max_rows=None):
+  # Optional cap on the datasets.map() worker count for tokenize+group. The
+  # default (all visible cores, often 128 on a GPU node) deadlocks the grouping
+  # step when block_size is large (long-context: each group row is a multi-
+  # million-element tensor, and 128-way fork oversubscribes/serialises). Set
+  # BD3LM_DATA_NUM_PROC to a small number for long-context data prep. Unset =
+  # unchanged behaviour.
+  _env_np = os.environ.get('BD3LM_DATA_NUM_PROC')
+  if _env_np is not None:
+    num_proc = int(_env_np)
   eos_tag = ''
   if not insert_eos:
     eos_tag = '_eosFalse'

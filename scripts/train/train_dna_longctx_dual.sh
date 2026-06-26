@@ -46,7 +46,15 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 [ -f ~/.secrets/hf_token ] && source ~/.secrets/hf_token || true
 mkdir -p "$HF_HOME" "$TORCH_HOME" "$XDG_CACHE_HOME" outputs watch_folder logs sample_logs
 
-echo "[`date`] long-ctx DUAL DNA BD3-LM | host=$(hostname) | LSF=${LSB_JOBID:-local} | length=$LENGTH | block_size=$BLOCK_SIZE | global_batch=$GLOBAL_BATCH | shards=$DNA_NUM_FILES"
+# Unique wandb run per launch. The config derives `wandb.id = ${name}_${seed}`,
+# so a constant name reused the SAME wandb id every run -> runs overwrote each
+# other in the UI. Stamp the name with the LSF job id (or a timestamp locally)
+# so both the name AND the derived id are unique. Computed once here in bash, so
+# it stays identical across the DDP ranks Lightning launches.
+RUN_TAG="${LSB_JOBID:-$(date +%Y%m%d-%H%M%S)}"
+WANDB_NAME="bd3lm-dna-prok-dual-len${LENGTH}-bs${GLOBAL_BATCH}-${RUN_TAG}"
+
+echo "[`date`] long-ctx DUAL DNA BD3-LM | host=$(hostname) | LSF=${LSB_JOBID:-local} | length=$LENGTH | block_size=$BLOCK_SIZE | global_batch=$GLOBAL_BATCH | shards=$DNA_NUM_FILES | wandb=$WANDB_NAME"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv
 "$PYTHON" -c "import sys,torch; ok=torch.cuda.is_available(); print('torch',torch.__version__,'| cuda',ok,'| devices',torch.cuda.device_count()); sys.exit(0 if ok else 3)" \
   || { echo 'FATAL: torch sees no GPU.'; exit 3; }
@@ -69,7 +77,7 @@ nvidia-smi --query-gpu=index,name,memory.total --format=csv
     trainer.val_check_interval=2000 \
     trainer.limit_val_batches=50 \
     training.from_pretrained=null \
-    wandb.name=bd3lm-dna-prok-dual-len${LENGTH}-bs${GLOBAL_BATCH} \
+    wandb.name=$WANDB_NAME \
     mode=train
 
 echo "[`date`] long-ctx dual training exited"

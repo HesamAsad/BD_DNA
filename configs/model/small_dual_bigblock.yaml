@@ -1,0 +1,50 @@
+# DualStreamDIT (Variant 2) — BIG-BIDIRECTIONAL-BLOCK regime.
+#
+# Same architecture as small_dual, but intended for LARGE block_size (set at
+# launch, e.g. block_size=24576 or 98304) so the within-block BD3-LM diffusion
+# is BIDIRECTIONAL over a biologically meaningful window (10k-100k nt) instead
+# of 18 nt. Motivation: the small-block dual (block_size=18) was MEASURED to be
+# local-dominated — it does NOT use long-range context (the coarse/cross-attn
+# pathway is ~vestigial; see the 1kb/10kb shuffle disentanglement, jobs
+# 56206/56300). A large bidirectional block FORCES genuine long-range modelling.
+#
+# Design changes vs small_dual:
+#   - window_blocks = 1  (was 8). With a big block, the within-block bidirectional
+#     window IS the long-range context; cross-block is causal/AR. window_blocks=1
+#     gives one block of direct cross-block continuity; the rest is the coarse
+#     stream. Use window_blocks=0 for PURE within-block isolation (block_size ==
+#     the entire bidirectional window, everything cross-block via coarse).
+#
+# block_size / model.length (set at launch) MUST satisfy:
+#   - model.length % block_size == 0   (number of blocks N = length/block_size)
+#   - block_size % k_coarse(=6) == 0   (exact coarse alignment; 24576/49152/98304
+#     are all divisible by 6; 98304 = 2^15*3 divides cleanly by 6/12/24/...)
+#   - model.length % k_coarse == 0
+#
+# Regimes (see scripts/train/train_dna_bigblock_dual.sh):
+#   single 100k bidirectional block : block_size=98304  model.length=98304 (N=1;
+#                                     the coarse stream is inert at N=1 — this is
+#                                     effectively MDLM/full-bidirectional over 98k)
+#   big-block hierarchy @ 98k       : block_size=24576  model.length=98304 (N=4)
+#   1M hierarchy                    : block_size=98304  model.length=983040 (N=10)
+#                                     -> needs gradient checkpointing (not yet
+#                                     implemented); 8-16 GPU.
+name: small_dual_bigblock
+type: ddit
+hidden_size: 768
+cond_dim: 128
+length: 1024
+n_blocks: 12             # fine layers
+n_heads: 12              # fine heads
+scale_by_sigma: True
+dropout: 0.1
+tie_word_embeddings: True
+adaln: False
+attn_backend: flex       # required: fine self-attn + cross-attn use flex
+
+# Dual-stream specific:
+k_coarse: 6              # non-overlapping k-mer size for coarse stream
+window_blocks: 1         # SMALL for big blocks (was 8); the block IS the bidir window
+d_coarse: 384            # coarse hidden dim (smaller than d_fine)
+n_coarse_layers: 4       # coarse encoder depth
+n_heads_coarse: 6        # coarse heads (d_coarse / n_heads_coarse = head_dim)

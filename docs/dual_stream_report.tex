@@ -31,10 +31,14 @@ genomic context with a \emph{dual-stream} backbone: a cheap coarse encoder over
 \(k\)-mer-tokenized clean context, plus a fine block-diffusion stream with
 windowed self-attention and cross-attention to the coarse memory. We motivate
 the design against a latent-diffusion alternative, describe the architecture,
-and report end-to-end smoke / A-B / long-context experiments. The model trains
-correctly; the targeted compute saving holds in theory. An initial
-long-context run OOM'd, but the cause was a one-line implementation bug, not an
-inherent limitation: the dual backbone invoked \texttt{flex\_attention}
+and report end-to-end smoke / A-B / long-context experiments. The model runs
+end-to-end and the targeted compute saving holds in theory. Two independent
+implementation bugs surfaced and were fixed: (i)~a long-context \emph{memory}
+blow-up, and (ii)~a \emph{learning} bug in which the validation NELBO plateaued
+\emph{exactly} at the unigram (base-composition) entropy because a
+zero-initialization deadlock froze the fine stream's self- and cross-attention at
+zero, reducing the model to position-wise MLPs (Section~\ref{sec:collapse}).
+For~(i): the dual backbone invoked \texttt{flex\_attention}
 \emph{eagerly} (outside \texttt{torch.compile}), which silently falls back to a
 dense math reference path that materializes the full \(\mathcal{O}((2L)^2)\)
 score grid and ignores the windowed \texttt{BlockMask}. Routing the fine
@@ -356,6 +360,111 @@ returns logits at \(L_{\text{curr}}\)). Block-by-block kv-cache sampling --
 needed for the fastest generative-perplexity protocol -- still raises
 \texttt{NotImplementedError}; the missing piece is re-encoding the coarse
 stream incrementally as the fine sequence is generated.
+
+%==============================================================================
+\section{Correctness bug: collapse to the unigram marginal (and fix)}
+\label{sec:collapse}
+%==============================================================================
+
+The compiled-flex fix above resolves the long-context \emph{memory} blow-up, but
+a longer dual run then exposed a separate, more insidious \emph{learning} bug:
+training ran without error, yet the validation NELBO dropped quickly and then
+plateaued and never improved. We traced this to a zero-initialization deadlock
+that permanently disabled the fine stream's self- and cross-attention; the dual
+model was effectively a stack of position-wise MLPs and could only reproduce the
+base-composition marginal.
+
+\paragraph{Symptom and the marginal floor.}
+On the single-nucleotide prokaryote validation set, every position is scored
+(\texttt{attention\_mask} is all-ones, and \texttt{insert\_valid\_eos=False} so
+there is no document-boundary contamination) and the targets are
+\(99.96\%\)~\texttt{ACGT}. Under the MDLM(subs)+loglinear objective with weight
+\(-1/t\), a predictor that emits the constant unigram distribution scores a
+per-token NELBO equal to the unigram cross-entropy \(H_{\text{uni}}\) at
+\emph{every} noise level (the \(-1/t\) weight cancels the masking probability in
+expectation; confirmed by Monte-Carlo through the exact estimator:
+\(1.3821\pm0.0014\) nats). The relevant floors:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{l r r}
+\toprule
+predictor & NELBO (nats) & ppl \\
+\midrule
+uniform over 13 vocab ids (\(\ln 13\))         & 2.565 & 13.0 \\
+uniform over \texttt{ACGT} (\(\ln 4\))         & 1.386 & 4.0 \\
+\textbf{empirical unigram} \(H_{\text{uni}}\)  & \textbf{1.382} & 3.98 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent The dual long-context run (\(L=98{,}496\)) reached
+\texttt{val/nll}\(=1.38252\) by step 3000 and \emph{did not move} through step
+9762 -- i.e.\ exactly \(H_{\text{uni}}=1.382\) to four significant figures. The
+model had learned the base composition perfectly and \emph{nothing} conditional.
+(This rules out the natural alternative hypotheses: it is not high-noise terms
+flooring the average -- the marginal predictor already attains \(1.382\) at every
+\(t\), so an improving model could only go below it -- nor data gluing, since the
+scored targets are clean \texttt{ACGT}.)
+
+\paragraph{Diagnosis.} On the plateaued checkpoint (EMA, step 10262) a
+forward-level probe shows the prediction is independent of the input at all noise
+levels; a healthy single-stream run is shown alongside as a positive control.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{l r r}
+\toprule
+low-noise probe (\(t=0.15\)) & dual (collapsed) & single-stream (healthy) \\
+\midrule
+\(\mathrm{KL}(\text{pred}\,\|\,\text{marginal})\)             & 0.011       & 0.268 \\
+\(\mathrm{KL}(\text{pred}_A\,\|\,\text{pred}_B)\)             & 0.000       & 0.559 \\
+context-swap \(\mathrm{KL}(\text{ctx}_A\,\|\,\text{ctx}_B)\)  & \textbf{0.000} & 0.400 \\
+raw CE at \(t=0.02 \to 0.98\)                                 & flat 1.377  & 1.137 \(\to\) 1.258 \\
+best \texttt{val/nll}                                         & 1.3825 (=floor) & 1.180 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent Replacing the entire clean-context (\(x_0\)) half changes the dual's
+masked-position predictions by \emph{exactly} zero -- the conditioning path is
+dead. Inspecting the weights confirms why: in all 12 fine blocks the
+self-attention output projection \texttt{self\_proj} and the cross-attention
+output projection \texttt{CrossAttention.out\_proj} have norm \emph{exactly} 0
+(weight and bias), as do the adaLN self/cross gates; only the MLP path trained.
+
+\paragraph{Root cause.} \texttt{FineDualBlock} applies each attention as a gated
+residual \(x \mathrel{+}= g \cdot \mathrm{proj}(\cdot)\), where the adaLN gate
+\(g\) is zero-initialized (standard adaLN-zero). The bug is that the
+\emph{output projections were ALSO zero-initialized}:
+\begin{lstlisting}
+self.self_proj.weight.data.zero_(); self.self_proj.bias.data.zero_()  # FineDualBlock
+self.out_proj.weight.data.zero_();  self.out_proj.bias.data.zero_()   # CrossAttention
+\end{lstlisting}
+The product \(g\cdot\mathrm{proj}\) is then a multiplicative dead zero:
+\(\partial\mathcal{L}/\partial g \propto \mathrm{proj}(\cdot)=0\) and
+\(\partial\mathcal{L}/\partial\,\mathrm{proj} \propto g = 0\), so neither factor
+ever leaves zero and both attentions stay disabled for the entire run. The MLP
+escaped only because its inner linear is normally initialized, so its (also
+zero-init) gate received gradient and opened. The single-stream \texttt{dit.py}
+does \emph{not} hit this -- it zero-inits the gate but normal-inits the attention
+output projection -- which is precisely why the single-stream long-context run
+learns (\texttt{val/nll}~1.18, below the floor) while the dual collapsed. The
+collapse is therefore length-independent (the dual would also fail at
+\(L=1024\)); it is an initialization bug, not a long-context one.
+
+\textbf{Fix.} Remove the two projection zero-inits -- let \texttt{self\_proj} and
+\texttt{CrossAttention.out\_proj} use normal initialization, exactly as the MLP
+and as single-stream \texttt{dit.py} do -- and keep the adaLN gate zero-init for
+training stability. A small edit in \texttt{models/dit\_dual.py}.
+
+\paragraph{Verification.} A short dual run with the fix (\(L=4{,}608\), \(b=18\))
+trains as expected: \texttt{val/nll} drops monotonically \(1.3636 \to 1.3014\),
+clearly \emph{below} the \(1.382\) floor (the pre-fix run was pinned at
+\(1.3825\) indefinitely), and the projection norms leave zero
+(\texttt{self\_proj}\(\,\approx 17\), \texttt{out\_proj}\(\,\approx 16\) per
+block). The fixed long-context run (\(L=98{,}496\), 4\,\(\times\)\,H200) is
+training.
 
 %==============================================================================
 \section{Outlook}
