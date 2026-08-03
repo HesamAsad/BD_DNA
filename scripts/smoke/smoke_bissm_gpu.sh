@@ -23,10 +23,11 @@ export MAX_JOBS=${MAX_JOBS:-8}
 export TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-9.0}
 export USE_TF=0
 export TF_CPP_MIN_LOG_LEVEL=3
+export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 
 if ! "$PYTHON" -c "import mamba_ssm"; then
-  MAMBA_SKIP_CUDA_BUILD=TRUE "$PYTHON" -m pip install \
-    --user --no-deps --no-build-isolation mamba-ssm==2.2.4
+  MAMBA_KEEP_CUDA_BUILD=FALSE "$PYTHON" -m pip install \
+    --user --no-deps --no-build-isolation -r requirements-mamba.txt
 fi
 
 "$PYTHON" -u scripts/smoke/smoke_bissm_gpu.py

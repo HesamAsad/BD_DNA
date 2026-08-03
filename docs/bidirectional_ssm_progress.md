@@ -63,6 +63,11 @@ publicly accessible, so no unreleased source is assumed.
   package could not build because batch nodes expose the CUDA runtime without
   `nvcc`. Resolution: use Mamba-SSM 2.2.4's pure-Python/Triton installation
   (`MAMBA_SKIP_CUDA_BUILD=TRUE`) and keep the segment convolution in PyTorch.
+- LSF `96524`: model was not reached. Mamba-SSM 2.2.4 hard-imported its
+  optional Mamba-1 `selective_scan_cuda` extension, and the smoke script did
+  not put the repository root on `PYTHONPATH`. Resolution: pin the current
+  official pure-Python/Triton package by Git commit, install it with
+  `--no-deps`, and export the repository path explicitly.
 
 ## Deliberate first-version constraints
 

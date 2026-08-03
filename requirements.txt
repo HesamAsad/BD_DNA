@@ -19,9 +19,6 @@ timm==0.9.16
 transformers==4.49.0
 triton==3.3.1
 wandb==0.19.8
-# Official Mamba-2 Triton SSD backend. This release matches the repository's
-# torch 2.7 / Triton 3.3 stack and does not require the optional causal-conv1d
-# extension because SegmentMamba2 continues its convolution in PyTorch.
-# Install with: MAMBA_SKIP_CUDA_BUILD=TRUE pip install --no-build-isolation
-# --no-deps mamba-ssm==2.2.4
-mamba-ssm==2.2.4
+# The optional production Mamba-2 backend is pinned separately in
+# requirements-mamba.txt because it must be installed with --no-deps to retain
+# this environment's torch-coupled Triton version.

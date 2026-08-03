@@ -51,7 +51,7 @@ WANDB_NAME="bd3lm-dna-bissm-${MODE_TAG}-L${LENGTH}-B${BLOCK_SIZE}-${RUN_TAG}"
 echo "[$(date)] BiSSM DNA | host=$(hostname) | LSF=${LSB_JOBID:-local} | length=$LENGTH | block=$BLOCK_SIZE | right_prob=$RIGHT_FLANK_PROBABILITY | wandb=$WANDB_NAME"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv
 "$PYTHON" -c "import mamba_ssm,torch; assert torch.cuda.is_available(); print('torch',torch.__version__,'mamba',mamba_ssm.__version__,'gpus',torch.cuda.device_count())" || {
-  echo "FATAL: install requirements with: $PYTHON -m pip install --no-build-isolation -r requirements.txt"
+  echo "FATAL: install the pinned Triton backend with: MAMBA_KEEP_CUDA_BUILD=FALSE $PYTHON -m pip install --user --no-deps --no-build-isolation -r requirements-mamba.txt"
   exit 3
 }
 

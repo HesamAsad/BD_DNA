@@ -1,0 +1,4 @@
+# Official state-spaces/mamba, pinned after the H200/Blackwell kernel fix.
+# The local model uses only its pure-Python Triton SSD operators; it does not
+# need the optional nvcc-built Mamba-1 or causal-conv1d extensions.
+git+https://github.com/state-spaces/mamba.git@e9594ce1c732d97440f0332fdc43170a2294dbfa
