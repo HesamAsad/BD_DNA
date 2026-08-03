@@ -55,6 +55,7 @@ publicly accessible, so no unreleased source is assumed.
 - [x] Add multi-block C-a infilling sampler with a fixed right cache.
 - [x] Add cache equivalence, leakage, and gradient tests.
 - [x] Add production and smoke-test configurations/scripts.
+- [ ] Pass fused-vs-reference and end-to-end backward smoke on an H200.
 
 ## Deliberate first-version constraints
 
