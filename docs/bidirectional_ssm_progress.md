@@ -52,6 +52,7 @@ publicly accessible, so no unreleased source is assumed.
 - [x] Add single-active-block unbiased training integration.
 - [x] Add native block commit sampling integration.
 - [x] Add C-a right-flank preparation API.
+- [x] Add multi-block C-a infilling sampler with a fixed right cache.
 - [x] Add cache equivalence, leakage, and gradient tests.
 - [x] Add production and smoke-test configurations/scripts.
 

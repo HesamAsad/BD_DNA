@@ -78,3 +78,24 @@ def test_ca_objective_builds_right_cache_without_target_leakage():
   assert torch.isfinite(loss).all()
   assert model._last_right_flank is True
 
+
+def test_ca_sampler_keeps_right_cache_fixed_and_advances_left_cache():
+  torch.manual_seed(13)
+  config = _config(right_probability=1.0)
+  config.sampling.first_hitting = False
+  model = Diffusion(config, DNATokenizer())
+  left = torch.randint(8, 12, (1, 4))
+  right = torch.randint(8, 12, (1, 4))
+
+  completed = model.sample_infill_ca(
+    left_context=left,
+    right_context=right,
+    gap_length=8,
+    num_steps=2)
+
+  assert completed.shape == (1, 16)
+  torch.testing.assert_close(completed[:, :4], left)
+  torch.testing.assert_close(completed[:, -4:], right)
+  assert model.mask_index not in completed
+  assert model.backbone._sampling_left_cache.length == 12
+  assert model.backbone._sampling_right_cache.length == 4

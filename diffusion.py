@@ -616,7 +616,8 @@ class Diffusion(L.LightningModule):
     return p_x0
 
   @torch.no_grad()
-  def _ddpm_caching_update(self, x, t, dt, p_x0=None):
+  def _ddpm_caching_update(
+      self, x, t, dt, p_x0=None, first_hitting=None):
     _, move_chance_t = self.noise(t)
     _, move_chance_s = self.noise(t - dt)
     sigma_t = self._sigma_from_p(move_chance_t)
@@ -637,7 +638,9 @@ class Diffusion(L.LightningModule):
       p_x0 = p_x0.exp()
       p_x0 = self._nucleus_sample(p_x0)
 
-    if self.config.sampling.first_hitting:
+    if first_hitting is None:
+      first_hitting = self.config.sampling.first_hitting
+    if first_hitting:
       x_block = _sample_categorical(p_x0)
       # randomly and uniformly select an index in the block (among masked tokens)
       num_masked = (x[:, -self.block_size:] == self.mask_index).sum(-1)
@@ -1194,6 +1197,76 @@ class Diffusion(L.LightningModule):
         elif stop:
           break
     return x_accum, sampling_steps
+
+  @torch.no_grad()
+  def sample_infill_ca(
+      self,
+      left_context: torch.Tensor,
+      right_context: torch.Tensor,
+      gap_length: int,
+      num_steps: int,
+  ) -> torch.Tensor:
+    """C-a infilling with fixed right belief and advancing left belief.
+
+    Returns ``[left_context; generated_gap; right_context]``. The first
+    implementation requires a whole number of diffusion blocks so neither
+    padding nor observed target tokens can accidentally enter a boundary
+    cache.
+    """
+    if self.config.algo.backbone != 'bissm':
+      raise ValueError("sample_infill_ca requires algo.backbone=bissm")
+    if left_context.ndim != 2 or right_context.ndim != 2:
+      raise ValueError("left_context and right_context must be [batch, length]")
+    if left_context.shape[0] != right_context.shape[0]:
+      raise ValueError("left and right contexts must use the same batch size")
+    if gap_length <= 0 or gap_length % self.block_size:
+      raise ValueError(
+        f"gap_length must be a positive multiple of block_size={self.block_size}")
+    if num_steps <= 0:
+      raise ValueError("num_steps must be positive")
+
+    batch_size = left_context.shape[0]
+    self.backbone.reset_kv_cache(eval_batch_size=batch_size)
+    self.backbone._sampling_left_cache = self.backbone.prefill_left(
+      left_context, detach=True)
+    self.backbone.prepare_right_cache(right_context)
+    fixed_right = self.backbone._sampling_right_cache.clone()
+
+    generated_blocks = []
+    dt = 1.0 / num_steps
+    for _ in range(gap_length // self.block_size):
+      active = self._sample_prior(batch_size, self.block_size).to(self.device)
+      p_x0_cache = None
+      for step in range(num_steps):
+        if self.mask_index not in active:
+          break
+        # Use the fixed ancestral grid for batched C-a infilling. The optional
+        # first-hitting sampler selects individual mask positions and is a
+        # de-novo speed heuristic, not part of the C-a conditioning contract.
+        t_value = 1.0 - step * dt
+        t = torch.full(
+          (batch_size, 1), t_value,
+          device=self.device, dtype=self.dtype)
+        p_x0_cache, active = self._ddpm_caching_update(
+          x=active,
+          t=t,
+          dt=dt,
+          p_x0=p_x0_cache,
+          first_hitting=False)
+      if self.mask_index in active:
+        raise RuntimeError(
+          "C-a sampler finished with masked tokens; increase num_steps or "
+          "check the noise schedule")
+      generated_blocks.append(active)
+      # Committing the clean active block must not mutate the fixed right cache.
+      for actual, expected in zip(
+          self.backbone._sampling_right_cache.states, fixed_right.states):
+        if not torch.equal(actual.conv, expected.conv) \
+            or not torch.equal(actual.ssm, expected.ssm):
+          raise RuntimeError("The fixed C-a right cache was mutated")
+
+    gap = torch.cat(generated_blocks, dim=1)
+    return torch.cat((left_context, gap, right_context), dim=1)
   
   def _compute_entropy(self, x):
     _, counts = torch.unique(x, return_counts=True, sorted=False)
