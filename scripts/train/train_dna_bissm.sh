@@ -26,6 +26,8 @@ DNA_NUM_FILES=${DNA_NUM_FILES:-1}
 MAX_STEPS=${MAX_STEPS:-1000000}
 RIGHT_FLANK_PROBABILITY=${RIGHT_FLANK_PROBABILITY:-0.0}
 VAL_EVERY=${VAL_EVERY:-2000}
+VAL_BATCHES=${VAL_BATCHES:-50}
+NUM_WORKERS=${NUM_WORKERS:-16}
 WANDB_MODE=${WANDB_MODE:-online}
 
 if (( LENGTH % BLOCK_SIZE != 0 )); then
@@ -73,11 +75,12 @@ nvidia-smi --query-gpu=index,name,memory.total --format=csv
   loader.eval_global_batch_size="$GLOBAL_BATCH" \
   loader.batch_size="$MICRO_BATCH" \
   loader.eval_batch_size="$MICRO_BATCH" \
+  loader.num_workers="$NUM_WORKERS" \
   sampling.kv_cache=true \
   trainer.max_steps="$MAX_STEPS" \
   trainer.log_every_n_steps=10 \
   trainer.val_check_interval="$VAL_EVERY" \
-  trainer.limit_val_batches=50 \
+  trainer.limit_val_batches="$VAL_BATCHES" \
   training.from_pretrained=null \
   wandb.name="$WANDB_NAME" \
   mode=train \

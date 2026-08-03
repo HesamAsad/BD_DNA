@@ -82,6 +82,16 @@ publicly accessible, so no unreleased source is assumed.
   de-novo uses one direction and C-a uses two. This size is independent of the
   number of committed tokens.
 
+### Full training-stack smoke
+
+- LSF `96529`: the actual 100.69M model completed 10 optimizer steps on Carbon
+  DNA at length 1024 / block 256. Validation NLL moved from 2.6343 at global
+  step 2 to 2.2724 at step 10, and a checkpoint was saved. After
+  `Trainer.fit` reported `max_steps=10`, the job remained alive in teardown
+  with the auto-selected 128 persistent data workers, so it was terminated to
+  release the H200. The launcher now exposes and defaults to a bounded worker
+  count; a separate short run verifies clean process teardown.
+
 ## Deliberate first-version constraints
 
 - The first correct training objective samples one active block per sequence
