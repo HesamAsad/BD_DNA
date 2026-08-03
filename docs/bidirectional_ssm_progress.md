@@ -55,7 +55,7 @@ publicly accessible, so no unreleased source is assumed.
 - [x] Add multi-block C-a infilling sampler with a fixed right cache.
 - [x] Add cache equivalence, leakage, and gradient tests.
 - [x] Add production and smoke-test configurations/scripts.
-- [ ] Pass fused-vs-reference and end-to-end backward smoke on an H200.
+- [x] Pass fused-vs-reference and end-to-end backward smoke on an H200.
 
 ### GPU acceptance attempts
 
@@ -68,6 +68,19 @@ publicly accessible, so no unreleased source is assumed.
   not put the repository root on `PYTHONPATH`. Resolution: pin the current
   official pure-Python/Triton package by Git commit, install it with
   `--no-deps`, and export the repository path explicitly.
+- LSF `96525`: **passed** on one H200. BF16 fused-vs-reference output maximum
+  absolute difference was `0.0078125`; split-vs-one-shot fused continuation had
+  the same maximum difference; convolution states matched exactly; the
+  two-layer prefix/active/suffix backward pass completed; both input caches
+  remained bitwise unchanged. The smoke ended with `BISSM_GPU_SMOKE_OK`.
+
+## Initial production geometry
+
+- 100.69M trainable parameters at width 768 / 12 layers.
+- Block size 256, Mamba state 64, convolution width 4, expansion 2, chunk 128.
+- One-direction batch-1 recurrent cache: approximately 2.40 MiB in BF16;
+  de-novo uses one direction and C-a uses two. This size is independent of the
+  number of committed tokens.
 
 ## Deliberate first-version constraints
 

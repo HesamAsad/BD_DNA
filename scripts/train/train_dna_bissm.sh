@@ -25,6 +25,8 @@ MICRO_BATCH=${MICRO_BATCH:-8}
 DNA_NUM_FILES=${DNA_NUM_FILES:-1}
 MAX_STEPS=${MAX_STEPS:-1000000}
 RIGHT_FLANK_PROBABILITY=${RIGHT_FLANK_PROBABILITY:-0.0}
+VAL_EVERY=${VAL_EVERY:-2000}
+WANDB_MODE=${WANDB_MODE:-online}
 
 if (( LENGTH % BLOCK_SIZE != 0 )); then
   echo "FATAL: LENGTH must be divisible by BLOCK_SIZE (L=$LENGTH B=$BLOCK_SIZE)"
@@ -39,6 +41,10 @@ export TOKENIZERS_PARALLELISM=false
 export USE_TF=0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 mkdir -p "$HF_HOME" "$TORCH_HOME" "$XDG_CACHE_HOME" outputs watch_folder logs sample_logs
+
+EXTRA_ARGS=()
+[ -n "${DNA_MAX_ROWS:-}" ] && EXTRA_ARGS+=( "data.dna_max_rows=$DNA_MAX_ROWS" )
+[ "$WANDB_MODE" = "off" ] && EXTRA_ARGS+=( "wandb=null" )
 
 RUN_TAG=${LSB_JOBID:-$(date +%Y%m%d-%H%M%S)}
 if [ "$RIGHT_FLANK_PROBABILITY" = "0.0" ]; then
@@ -70,10 +76,11 @@ nvidia-smi --query-gpu=index,name,memory.total --format=csv
   sampling.kv_cache=true \
   trainer.max_steps="$MAX_STEPS" \
   trainer.log_every_n_steps=10 \
-  trainer.val_check_interval=2000 \
+  trainer.val_check_interval="$VAL_EVERY" \
   trainer.limit_val_batches=50 \
   training.from_pretrained=null \
   wandb.name="$WANDB_NAME" \
-  mode=train
+  mode=train \
+  ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 
 echo "[$(date)] BiSSM training exited"
