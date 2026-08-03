@@ -60,6 +60,10 @@ EXTRA_ARGS=()
 
 RUN_TAG=${LSB_JOBID:-$(date +%Y%m%d-%H%M%S)}
 WANDB_NAME="bd3lm-dna-prok-xf-L${LENGTH}-B${BLOCK_SIZE}-${RUN_TAG}"
+# Hydra's default run directory is timestamped to the second, so two jobs
+# launched together land in the same directory and interleave their
+# checkpoints. Stamp the job id instead; it also makes a resume path obvious.
+RUN_DIR=${RUN_DIR:-outputs/carbon-prokaryote/$(date +%Y.%m.%d)/xf-${RUN_TAG}}
 
 echo "[$(date)] Transformer BD3-LM prokaryote control | host=$(hostname) | LSF=${LSB_JOBID:-local} | length=$LENGTH | block=$BLOCK_SIZE | attn=$ATTN | wandb=$WANDB_NAME"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv
@@ -86,6 +90,7 @@ nvidia-smi --query-gpu=index,name,memory.total --format=csv
   trainer.limit_val_batches="$VAL_BATCHES" \
   training.from_pretrained=null \
   wandb.name="$WANDB_NAME" \
+  hydra.run.dir="$RUN_DIR" \
   mode=train \
   ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 
