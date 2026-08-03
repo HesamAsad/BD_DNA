@@ -51,6 +51,11 @@ class Diffusion(L.LightningModule):
     self.cross_attn = self.config.algo.cross_attn
     self.ignore_bos = self.config.algo.ignore_bos
     self.mdlm_loss_scale = self.config.algo.mdlm_loss_scale
+    # L_use: counterfactual coarse-route incentive (P2 / plan Stage 3). Off by
+    # default; enable with algo.l_use_weight>0. margin is in nats.
+    self.l_use_weight = float(self.config.algo.get('l_use_weight', 0.0))
+    self.l_use_margin = float(self.config.algo.get('l_use_margin', 0.2))
+    self._last_l_use = None
     if (not hasattr(self.tokenizer, 'mask_token')
         or self.tokenizer.mask_token is None):
       self.mask_index = self.vocab_size
@@ -322,14 +327,16 @@ class Diffusion(L.LightningModule):
     assert sigma.ndim == 1, sigma.shape
     return sigma
 
-  def forward(self, x, sigma, sample_mode=False, store_kv=False):
+  def forward(self, x, sigma, sample_mode=False, store_kv=False,
+              coarse_ablate=None):
     """Returns log score."""
     sigma = self._process_sigma(sigma)
     with torch.amp.autocast('cuda', dtype=torch.float32):
       if self.config.algo.name == 'bd3lm':
-        logits = self.backbone(x, sigma,
-                              store_kv=store_kv,
-                              sample_mode=sample_mode)
+        bb_kwargs = dict(store_kv=store_kv, sample_mode=sample_mode)
+        if coarse_ablate is not None:   # only the dual backbone accepts this
+          bb_kwargs['coarse_ablate'] = coarse_ablate
+        logits = self.backbone(x, sigma, **bb_kwargs)
       elif self.config.algo.name == 'ar':
         if self.config.algo.backbone == 'hf_dit':
           logits = self.backbone(x, None)     
@@ -407,6 +414,14 @@ class Diffusion(L.LightningModule):
     log('trainer/tokens_per_s', total_tok / elapsed)
     if torch.cuda.is_available():
       log('trainer/gpu_mem_gb', torch.cuda.max_memory_allocated() / 2**30)
+    # Live adaLN gate magnitudes for the dual stream (cheap: gates are weight-
+    # constants under time_conditioning=false). gate_cross / gate_cross_over_self
+    # track whether the COARSE (long-range) pathway is engaging or atrophying.
+    if hasattr(self.backbone, 'gate_stats'):
+      for k, v in self.backbone.gate_stats().items():
+        log(f'gates/{k}', v)
+    if getattr(self, '_last_l_use', None) is not None:
+      log('trainer/l_use', self._last_l_use)
 
   def on_validation_epoch_start(self):
     self.metrics.reset()
@@ -901,6 +916,22 @@ class Diffusion(L.LightningModule):
       dim=-1,
       index=x0[:, :, None]).squeeze(-1)
     loss = loss_scale * log_p_theta
+
+    # L_use (P2 incentive): margin-ranking term that rewards the TRUE coarse memory
+    # for beating a coarse-SHUFFLED counterfactual on masked tokens, so the
+    # long-range route earns gradient the plain diffusion loss never gives it.
+    # Self-targeting: where coarse is uninformative (random background) both CEs
+    # match and softplus saturates with ~no gradient; only tokens the coarse route
+    # can help (cross-block echoes) drive it. Second forward => ~2x step cost.
+    if self.training and self.l_use_weight > 0 and self.cross_attn:
+      shuf_output = self.forward(x_input, sigma=sigma, coarse_ablate='shuffle')
+      log_p_shuf = torch.gather(
+        input=shuf_output, dim=-1, index=x0[:, :, None]).squeeze(-1)
+      masked = (xt == self.mask_index).to(loss.dtype)
+      l_use = F.softplus(
+        (-log_p_theta) - (-log_p_shuf) + self.l_use_margin) * masked
+      loss = loss + self.l_use_weight * l_use
+      self._last_l_use = (l_use.sum() / masked.sum().clamp(min=1)).detach()
     return loss
 
   def _loss(self, x0, attention_mask, t=None, sampling_eps_min=None, sampling_eps_max=None):

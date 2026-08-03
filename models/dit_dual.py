@@ -62,6 +62,7 @@ from functools import partial
 
 import einops
 from einops import rearrange
+import flash_attn          # for apply_rotary_emb_torch (aligned cross-attention)
 import huggingface_hub
 import omegaconf
 import torch
@@ -198,18 +199,46 @@ class CrossAttention(nn.Module):
     # projection uses normal init (as the MLP here does), which lets the gate
     # receive gradient and open. (See longctx marginal-collapse diagnosis.)
 
-  def forward(self, q, kv, mask, use_sdpa: bool = False):
+  def forward(self, q, kv, mask, use_sdpa: bool = False, rotary_qk=None,
+              add_mask=None):
     """`mask` is a flex BlockMask when use_sdpa=False, else a dense bool tensor
-    of shape (Lq, Lk) (broadcast over batch & heads)."""
+    of shape (Lq, Lk) (broadcast over batch & heads).
+
+    `rotary_qk` (B3 "aligned pointer" ablation, model.cross_align=true): a tuple
+    (cos_q, sin_q, cos_k, sin_k) placing fine queries and coarse keys on ONE
+    SHARED nucleotide coordinate system, so the relative offset (p - k*j) between
+    a fine position p and the coarse token j covering nucleotides [k*j, k*j+k) is
+    directly computable by the attention. WITHOUT this the module has NO
+    positional signal at all -- only the block-causal mask, which says "you may
+    look at blocks < i" but nothing about WHERE within them -- so a fixed-offset
+    copy has to be implemented as a content-reconstructed pointer. That is the
+    prime suspect for the rung-B failure (val/nll stuck at ln4 for 6000 steps)."""
     B, Lq, _ = q.shape
     Lk = kv.shape[1]
-    Q = self.q_proj(self.norm_q(q)).view(
-      B, Lq, self.n_heads, self.head_dim).transpose(1, 2)
+    Q = self.q_proj(self.norm_q(q)).view(B, Lq, self.n_heads, self.head_dim)
     KV = self.kv_proj(self.norm_kv(kv)).view(
       B, Lk, 2, self.n_heads, self.head_dim)
-    K = KV[:, :, 0].transpose(1, 2)
-    V = KV[:, :, 1].transpose(1, 2)
-    if use_sdpa:
+    K = KV[:, :, 0]
+    V = KV[:, :, 1]
+    if rotary_qk is not None:
+      cos_q, sin_q, cos_k, sin_k = rotary_qk
+      with torch.amp.autocast('cuda', enabled=False):
+        Q = flash_attn.layers.rotary.apply_rotary_emb_torch(
+          Q.float(), cos_q.to(Q.dtype).float(), sin_q.to(Q.dtype).float()).to(V.dtype)
+        K = flash_attn.layers.rotary.apply_rotary_emb_torch(
+          K.float(), cos_k.to(K.dtype).float(), sin_k.to(K.dtype).float()).to(V.dtype)
+    Q = Q.transpose(1, 2)
+    K = K.transpose(1, 2)
+    V = V.transpose(1, 2)
+    if add_mask is not None:
+      # A2 relative-position bias path: `add_mask` (1,H,Lq,Lk) is a FLOAT additive
+      # bias that already folds in the block-causal mask (disallowed keys = -inf)
+      # plus the learned bucketed fine->coarse offset bias. Dense sdpa so the bias
+      # applies per (query, key) pair.
+      out = F.scaled_dot_product_attention(Q, K, V, attn_mask=add_mask)
+      finite = torch.isfinite(add_mask).any(dim=-1, keepdim=True)   # zero dead rows
+      out = torch.where(finite, out, out.new_zeros(()))
+    elif use_sdpa:
       out = F.scaled_dot_product_attention(Q, K, V, attn_mask=mask)
       # A fully-masked query row (e.g. the first block, which has no past coarse
       # tokens under the M_OBC alignment) makes sdpa's softmax return NaN, while
@@ -282,7 +311,7 @@ class FineDualBlock(nn.Module):
      3) MLP. All adaLN-modulated by the diffusion timestep."""
 
   def __init__(self, n: int, dim: int, n_heads: int,
-               d_coarse: int, cond_dim: int,
+               d_coarse: int, cond_dim: int, gather_dim: int = 0,
                mlp_ratio: int = 4, dropout: float = 0.0):
     super().__init__()
     assert dim % n_heads == 0
@@ -301,6 +330,10 @@ class FineDualBlock(nn.Module):
     # the zero-init gate opens via gradient (exactly as gate2/MLP already do).
 
     self.cross_attn = CrossAttention(dim, d_coarse, n_heads, dropout)
+    # B0/B1 diagnostic probes: replace cross-attention with a HARD-WIRED gather of
+    # the known-correct source, removing the selection/search problem entirely so
+    # that representation+decoding can be tested on its own.
+    self.gather_proj = nn.Linear(gather_dim, dim) if gather_dim else None
 
     self.norm2 = LayerNorm(dim)
     self.mlp = nn.Sequential(
@@ -315,7 +348,8 @@ class FineDualBlock(nn.Module):
     self.adaLN_modulation.bias.data.zero_()
 
   def forward(self, x, c_mem, rotary_cos_sin, t_cond, self_mask, cross_mask,
-              sample_mode: bool = False):
+              sample_mode: bool = False, cross_rotary=None,
+              gathered=None, force_gate_cross=None, cross_add_mask=None):
     """If sample_mode=True, `x` has shape (B, L_curr, d) (no xt/x0 split),
     masks are dense bool tensors, and attention uses sdpa. Otherwise (training),
     `x` is (B, 2L, d), masks are flex BlockMasks, and attention uses flex."""
@@ -356,8 +390,18 @@ class FineDualBlock(nn.Module):
     x = x + gate1 * self.self_proj(attn_out)
 
     # 2) Cross-attention to coarse memory
-    x = x + gate_cross * self.cross_attn(
-      x, c_mem, mask=cross_mask, use_sdpa=sample_mode)
+    # Long-range route. `force_gate_cross` bypasses the zero-init adaLN gate: without
+    # it, ANY probe here is uninterpretable when it nulls, because the gate can hold
+    # the route off (measured: gate_cross stayed ~0.044 in the B3 aligned-pointer run,
+    # so improved addressing had no path to express itself in the loss).
+    if force_gate_cross is not None:
+      gate_cross = force_gate_cross
+    if gathered is not None:
+      x = x + gate_cross * self.gather_proj(gathered)
+    else:
+      x = x + gate_cross * self.cross_attn(
+        x, c_mem, mask=cross_mask, use_sdpa=sample_mode, rotary_qk=cross_rotary,
+        add_mask=cross_add_mask)
 
     # 3) MLP
     x_norm = self.norm2(x) * (1 + scale2) + shift2
@@ -392,6 +436,36 @@ class DualStreamDIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     self.n = config.model.length
     self.block_size = config.block_size
     self.k_coarse = getattr(config.model, 'k_coarse', 6)
+    # B3 "aligned pointer" ablation. When true, fine queries and coarse keys are
+    # placed on a SHARED nucleotide coordinate system in the cross-attention (see
+    # CrossAttention.forward). Default false = the original position-blind
+    # cross-attention, so this is a controlled A/B, not a silent change.
+    self.cross_align = bool(getattr(config.model, 'cross_align', False))
+    # A2 addressing repair: learned ADDITIVE relative-position bias on the
+    # fine->coarse cross-attention logits, over signed log-bucketed nucleotide
+    # offset delta = p_fine - k*j_coarse. Directly targets the confirmed SELECTION
+    # failure (the route can store+decode but cannot LOCATE the right coarse token).
+    # Default off = original position-blind cross-attention (controlled A/B).
+    self.cross_rel_bias = bool(getattr(config.model, 'cross_rel_bias', False))
+    self.cross_rel_buckets = int(getattr(config.model, 'cross_rel_buckets', 64))
+    if self.cross_rel_bias:
+      self.cross_bias_table = nn.Parameter(
+        torch.zeros(self.cross_rel_buckets, int(config.model.n_heads)))
+    # --- B0/B1 diagnostic probes (decompose encode -> select -> decode) ---
+    #  'attn'          : normal learned cross-attention (default, ships).
+    #  'gather_fine'   : B0 ORACLE. Hand each position the CLEAN fine embedding at
+    #                    i-gather_offset. For the duplication task that IS the answer,
+    #                    so it must solve instantly; if not, the benchmark / masking /
+    #                    output head is broken.
+    #  'gather_coarse' : B1. Hand each position ONLY the correct coarse token
+    #                    j*=(i-gather_offset)//k. Selection is removed, so this asks
+    #                    exactly: do coarse k-mer states preserve the base, and can the
+    #                    decoder extract it? Isolates representation+decoding.
+    # `force_gate_cross` overrides the zero-init adaLN gate so a null is interpretable.
+    self.cross_mode = str(getattr(config.model, 'cross_mode', 'attn'))
+    self.gather_offset = int(getattr(config.model, 'gather_offset', 0))
+    _fg = getattr(config.model, 'force_gate_cross', None)
+    self.force_gate_cross = None if _fg in (None, '', 'null', 'None') else float(_fg)
     self.window_blocks = getattr(config.model, 'window_blocks', 8)
 
     d_fine = config.model.hidden_size
@@ -430,9 +504,14 @@ class DualStreamDIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
       CoarseBlock(d_coarse, n_heads_coarse)
       for _ in range(n_coarse_layers)
     ])
+    # gather width depends on which source the B0/B1 probe hands the block
+    # (defined here, where d_fine / d_coarse are in scope)
+    self.gather_dim = {'gather_fine': d_fine,
+                       'gather_coarse': d_coarse}.get(self.cross_mode, 0)
     self.fine_blocks = nn.ModuleList([
       FineDualBlock(n=self.n, dim=d_fine, n_heads=n_heads_fine,
                     d_coarse=d_coarse, cond_dim=cond_dim,
+                    gather_dim=self.gather_dim,
                     dropout=getattr(config.model, 'dropout', 0.0))
       for _ in range(n_fine_layers)
     ])
@@ -471,6 +550,33 @@ class DualStreamDIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
   # Same shim as DIT.gen_mask so Diffusion._validate_configuration doesn't trip.
   def gen_mask(self, seqlen, block_size, attn_backend='flex'):
     return
+
+  @torch.no_grad()
+  def gate_stats(self):
+    """Mean adaLN gate magnitudes + attn-proj norms across the fine blocks, at
+    the constant t_cond (sigma=0; gates are weight-constants under
+    time_conditioning=false). Cheap (~12 small matmuls) -> safe to log every
+    train step. `gate_cross` / `gate_cross_over_self` track whether the COARSE
+    (long-range) cross-attention pathway is engaging or atrophying."""
+    dev = next(self.parameters()).device
+    t_cond = F.silu(self.sigma_map(torch.zeros(1, device=dev)))   # (1, cond_dim)
+    g1 = gc = g2 = 0.0
+    n = len(self.fine_blocks)
+    for blk in self.fine_blocks:
+      mod = blk.adaLN_modulation(t_cond).chunk(7, dim=-1)
+      # order: shift1, scale1, gate1, gate_cross, shift2, scale2, gate2
+      g1 = g1 + mod[2].abs().mean()
+      gc = gc + mod[3].abs().mean()
+      g2 = g2 + mod[6].abs().mean()
+    g1, gc, g2 = g1 / n, gc / n, g2 / n
+    return {
+      'gate1': g1, 'gate_cross': gc, 'gate2': g2,
+      'gate_cross_over_self': gc / (g1 + 1e-9),
+      'cross_out_norm': torch.stack(
+        [b.cross_attn.out_proj.weight.norm() for b in self.fine_blocks]).mean(),
+      'self_proj_norm': torch.stack(
+        [b.self_proj.weight.norm() for b in self.fine_blocks]).mean(),
+    }
 
   def _gen_sampling_masks(self, L_curr: int):
     """Dense bool masks for sdpa sampling at the current generation length.
@@ -516,7 +622,108 @@ class DualStreamDIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     cross_mask = coarse_idx <= max_coarse
     return self_mask, cross_mask
 
-  def forward(self, indices, sigma, sample_mode=False, store_kv=False):
+  @staticmethod
+  def _apply_coarse_ablate(c, spec):
+    """Counterfactual on the coarse memory (B, L/k, d_coarse), for the L_use
+    incentive probe. 'zero' -> no coarse info; 'shuffle' -> permute coarse tokens
+    along the sequence axis (dim=1) so retrieval-by-position is destroyed while the
+    tensor stays a valid, same-statistics feature matrix. Leak-safe: c is derived
+    from x0 only, so ablating it can only REMOVE information, never add any."""
+    if spec is None:
+      return c
+    if spec == 'zero':
+      return torch.zeros_like(c)
+    if spec == 'shuffle':
+      perm = torch.randperm(c.shape[1], device=c.device)
+      return c[:, perm, :]
+    raise ValueError(f'unknown coarse_ablate spec: {spec}')
+
+  @staticmethod
+  def _rel_bucket(delta, num_buckets, max_dist):
+    """Signed, symmetric, half-exact-half-log bucketing of an integer offset
+    (T5-style). delta in (-max_dist, max_dist) -> bucket id in [0, num_buckets)."""
+    n = num_buckets // 2
+    ret = (delta > 0).to(torch.long) * n
+    d = delta.abs()
+    max_exact = n // 2
+    small = d < max_exact
+    large = max_exact + (
+      torch.log(d.float().clamp(min=1.0) / max_exact)
+      / math.log(max(max_dist, max_exact + 1) / max_exact) * (n - max_exact)
+    ).to(torch.long)
+    large = large.clamp(max=n - 1)
+    return ret + torch.where(small, d, large)
+
+  def _build_cross_add_mask(self, device):
+    """A2: (1, H, 2n, n_coarse) FLOAT additive bias for the cross-attention =
+    learned bucketed relative-offset bias + block-causal mask (-inf on disallowed
+    keys). Computed once per forward, shared across all fine blocks."""
+    if not self.cross_rel_bias:
+      return None
+    n, k, ncoarse, bs = self.n, self.k_coarse, self.n_coarse_tokens, self.block_size
+    q = torch.arange(2 * n, device=device)
+    x0_flag = q >= n
+    p = torch.where(x0_flag, q - n, q)                       # fine nucleotide coord
+    kj = torch.arange(ncoarse, device=device) * k            # coarse start nucleotide
+    delta = p[:, None] - kj[None, :]                         # (2n, ncoarse)
+    bucket = self._rel_bucket(delta, self.cross_rel_buckets, n)
+    bias = self.cross_bias_table[bucket]                     # (2n, ncoarse, H)
+    bias = bias.permute(2, 0, 1).unsqueeze(0).to(torch.bfloat16)   # (1, H, 2n, ncoarse)
+    # block-causal allow-mask (same rule as fine_to_coarse_mask)
+    block_q = p // bs
+    nvis = torch.where(x0_flag, block_q + 1, block_q) * bs
+    max_coarse = nvis // k - 1                               # (2n,)
+    allow = torch.arange(ncoarse, device=device)[None, :] <= max_coarse[:, None]
+    bias = bias.masked_fill(~allow[None, None], float('-inf'))
+    return bias
+
+  def _build_gathered(self, x, c):
+    """B0/B1 probes: hard-wire the pointer to the source at i - gather_offset, so the
+    SELECTION problem is removed and only representation+decoding is under test.
+    Returns (B, 2n, d_src) aligned with the [xt; x0] query stream, zeroed where the
+    source position does not exist (i < offset)."""
+    if self.cross_mode == 'attn':
+      return None
+    D, n = self.gather_offset, self.n
+    idx = torch.arange(n, device=x.device) - D
+    valid = (idx >= 0).view(1, -1, 1)
+    idx = idx.clamp(min=0)
+    if self.cross_mode == 'gather_fine':          # B0 oracle: the clean source itself
+      g = x[:, n:, :].index_select(1, idx)
+    elif self.cross_mode == 'gather_coarse':      # B1: only the correct coarse token
+      j = (idx // self.k_coarse).clamp(max=self.n_coarse_tokens - 1)
+      g = c.index_select(1, j)
+    else:
+      raise ValueError(f'unknown cross_mode {self.cross_mode}')
+    g = g * valid.to(g.dtype)
+    return torch.cat([g, g], dim=1)
+
+  def _build_cross_rotary(self, rotary_f):
+    """Shared-coordinate rotary for fine->coarse cross-attention (B3 ablation).
+
+    `rotary_f` is the FINE rotary table for positions 0..n-1 (fine head_dim).
+      Fine queries : the training stream is [xt; x0], each half indexed 0..n-1
+                     (matching how self-attention applies rotary per half), so
+                     cos_q tiles the base table twice -> (2n, D/2).
+      Coarse keys  : coarse token j spans nucleotides [k*j, k*j+k), so its
+                     coordinate is k*j. Subsampling the SAME fine table every k
+                     yields exactly positions 0, k, 2k, ... -> (n_coarse, D/2).
+    Using ONE table for both guarantees a shared coordinate frame, so the offset
+    (p - k*j) that a fixed-distance copy needs is directly representable by the
+    attention instead of having to be reconstructed from content."""
+    if not self.cross_align:
+      return None
+    cos, sin = rotary_f
+    half = cos.shape[-1] // 2
+    base_c = cos[0, :, 0, 0, :half]
+    base_s = sin[0, :, 0, 0, :half]
+    return (torch.cat([base_c, base_c], dim=0),
+            torch.cat([base_s, base_s], dim=0),
+            base_c[::self.k_coarse],
+            base_s[::self.k_coarse])
+
+  def forward(self, indices, sigma, sample_mode=False, store_kv=False,
+              coarse_ablate=None):
     """
     Training: indices is (B, 2L) = [xt; x0]. Returns (B, L, vocab) on xt half.
 
@@ -569,11 +776,19 @@ class DualStreamDIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     rotary_c = self.rotary_emb_coarse(c)
     for block in self.coarse_blocks:
       c = block(c, rotary_c)
+    c = self._apply_coarse_ablate(c, coarse_ablate)
     rotary_f = self.rotary_emb(x[:, :self.n])
+    cross_rot = self._build_cross_rotary(rotary_f)
+    gathered = self._build_gathered(x, c)
+    cross_add = self._build_cross_add_mask(x.device)
     with torch.amp.autocast('cuda', dtype=torch.bfloat16):
       for block in self.fine_blocks:
         x = block(x, c, rotary_f, t_cond,
                   self_mask=self.self_block_mask,
-                  cross_mask=self.cross_block_mask)
+                  cross_mask=self.cross_block_mask,
+                  cross_rotary=cross_rot,
+                  gathered=gathered,
+                  force_gate_cross=self.force_gate_cross,
+                  cross_add_mask=cross_add)
       x = self.output_layer(x, t_cond)
     return x[:, :self.n]

@@ -79,11 +79,15 @@ fi
 # doesn't tokenize all 557k sequences.
 EXTRA=()
 [ -n "${DNA_MAX_ROWS:-}" ] && EXTRA+=( "data.dna_max_rows=$DNA_MAX_ROWS" )
+# Point at a pre-built non-carbon corpus (e.g. human-lr98304 from
+# scripts/eval/build_human_longrange.py). Caches must already exist on disk.
+[ -n "${DATA_TRAIN:-}" ] && EXTRA+=( "data.train=$DATA_TRAIN" )
+[ -n "${DATA_VALID:-}" ] && EXTRA+=( "data.valid=$DATA_VALID" )
 [ -f ~/.secrets/hf_token ] && source ~/.secrets/hf_token || true
 mkdir -p "$HF_HOME" "$TORCH_HOME" "$XDG_CACHE_HOME" outputs watch_folder logs sample_logs
 
 RUN_TAG="${LSB_JOBID:-$(date +%Y%m%d-%H%M%S)}"
-WANDB_NAME="bd3lm-dna-prok-bigblock-B${BLOCK_SIZE}-L${LENGTH}-${RUN_TAG}"
+WANDB_NAME="bd3lm-dna-${DATA_TAG:-prok}-bigblock-B${BLOCK_SIZE}-L${LENGTH}-${RUN_TAG}"
 
 echo "[`date`] BIG-BLOCK DUAL | host=$(hostname) | LSF=${LSB_JOBID:-local} | block=$BLOCK_SIZE | length=$LENGTH | N_blocks=$N_BLOCKS | global_batch=$GLOBAL_BATCH | wandb=$WANDB_NAME"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv

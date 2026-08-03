@@ -36,7 +36,10 @@ ap.add_argument('--max_scan', type=int, default=60000)
 args = ap.parse_args()
 L = args.length
 assert L % args.shuf_chunk == 0, f'{L} not divisible by shuf_chunk {args.shuf_chunk}'
-assert L % 18 == 0 and L % 6 == 0
+# The cache is just tokens chunked to length L; block_size divisibility is the
+# model's concern at eval time (block=18 needs L%18, block=24576 needs L%24576).
+# Here only k_coarse(=6) matters (coarse encode) plus the shuffle chunk above.
+assert L % 6 == 0, f'{L} not divisible by k_coarse=6'
 
 # DNATokenizer mapping: A=8 C=9 G=10 T=11 N=12, anything else -> [UNK]=7.
 lut = np.full(256, 7, dtype=np.int32)

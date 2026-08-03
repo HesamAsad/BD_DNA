@@ -725,21 +725,15 @@ def get_dataloaders(config, tokenizer, skip_train=False,
                 * config.trainer.num_nodes
                 * num_gpus
                 * config.trainer.accumulate_grad_batches))
-    if config.loader.global_batch_size % (
-      num_gpus * config.trainer.accumulate_grad_batches) != 0:
-      raise ValueError(
-        f'Train Batch Size {config.training.batch_size}'
-        f'not divisible by {num_gpus} gpus with accumulation '
-        f'{config.trainer.accumulate_grad_batches}.')
   if config.loader.global_batch_size % (
     num_gpus * config.trainer.accumulate_grad_batches) != 0:
     raise ValueError(
-      f'Train Batch Size {config.training.batch_size}'
+      f'Train Batch Size {config.loader.batch_size} '
       f'not divisible by {num_gpus} gpus with accumulation '
       f'{config.trainer.accumulate_grad_batches}.')
   if config.loader.eval_global_batch_size % num_gpus != 0:
     raise ValueError(
-      f'Eval Batch Size for {config.eval.batch_size} '
+      f'Eval Batch Size {config.loader.eval_batch_size} '
       f'not divisible by {num_gpus}.')
   if skip_train:
     train_set = None

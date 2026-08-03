@@ -289,6 +289,54 @@ doesn't learn to use the coarse global pathway. A fundamentally larger **bidirec
 block** (e.g. block_size ~100k, hierarchy/AR across blocks to reach ≥1M) is the design that
 would force genuine long-range modelling. See §10 / the architecture discussion.
 
+### 8.2 Big-bidirectional-block experiment + the "block-shuffle is uninformative" finding
+
+We trained a **block_size=24,576** dual (`small_dual_bigblock`, window_blocks=1, run
+56995) — same length/data/GPUs as the block=18 model — to test whether a large
+bidirectional block induces long-range usage. Block-shuffle eval on its step-8000
+checkpoint (L=983,040, permute whole 24,576-blocks): contiguous 1.24104 vs
+block-shuffle 1.24102 (**Δ ≈ 0**); 1kb-shuffle 1.25310 (+0.012, so the 24k block *is*
+used internally).
+
+A deep code+math audit (multi-agent, triple-sourced) showed the **≈0 is NOT "the model
+uses no long-range" — it is a near-powerless test**, overdetermined by:
+- **(H1) test underpower** — the fine self-attn is RoPE-relative + windowed, hence
+  *block-translation-invariant*, so ~99% of tokens are structurally unaffected by block
+  order; the real ±0.03-nat boundary penalty is diluted to ~+4e-4 in the full-length
+  average (and further by the masked/full-length NELBO normalisation, diffusion.py:292-294,929).
+- **(H2) vestigial coarse pathway** — the only >±1-block carrier is gated to ~3% of
+  self-attn; zeroing cross-attn costs 0.0000 nat, swapFAR-KL ≈ 1e-4.
+- **(H5) ~0 long-range DNA MI** — prokaryote MI is 0.018 bits at d=1 → ~0 at d≥10 kb.
+- **Not a bug** (H3/H4 ruled out: cross-block info demonstrably reaches boundary tokens,
+  swap-KL 0.11 near a boundary decaying to 0.003 deep; coarse re-encoded each forward;
+  cache is a verified 40-block permutation; NELBO is order-sensitive).
+The correct metric is **boundary-resolved context-swap KL** (`scripts/diag_longrange_blockshuffle.py`),
+not aggregate block-shuffle NLL.
+
+**Direct, un-confounded confirmation — `gate_cross` decays as it trains**
+(`scripts/diag_gate_trajectory.py`, RAW gates reconstructed from weights, no GPU):
+
+| step | gate1 (self) | gate_cross (coarse) | gate2 (MLP) | ‖self_proj‖ | ‖cross_out‖ |
+|---:|---:|---:|---:|---:|---:|
+| 500 | 0.0546 | **0.0095** | 0.0400 | 16.01 | 15.99 |
+| 2000 | 0.1872 | 0.0089 | 0.1079 | 16.24 | 15.88 |
+| 4000 | 0.1628 | 0.0074 | 0.1153 | 17.03 | 15.48 |
+| 6000 | 0.1495 | 0.0058 | 0.1230 | 17.97 | 15.09 |
+| 8500 | 0.1513 | **0.0061** | 0.1453 | 19.24 | 14.80 |
+
+Self-attn and MLP gates grow ~3×; **the coarse cross gate stays flat-to-falling and
+‖cross_out‖ shrinks** — its relative weight drops 17%→4%. With no >1 kb signal to reward
+it, the long-range pathway **atrophies**. So the prokaryote corpus *cannot* answer the
+architecture question, and aggregate block-shuffle NLL was the wrong statistic.
+
+**Path forward — a synthetic planted-dependency benchmark** (`docs/synthetic_longrange_benchmark.md`,
+`scripts/eval/gen_synthetic_longrange.py`, `main.py mode=synth_copy_eval`): DNA sequences
+with random motifs copied across a >block_size gap, so long-range MI is non-zero *by
+construction*. Decisive readouts: (i) targeted copy accuracy at cross-block gaps (chance
+for block=18, high iff the big block uses the coarse pathway), and (ii) whether
+`gate_cross` **grows** on this data (vs decays on prokaryote). That isolates "can the
+architecture learn long-range" from "is there long-range to learn".
+
 ---
 
 ## 9. Engineering issues solved along the way
@@ -352,7 +400,11 @@ forward and generation; the forward results already demonstrate the memory win a
 
 **Open**
 - Exact OOM wall (15× fits tight ~135 GiB, 16× OOMs ~144 GiB) — a 2-point run pins it.
-- **Genuine long-range** test on contiguous ≥1Mb single-organism DNA (not yet run).
+- **Long-range usage on prokaryote: settled negative, but for a data reason** (§8.2) —
+  the corpus has ~0 MI beyond ~1 kb, so the coarse pathway atrophies (gate_cross decays)
+  regardless of block size; aggregate block-shuffle NLL is an underpowered metric. The
+  architecture question now needs the **synthetic planted-dependency benchmark** (§8.2,
+  docs/synthetic_longrange_benchmark.md), not more prokaryote training.
 - **Track B** (long-context generation) — unbuilt; needed only if de novo sampling is the
   goal.
 - Multi-GPU / gradient-checkpointed scaling beyond ~1.5M (the original ~1M+ training goal

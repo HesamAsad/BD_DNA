@@ -29,9 +29,9 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 mkdir -p logs logs/eval
 RUN_TAG="${LSB_JOBID:-$(date +%Y%m%d-%H%M%S)}"
 LOG="logs/eval/ppl_one_${RUN_TAG}_${DATA_VALID}.log"
-echo "[`date`] ppl_one | data.valid=$DATA_VALID L=$L LIMIT=$LIMIT"
+echo "[`date`] ppl_one | model=${MODEL:-small_dual} data.valid=$DATA_VALID L=$L block=$BLOCK_SIZE LIMIT=$LIMIT"
 "$PYTHON" -u main.py mode=ppl_eval \
-    model=small_dual algo=bd3lm algo.backbone=dit_dual \
+    model=${MODEL:-small_dual} algo=bd3lm algo.backbone=dit_dual \
     data=carbon-prokaryote data.valid=$DATA_VALID data.dna_num_files=1 \
     model.length=$L block_size=$BLOCK_SIZE model.attn_backend=flex \
     loader.eval_global_batch_size=1 loader.eval_batch_size=1 \

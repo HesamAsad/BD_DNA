@@ -262,6 +262,199 @@ def _io_dump(config, logger, tokenizer):
   logger.info(f'IO dump written to {out_dir}')
 
 
+def _synth_copy_eval(config, logger, tokenizer):
+  """Targeted long-range copy metric for the synthetic echo benchmark.
+
+  Loads <data.valid> cache + <name>_echo_manifest.json, masks ONLY the echo TARGET
+  spans (sources left clean), runs the EMA forward once, and reports exact
+  per-nucleotide copy accuracy at the targets bucketed by gap and by within- vs
+  cross-block, plus a random-span CONTROL (should be ~0.25). High cross-block
+  accuracy == the model used >block_size context. See
+  docs/synthetic_longrange_benchmark.md.  Env: SYNTH_NSEQ (default 64).
+  """
+  import itertools
+  import json
+  from collections import defaultdict
+  import numpy as np
+  import datasets as _ds
+  logger.info('Starting synthetic copy eval.')
+  model = _load_from_checkpoint(config=config, tokenizer=tokenizer)
+  model.eval()
+  if getattr(model, 'ema', None) is not None:
+    model.ema.store(itertools.chain(
+      model.backbone.parameters(), model.noise.parameters()))
+    model.ema.copy_to(itertools.chain(
+      model.backbone.parameters(), model.noise.parameters()))
+  model.backbone.eval()
+
+  cache_dir, name, L = config.data.cache_dir, config.data.valid, config.model.length
+  block = config.block_size
+  path = os.path.join(cache_dir, f'{name}_validation_bs{L}_wrapped_specialFalse.dat')
+  manifest = json.load(
+    open(os.path.join(cache_dir, f'{name}_echo_manifest.json')))['echoes']
+  data = _ds.load_from_disk(path).with_format('numpy')
+  n_seqs = int(os.environ.get('SYNTH_NSEQ', '64'))
+  rng = np.random.default_rng(0)
+
+  hit, tot = defaultdict(int), defaultdict(int)   # keyed by ('within'|'cross', gap)
+  ctrl_hit = ctrl_tot = 0
+  for i in range(min(n_seqs, data.num_rows)):
+    echoes = manifest[i]
+    if not echoes:
+      continue
+    x0 = torch.tensor(data[i]['input_ids'], dtype=torch.long,
+                      device=model.device).unsqueeze(0)
+    tmask = torch.zeros_like(x0, dtype=torch.bool)
+    occupied = np.zeros(L, bool)
+    for e in echoes:
+      tmask[0, e['target']:e['target'] + e['motif_len']] = True
+      occupied[e['source']:e['source'] + e['motif_len']] = True
+      occupied[e['target']:e['target'] + e['motif_len']] = True
+    # control: equal number of random non-echo spans of the same motif length
+    ctrl_spans = []
+    mlen = echoes[0]['motif_len']
+    for _ in range(len(echoes)):
+      for _try in range(50):
+        st = int(rng.integers(0, L - mlen))
+        if not occupied[st:st + mlen].any():
+          occupied[st:st + mlen] = True
+          ctrl_spans.append(st)
+          tmask[0, st:st + mlen] = True
+          break
+    xt = torch.where(tmask, model.mask_index, x0)
+    p = torch.full((1, 1), float(tmask.float().mean()), device=model.device)
+    sigma = model._sigma_from_p(p)
+    x_input = torch.cat((xt, x0), dim=-1) if model.cross_attn else xt
+    with torch.no_grad():
+      pred = model.forward(x_input, sigma=sigma).argmax(-1)
+    correct = (pred == x0)[0]
+    for e in echoes:
+      sl = slice(e['target'], e['target'] + e['motif_len'])
+      key = ('within' if e['source'] // block == e['target'] // block else 'cross',
+             e['gap'])
+      hit[key] += int(correct[sl].sum())
+      tot[key] += e['motif_len']
+    for st in ctrl_spans:
+      ctrl_hit += int(correct[st:st + mlen].sum())
+      ctrl_tot += mlen
+
+  report = [f'SYNTH COPY EVAL  name={name} L={L} block={block} seqs={i+1}',
+            f'checkpoint={config.eval.checkpoint_path}',
+            f'control (random spans) acc = {ctrl_hit/max(ctrl_tot,1):.4f}  (chance 0.25)',
+            'copy accuracy at TARGET spans, by (placement, gap):']
+  for key in sorted(tot, key=lambda k: (k[0], k[1])):
+    report.append(f'  {key[0]:6s} gap={key[1]:7d}: acc={hit[key]/tot[key]:.4f}  '
+                  f'(n={tot[key]})')
+  for placement in ('within', 'cross'):
+    h = sum(hit[k] for k in tot if k[0] == placement)
+    t = sum(tot[k] for k in tot if k[0] == placement)
+    if t:
+      report.append(f'  ALL {placement}-block: acc={h/t:.4f} (n={t})')
+  logger.info('\n'.join(report))
+  print('\n'.join(report))
+
+
+def _oracle_delta_eval(config, logger, tokenizer):
+  """H_signal: how much predictive information lives BEYOND radius d of a target?
+
+  For each target span T, compare two forwards that differ ONLY in the informativeness
+  of the distal region -- never in the mask, so the mask fraction (and hence sigma) is
+  identical and cannot confound:
+    A  "true"      : x0 everywhere, T masked.
+    B(d) "ablated" : x0 within [t-d, t+M+d] kept TRUE, everything beyond it token-SHUFFLED
+                     (a permutation -> exact same composition, structure destroyed), T masked.
+  Delta(d) = NLL_T(B(d)) - NLL_T(A)  >0 means context beyond d carries real information.
+  Delta(0) is the total context value; Delta(d) -> 0 as d grows. The d at which Delta
+  vanishes is the effective usable range. Scoring only T, so this is not diluted by the
+  99% of positions that are locally predictable. See plan Stage 2 / 6.4.
+
+  Env: ORACLE_NSEQ (default 32), ORACLE_NTGT (4), ORACLE_TGTLEN (256),
+       ORACLE_RADII (comma list, default 0,256,1024,4096,16384).
+  """
+  import itertools
+  import numpy as np
+  import datasets as _ds
+  logger.info('Starting oracle Delta(d) eval.')
+  model = _load_from_checkpoint(config=config, tokenizer=tokenizer)
+  model.eval()
+  if getattr(model, 'ema', None) is not None:
+    model.ema.store(itertools.chain(
+      model.backbone.parameters(), model.noise.parameters()))
+    model.ema.copy_to(itertools.chain(
+      model.backbone.parameters(), model.noise.parameters()))
+  model.backbone.eval()
+
+  cache_dir, name, L = config.data.cache_dir, config.data.valid, config.model.length
+  path = os.path.join(cache_dir, f'{name}_validation_bs{L}_wrapped_specialFalse.dat')
+  data = _ds.load_from_disk(path).with_format('numpy')
+  n_seqs = int(os.environ.get('ORACLE_NSEQ', '32'))
+  n_tgt = int(os.environ.get('ORACLE_NTGT', '4'))
+  M = int(os.environ.get('ORACLE_TGTLEN', '256'))
+  radii = [int(x) for x in os.environ.get(
+    'ORACLE_RADII', '0,256,1024,4096,16384').split(',')]
+  rng = np.random.default_rng(0)
+
+  def nll_at(x0_t, tmask, distal_keep=None, donor=None):
+    """Mean NLL (nats/nt) over tmask positions. distal_keep=None -> full true context.
+    donor!=None -> LOCUS SWAP: replace the distal region with the SAME positions from a
+    different genomic window (composition CHANGES), instead of permuting (composition
+    preserved). This closes the loophole that a permutation hides isochore/GC-regime
+    signal -- if Delta jumps under locus-swap where it was ~0 under permute, the distal
+    value is compositional, not order-based."""
+    xt = torch.where(tmask, model.mask_index, x0_t)
+    inp = x0_t.clone()
+    if distal_keep is not None:
+      idx = (~distal_keep).nonzero(as_tuple=True)[1]
+      if donor is not None:                          # locus swap (composition changes)
+        inp[0, idx] = donor[0, idx]
+      elif idx.numel() > 1:                          # permute (composition preserved)
+        perm = idx[torch.randperm(idx.numel(), device=idx.device)]
+        inp[0, idx] = x0_t[0, perm]
+      xt = torch.where(tmask, model.mask_index, inp)
+    p = torch.full((1, 1), float(tmask.float().mean()), device=model.device)
+    sigma = model._sigma_from_p(p)
+    x_input = torch.cat((xt, inp), dim=-1) if model.cross_attn else xt
+    with torch.no_grad():
+      logp = model.forward(x_input, sigma=sigma)
+    tgt = torch.gather(logp, -1, x0_t[:, :, None]).squeeze(-1)
+    return float(-(tgt[tmask]).mean())
+
+  ablate = os.environ.get('ORACLE_ABLATE', 'permute')   # 'permute' | 'locus_swap'
+  n_rows = min(n_seqs, data.num_rows)
+  acc = {d: [] for d in radii}
+  base_nlls = []
+  for i in range(n_rows):
+    x0 = torch.tensor(data[i]['input_ids'], dtype=torch.long,
+                      device=model.device).unsqueeze(0)
+    donor = None
+    if ablate == 'locus_swap':                        # distal from a DIFFERENT window
+      donor = torch.tensor(data[(i + 1) % n_rows]['input_ids'], dtype=torch.long,
+                           device=model.device).unsqueeze(0)
+    starts = [int(rng.integers(M, L - M)) for _ in range(n_tgt)]
+    tmask = torch.zeros_like(x0, dtype=torch.bool)
+    for s in starts:
+      tmask[0, s:s + M] = True
+    nll_true = nll_at(x0, tmask)
+    base_nlls.append(nll_true)
+    for d in radii:
+      keep = torch.zeros_like(x0, dtype=torch.bool)
+      for s in starts:
+        keep[0, max(0, s - d):min(L, s + M + d)] = True
+      acc[d].append(nll_at(x0, tmask, distal_keep=keep, donor=donor) - nll_true)
+
+  rep = [f'ORACLE Delta(d)  name={name} L={L} seqs={n_rows} ablate={ablate} '
+         f'targets/seq={n_tgt} target_len={M}',
+         f'checkpoint={config.eval.checkpoint_path}',
+         f'baseline NLL at targets (full true context) = {np.mean(base_nlls):.4f} nats',
+         'Delta(d) = NLL(distal beyond d shuffled) - NLL(full true); >0 => that context matters']
+  for d in radii:
+    a = np.array(acc[d])
+    sem = a.std() / max(np.sqrt(len(a)), 1)
+    rep.append(f'  radius d={d:>6}: Delta={a.mean():+.4f} +/- {1.96*sem:.4f} nats (95% CI)')
+  logger.info('\n'.join(rep))
+  print('\n'.join(rep))
+
+
 def _train(config, logger, tokenizer):
   logger.info('Starting Training.')
   # Log to Weights & Biases when `wandb` is configured, else a lightweight CSV
@@ -355,6 +548,12 @@ def main(config):
   elif config.mode == 'io_dump':
     config.wandb = None
     _io_dump(config, logger, tokenizer)
+  elif config.mode == 'synth_copy_eval':
+    config.wandb = None
+    _synth_copy_eval(config, logger, tokenizer)
+  elif config.mode == 'oracle_delta':
+    config.wandb = None
+    _oracle_delta_eval(config, logger, tokenizer)
   else:
     _train(config, logger, tokenizer)
 
