@@ -944,15 +944,26 @@ class Diffusion(L.LightningModule):
       self._last_l_use = (l_use.sum() / masked.sum().clamp(min=1)).detach()
     return loss
 
-  def _forward_pass_bissm(self, x0, xt, p, loss_scale):
-    """Unbiased one-active-block objective for recurrent boundary caches.
+  def _bissm_use_right_flank(self, device):
+    right_probability = float(
+      self.config.model.get('right_flank_probability', 0.0))
+    if right_probability < 0 or right_probability > 1:
+      raise ValueError("model.right_flank_probability must be in [0, 1]")
+    return bool(
+      right_probability == 1.0
+      or (right_probability > 0.0
+          and torch.rand((), device=device) < right_probability))
 
-    The Transformer backbone can evaluate every active block through a single
-    specialized ``[x_t; x_0]`` attention mask. A recurrent model cannot share
-    that computation without a custom batched boundary-state scan. We instead
-    sample one block uniformly, evaluate the exact inference computation, and
-    multiply by the number of blocks. The resulting full-length loss tensor is
-    an unbiased estimator of the existing all-block objective.
+  def _forward_pass_bissm(self, x0, xt, p, loss_scale):
+    """Block-diffusion objective evaluated through recurrent boundary caches.
+
+    ``model.active_blocks='all'`` (default) supervises every block in one
+    step, matching the Transformer's ``[x_t; x_0]`` all-block objective: one
+    clean scan yields the boundary state entering each block, and the blocks
+    are folded into the batch dimension so a single batched call denoises all
+    of them. ``model.active_blocks='one'`` keeps the original estimator, which
+    samples one block and rescales by the block count -- unbiased for the loss
+    value, but it only ever puts gradient on 1/num_blocks of the tokens.
     """
     sequence_length = x0.shape[1]
     if sequence_length % self.block_size:
@@ -960,6 +971,14 @@ class Diffusion(L.LightningModule):
         f"BiSSM requires sequence length ({sequence_length}) divisible by "
         f"block size ({self.block_size})")
     num_blocks = sequence_length // self.block_size
+
+    active_blocks = str(self.config.model.get('active_blocks', 'all'))
+    if active_blocks not in {'all', 'one'}:
+      raise ValueError(
+        f"model.active_blocks must be 'all' or 'one', got {active_blocks!r}")
+    if active_blocks == 'all':
+      return self._forward_pass_bissm_all_blocks(
+        x0=x0, xt=xt, p=p, loss_scale=loss_scale, num_blocks=num_blocks)
     active_block = int(torch.randint(num_blocks, (), device=x0.device).item())
     start = active_block * self.block_size
     end = start + self.block_size
@@ -970,14 +989,7 @@ class Diffusion(L.LightningModule):
     left_cache = self.backbone.prefill_left(clean_prefix)
 
     right_cache = None
-    right_probability = float(
-      self.config.model.get('right_flank_probability', 0.0))
-    if right_probability < 0 or right_probability > 1:
-      raise ValueError("model.right_flank_probability must be in [0, 1]")
-    use_right = (
-      right_probability == 1.0
-      or (right_probability > 0.0
-          and torch.rand((), device=x0.device) < right_probability))
+    use_right = self._bissm_use_right_flank(x0.device)
     if use_right:
       # The target block is excluded by construction. An empty suffix at the
       # last block is legal and reduces to the de-novo reverse initial state.
@@ -1001,6 +1013,50 @@ class Diffusion(L.LightningModule):
     self._last_active_block = active_block
     self._last_right_flank = use_right
     return loss
+
+  def _forward_pass_bissm_all_blocks(self, x0, xt, p, loss_scale, num_blocks):
+    """Supervise every block per step through folded boundary caches.
+
+    Cost is one clean scan for the caches plus one batched active scan over
+    the same number of tokens, i.e. a small constant factor over the single-
+    block estimator, for ``num_blocks`` times as many supervised tokens.
+    """
+    batch_size, sequence_length = x0.shape
+    block_size = self.block_size
+
+    left_cache = models.bidirectional_ssm.stack_boundary_caches(
+      self.backbone.prefill_left_boundaries(x0, block_size))
+
+    right_cache = None
+    use_right = self._bissm_use_right_flank(x0.device)
+    if use_right:
+      # Entry i covers only the clean suffix strictly after block i, so no
+      # block ever sees its own clean target.
+      right_cache = models.bidirectional_ssm.stack_boundary_caches(
+        self.backbone.prefill_right_boundaries(x0, block_size))
+
+    folded = (batch_size * num_blocks, block_size)
+    noisy_blocks = xt.reshape(*folded)
+    clean_blocks = x0.reshape(*folded)
+    # One noise level per (sequence, block); take it at each block's first
+    # position, matching `_sample_t`'s per-block schedule.
+    sigma_blocks = self._sigma_from_p(
+      p[:, ::block_size]).reshape(batch_size * num_blocks)
+
+    logits = self.backbone.forward_active(
+      noisy_blocks,
+      sigma_blocks,
+      left_cache=left_cache,
+      right_cache=right_cache)
+    log_scores = self._subs_parameterization(logits, noisy_blocks)
+    log_p_theta = torch.gather(
+      input=log_scores,
+      dim=-1,
+      index=clean_blocks[:, :, None]).squeeze(-1)
+
+    self._last_active_block = None
+    self._last_right_flank = use_right
+    return loss_scale * log_p_theta.reshape(batch_size, sequence_length)
 
   def _loss(self, x0, attention_mask, t=None, sampling_eps_min=None, sampling_eps_max=None):
     if sampling_eps_min is None and hasattr(self, 'sampling_eps_min'):

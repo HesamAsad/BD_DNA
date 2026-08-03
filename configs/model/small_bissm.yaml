@@ -25,6 +25,13 @@ ssm_chunk_size: 128
 ssm_backend: auto            # fused upstream SSD scan on CUDA, torch in tests
 mlp_ratio: 4.0
 
+# 'all' supervises every block per training step (matches the Transformer
+# BD3-LM objective, ~num_blocks times more supervised tokens per step for a
+# small constant factor of extra compute). 'one' keeps the original single-
+# active-block estimator: unbiased for the loss value, but its gradient only
+# ever reaches one block per step.
+active_blocks: all
+
 # 0 = valid de-novo objective. Set to 1 for the C-a conditional infilling run;
 # intermediate values train one shared model with suffix-conditioning dropout.
 right_flank_probability: 0.0

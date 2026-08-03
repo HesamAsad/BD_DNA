@@ -6,7 +6,7 @@ import copy
 import torch
 from omegaconf import OmegaConf
 
-from models.bidirectional_ssm import BidirectionalSSM
+from models.bidirectional_ssm import BidirectionalSSM, stack_boundary_caches
 from models.mamba2_segment import SegmentMamba2, fused_mamba2_available
 
 
@@ -94,6 +94,56 @@ def backbone_smoke(device):
     flush=True)
 
 
+def all_block_smoke(device):
+  """Folded all-block training path must match block-by-block inference."""
+  config = OmegaConf.create({
+    "block_size": 64,
+    "algo": {"time_conditioning": False},
+    "model": {
+      "hidden_size": 64,
+      "cond_dim": 32,
+      "n_blocks": 2,
+      "dropout": 0.0,
+      "tie_word_embeddings": True,
+      "ssm_state_size": 16,
+      "ssm_conv_size": 4,
+      "ssm_expand": 2,
+      "ssm_head_dim": 32,
+      "ssm_chunk_size": 16,
+      "ssm_backend": "fused",
+      "mlp_ratio": 2.0,
+    },
+  })
+  block_size, num_blocks, batch = 64, 4, 2
+  model = BidirectionalSSM(config, vocab_size=13).to(
+    device=device, dtype=torch.bfloat16).train()
+  clean = torch.randint(0, 13, (batch, block_size * num_blocks), device=device)
+  noisy = torch.randint(0, 13, (batch, block_size * num_blocks), device=device)
+
+  left = stack_boundary_caches(
+    model.prefill_left_boundaries(clean, block_size))
+  right = stack_boundary_caches(
+    model.prefill_right_boundaries(clean, block_size))
+  folded = model.forward_active(
+    noisy.reshape(batch * num_blocks, block_size), None, left, right)
+  folded = folded.reshape(batch, num_blocks, block_size, -1)
+
+  with torch.no_grad():
+    for index in range(num_blocks):
+      start = index * block_size
+      expected = model.forward_active(
+        noisy[:, start:start + block_size],
+        None,
+        left_cache=model.prefill_left(clean[:, :start]),
+        right_cache=model.prefill_right(clean[:, start + block_size:]))
+      assert_close(f"all_block.logits[{index}]", folded[:, index], expected)
+
+  loss = folded.float().square().mean()
+  loss.backward()
+  assert model.token_embedding.weight.grad.abs().sum() > 0
+  print(f"all_block: blocks={num_blocks} loss={loss.item():.6g}", flush=True)
+
+
 def main():
   assert torch.cuda.is_available(), "CUDA is required"
   assert fused_mamba2_available(), "mamba-ssm fused scan is not importable"
@@ -103,6 +153,7 @@ def main():
     f"bf16={torch.cuda.is_bf16_supported()}", flush=True)
   mixer_smoke(device)
   backbone_smoke(device)
+  all_block_smoke(device)
   print("BISSM_GPU_SMOKE_OK", flush=True)
 
 

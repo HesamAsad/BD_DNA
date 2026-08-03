@@ -99,6 +99,38 @@ class DirectionalCache:
       for state in self.states)
 
 
+def stack_boundary_caches(
+    caches: "tuple[DirectionalCache, ...]") -> DirectionalCache:
+  """Folds one cache per block into a single batch-major cache.
+
+  Row ``b * num_blocks + i`` of the result holds sequence ``b``'s boundary
+  state for block ``i``, which is the layout produced by reshaping a
+  ``[batch, num_blocks * block_size]`` sequence to ``[batch * num_blocks,
+  block_size]``. This is what lets every block be denoised in one batched
+  call instead of one call per block.
+  """
+  if not caches:
+    raise ValueError("stack_boundary_caches requires at least one cache")
+  direction = caches[0].direction
+  num_layers = len(caches[0].states)
+  if any(cache.direction != direction for cache in caches):
+    raise ValueError("Cannot stack caches from different directions")
+  if any(len(cache.states) != num_layers for cache in caches):
+    raise ValueError("Cannot stack caches with different layer counts")
+
+  states = []
+  for layer_index in range(num_layers):
+    conv = torch.stack(
+      [cache.states[layer_index].conv for cache in caches], dim=1)
+    ssm = torch.stack(
+      [cache.states[layer_index].ssm for cache in caches], dim=1)
+    states.append(
+      Mamba2State(conv.flatten(0, 1), ssm.flatten(0, 1)))
+  # The folded rows cover different context lengths, so a single scalar length
+  # is meaningless here; -1 marks it as heterogeneous.
+  return DirectionalCache(tuple(states), length=-1, direction=direction)
+
+
 class BiMambaLayer(nn.Module):
   def __init__(
       self,
@@ -262,6 +294,67 @@ class BidirectionalSSM(nn.Module):
   ) -> DirectionalCache:
     result = self._prefill(clean_prefix_ids, cache, "left")
     return result.detach() if detach else result
+
+  def _boundary_caches(
+      self,
+      token_ids: torch.Tensor,
+      block_size: int,
+      direction: str,
+  ) -> tuple[DirectionalCache, ...]:
+    """Scans a clean sequence once, keeping the state entering each block.
+
+    Entry ``i`` is the state produced by ``token_ids[:, :i * block_size]``, so
+    entry 0 is the empty state. Total work equals one full-length scan: the
+    blocks are consumed in order and each one continues the previous state.
+    """
+    if token_ids.ndim != 2:
+      raise ValueError("Clean context must have shape [batch, length]")
+    batch_size, length = token_ids.shape
+    if block_size <= 0 or length % block_size:
+      raise ValueError(
+        f"Length ({length}) must be a positive multiple of the block size "
+        f"({block_size})")
+    num_blocks = length // block_size
+
+    # Match the dtype `_prefill` would pick for an empty cache (the embedding
+    # output dtype, which autocast may differ from the weight dtype).
+    cache = self._empty_cache(
+      batch_size,
+      token_ids.device,
+      self.token_embedding(token_ids[:, :1]).dtype,
+      direction)
+    boundaries = [cache]
+    for index in range(num_blocks - 1):
+      start = index * block_size
+      cache = self._prefill(
+        token_ids[:, start:start + block_size], cache, direction)
+      boundaries.append(cache)
+    return tuple(boundaries)
+
+  def prefill_left_boundaries(
+      self,
+      clean_ids: torch.Tensor,
+      block_size: int,
+  ) -> tuple[DirectionalCache, ...]:
+    """Left state entering every block: entry ``i`` scans ``[:, :i*block]``."""
+    return self._boundary_caches(clean_ids, block_size, "left")
+
+  def prefill_right_boundaries(
+      self,
+      clean_ids: torch.Tensor,
+      block_size: int,
+  ) -> tuple[DirectionalCache, ...]:
+    """Right state entering every block from the far end.
+
+    Entry ``i`` is the reverse scan of the clean suffix strictly after block
+    ``i``; block ``num_blocks - 1`` therefore receives the empty state. The
+    target block itself is never part of its own cache.
+    """
+    reversed_boundaries = self._boundary_caches(
+      torch.flip(clean_ids, dims=(1,)), block_size, "right")
+    # Reversed block ``j`` is original block ``num_blocks - 1 - j``, so the
+    # state entering reversed block ``j`` is the original block's suffix state.
+    return tuple(reversed(reversed_boundaries))
 
   def prefill_right(
       self,

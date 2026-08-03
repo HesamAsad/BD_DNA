@@ -1,7 +1,7 @@
 import torch
 from omegaconf import OmegaConf
 
-from models.bidirectional_ssm import BidirectionalSSM
+from models.bidirectional_ssm import BidirectionalSSM, stack_boundary_caches
 
 
 def _config(time_conditioning=False):
@@ -105,6 +105,88 @@ def test_timestep_only_changes_active_path_not_clean_cache():
 
   assert not torch.allclose(low_noise, high_noise)
   _assert_cache_close(cache, snapshot)
+
+
+def test_left_boundaries_match_per_block_prefills():
+  model = _model()
+  clean = torch.randint(0, 13, (2, 12))
+
+  boundaries = model.prefill_left_boundaries(clean, block_size=4)
+
+  assert len(boundaries) == 3
+  assert boundaries[0].length == 0
+  for index in range(1, 3):
+    expected = model.prefill_left(clean[:, :index * 4])
+    _assert_cache_close(boundaries[index], expected)
+
+
+def test_right_boundaries_hold_only_the_suffix_after_each_block():
+  model = _model()
+  clean = torch.randint(0, 13, (2, 12))
+
+  boundaries = model.prefill_right_boundaries(clean, block_size=4)
+
+  assert len(boundaries) == 3
+  # The final block has no clean suffix; earlier blocks see everything to
+  # their right but never their own tokens.
+  assert boundaries[-1].length == 0
+  for index in range(2):
+    expected = model.prefill_right(clean[:, (index + 1) * 4:])
+    _assert_cache_close(boundaries[index], expected)
+
+
+def test_stacked_boundary_caches_denoise_all_blocks_at_once():
+  model = _model()
+  clean = torch.randint(0, 13, (2, 12))
+  noisy = torch.randint(0, 13, (2, 12))
+  block_size, num_blocks = 4, 3
+
+  folded = model.forward_active(
+    noisy.reshape(2 * num_blocks, block_size),
+    None,
+    left_cache=stack_boundary_caches(
+      model.prefill_left_boundaries(clean, block_size)),
+    right_cache=stack_boundary_caches(
+      model.prefill_right_boundaries(clean, block_size)))
+  folded = folded.reshape(2, num_blocks, block_size, -1)
+
+  for index in range(num_blocks):
+    start = index * block_size
+    expected = model.forward_active(
+      noisy[:, start:start + block_size],
+      None,
+      left_cache=model.prefill_left(clean[:, :start]),
+      right_cache=model.prefill_right(clean[:, start + block_size:]))
+    torch.testing.assert_close(
+      folded[:, index], expected, atol=3e-5, rtol=3e-5)
+
+
+def test_all_block_logits_never_depend_on_present_or_future_clean_tokens():
+  model = _model()
+  block_size, num_blocks = 4, 3
+  clean = torch.randint(0, 13, (1, block_size * num_blocks))
+  noisy = torch.randint(0, 13, (1, block_size * num_blocks))
+
+  def all_block_logits(clean_ids):
+    return model.forward_active(
+      noisy.reshape(num_blocks, block_size),
+      None,
+      left_cache=stack_boundary_caches(
+        model.prefill_left_boundaries(clean_ids, block_size)))
+
+  reference = all_block_logits(clean)
+  for changed_position in range(block_size, block_size * num_blocks):
+    perturbed = clean.clone()
+    perturbed[:, changed_position] = (
+      perturbed[:, changed_position] + 1) % 13
+    logits = all_block_logits(perturbed)
+    # De novo, block i may only be moved by clean tokens strictly before it.
+    first_affected = changed_position // block_size + 1
+    torch.testing.assert_close(
+      logits[:first_affected], reference[:first_affected])
+    if first_affected < num_blocks:
+      assert not torch.allclose(
+        logits[first_affected:], reference[first_affected:])
 
 
 def test_sampler_commits_only_when_store_flag_is_set():

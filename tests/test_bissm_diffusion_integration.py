@@ -8,7 +8,7 @@ from dataloader import DNATokenizer, _assert_bissm_compat
 from diffusion import Diffusion
 
 
-def _config(right_probability=0.0):
+def _config(right_probability=0.0, active_blocks='one'):
   config_dir = str(Path(__file__).resolve().parents[1] / "configs")
   with hydra.initialize_config_dir(version_base=None, config_dir=config_dir):
     config = hydra.compose(
@@ -28,6 +28,7 @@ def _config(right_probability=0.0):
         "model.ssm_backend=torch",
         "model.mlp_ratio=2.0",
         f"model.right_flank_probability={right_probability}",
+        f"model.active_blocks={active_blocks}",
         "block_size=4",
         "loader.batch_size=2",
         "loader.eval_batch_size=2",
@@ -60,6 +61,54 @@ def test_bissm_config_and_diffusion_objective_smoke():
   assert torch.unique(positions // config.block_size).numel() == 1
   loss.mean().backward()
   assert model.backbone.token_embedding.weight.grad is not None
+
+
+def test_all_block_objective_supervises_every_block_in_one_step():
+  torch.manual_seed(5)
+  config = _config(active_blocks='all')
+  model = Diffusion(config, DNATokenizer())
+  x0 = torch.randint(8, 12, (2, 8))
+  t = torch.full_like(x0, 0.5, dtype=torch.float32)
+
+  loss = model._forward_pass_diffusion(
+    x0, t=t, sampling_eps_min=1e-3, sampling_eps_max=1.0)
+
+  assert loss.shape == x0.shape
+  assert torch.isfinite(loss).all()
+  # Every block carries gradient now, so no block is left at exactly zero.
+  blocks = loss.reshape(2, -1, config.block_size)
+  assert (blocks.abs().sum(dim=-1) > 0).all()
+  loss.mean().backward()
+  assert model.backbone.token_embedding.weight.grad is not None
+
+
+def test_all_block_and_one_block_objectives_agree_on_the_sampled_block():
+  torch.manual_seed(5)
+  config = _config(active_blocks='one')
+  model = Diffusion(config, DNATokenizer())
+  x0 = torch.randint(8, 12, (2, 8))
+  t = torch.full_like(x0, 0.5, dtype=torch.float32)
+  p = model.noise(t)[1]
+  xt = torch.where(
+    torch.rand(x0.shape) < 0.5, torch.full_like(x0, model.mask_index), x0)
+  loss_scale = model.noise(t)[0]
+  num_blocks = x0.shape[1] // config.block_size
+
+  torch.manual_seed(0)
+  one_block = model._forward_pass_bissm(
+    x0=x0, xt=xt, p=p, loss_scale=loss_scale)
+  sampled = model._last_active_block
+  all_blocks = model._forward_pass_bissm_all_blocks(
+    x0=x0, xt=xt, p=p, loss_scale=loss_scale, num_blocks=num_blocks)
+
+  start = sampled * config.block_size
+  end = start + config.block_size
+  # The one-block path carries the num_blocks rescaling; the all-block path
+  # supervises the same computation for that block without it.
+  torch.testing.assert_close(
+    one_block[:, start:end] / num_blocks,
+    all_blocks[:, start:end],
+    atol=3e-5, rtol=3e-5)
 
 
 def test_ca_objective_builds_right_cache_without_target_leakage():

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#BSUB -J train_dna_bissm
+#BSUB -J train_dna_bd3lm_prok
 #BSUB -G s10396
 #BSUB -q training-parallel
 #BSUB -n 32
@@ -10,8 +10,13 @@
 #BSUB -M 128000
 #BSUB -gpu "num=4:mode=exclusive_process:gmodel=NVIDIAH200"
 #BSUB -cwd /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms
-#BSUB -o /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/logs/train_dna_bissm_%J.out
-#BSUB -e /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/logs/train_dna_bissm_%J.err
+#BSUB -o /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/logs/train_dna_bd3lm_prok_%J.out
+#BSUB -e /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/logs/train_dna_bd3lm_prok_%J.err
+#
+# Transformer BD3-LM control arm for the prokaryote perplexity comparison.
+# Deliberately mirrors scripts/train/train_dna_bissm.sh knob for knob (data,
+# length, block size, batch, steps, validation cadence, dropout) so the only
+# difference between the two runs is the backbone.
 set -euo pipefail
 
 REPO=/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms
@@ -27,11 +32,11 @@ MICRO_BATCH=${MICRO_BATCH:-8}
 EVAL_MICRO_BATCH=${EVAL_MICRO_BATCH:-$MICRO_BATCH}
 DNA_NUM_FILES=${DNA_NUM_FILES:-1}
 MAX_STEPS=${MAX_STEPS:-1000000}
-RIGHT_FLANK_PROBABILITY=${RIGHT_FLANK_PROBABILITY:-0.0}
 VAL_EVERY=${VAL_EVERY:-2000}
 VAL_BATCHES=${VAL_BATCHES:-50}
 NUM_WORKERS=${NUM_WORKERS:-16}
-ACTIVE_BLOCKS=${ACTIVE_BLOCKS:-all}   # all = every block supervised per step
+DROPOUT=${DROPOUT:-0.0}          # matched to small_bissm (0.0), not small.yaml's 0.1
+ATTN=${ATTN:-flex}
 WANDB_MODE=${WANDB_MODE:-online}
 
 if (( LENGTH % BLOCK_SIZE != 0 )); then
@@ -45,6 +50,7 @@ export XDG_CACHE_HOME=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/xdg
 export NCCL_NVLS_ENABLE=0
 export TOKENIZERS_PARALLELISM=false
 export USE_TF=0
+export TF_CPP_MIN_LOG_LEVEL=3
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 mkdir -p "$HF_HOME" "$TORCH_HOME" "$XDG_CACHE_HOME" outputs watch_folder logs sample_logs
 
@@ -53,35 +59,27 @@ EXTRA_ARGS=()
 [ "$WANDB_MODE" = "off" ] && EXTRA_ARGS+=( "wandb=null" )
 
 RUN_TAG=${LSB_JOBID:-$(date +%Y%m%d-%H%M%S)}
-if [ "$RIGHT_FLANK_PROBABILITY" = "0.0" ]; then
-  MODE_TAG=denovo
-else
-  MODE_TAG=ca
-fi
-WANDB_NAME="bd3lm-dna-bissm-${MODE_TAG}-L${LENGTH}-B${BLOCK_SIZE}-${RUN_TAG}"
+WANDB_NAME="bd3lm-dna-prok-xf-L${LENGTH}-B${BLOCK_SIZE}-${RUN_TAG}"
 
-echo "[$(date)] BiSSM DNA | host=$(hostname) | LSF=${LSB_JOBID:-local} | length=$LENGTH | block=$BLOCK_SIZE | right_prob=$RIGHT_FLANK_PROBABILITY | wandb=$WANDB_NAME"
+echo "[$(date)] Transformer BD3-LM prokaryote control | host=$(hostname) | LSF=${LSB_JOBID:-local} | length=$LENGTH | block=$BLOCK_SIZE | attn=$ATTN | wandb=$WANDB_NAME"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv
-"$PYTHON" -c "import mamba_ssm,torch; assert torch.cuda.is_available(); print('torch',torch.__version__,'mamba',mamba_ssm.__version__,'gpus',torch.cuda.device_count())" || {
-  echo "FATAL: install the pinned Triton backend with: MAMBA_KEEP_CUDA_BUILD=FALSE $PYTHON -m pip install --user --no-deps --no-build-isolation -r requirements-mamba.txt"
-  exit 3
-}
+"$PYTHON" -c "import sys,torch; ok=torch.cuda.is_available(); print('torch',torch.__version__,'| cuda',ok,'| devices',torch.cuda.device_count()); sys.exit(0 if ok else 3)" \
+  || { echo 'FATAL: torch sees no GPU.'; exit 3; }
 
 "$PYTHON" -u main.py \
-  model=small_bissm \
-  algo=bd3lm_bissm \
+  model=small \
+  algo=bd3lm \
   data=carbon-prokaryote \
   data.dna_num_files="$DNA_NUM_FILES" \
   model.length="$LENGTH" \
-  model.right_flank_probability="$RIGHT_FLANK_PROBABILITY" \
-  model.active_blocks="$ACTIVE_BLOCKS" \
+  model.dropout="$DROPOUT" \
+  model.attn_backend="$ATTN" \
   block_size="$BLOCK_SIZE" \
   loader.global_batch_size="$GLOBAL_BATCH" \
   loader.eval_global_batch_size="$GLOBAL_BATCH" \
   loader.batch_size="$MICRO_BATCH" \
   loader.eval_batch_size="$EVAL_MICRO_BATCH" \
   loader.num_workers="$NUM_WORKERS" \
-  sampling.kv_cache=true \
   trainer.max_steps="$MAX_STEPS" \
   trainer.log_every_n_steps=10 \
   trainer.val_check_interval="$VAL_EVERY" \
@@ -91,4 +89,4 @@ nvidia-smi --query-gpu=index,name,memory.total --format=csv
   mode=train \
   ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 
-echo "[$(date)] BiSSM training exited"
+echo "[$(date)] Transformer control exited"
