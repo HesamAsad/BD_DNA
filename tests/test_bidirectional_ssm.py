@@ -1,0 +1,124 @@
+import torch
+from omegaconf import OmegaConf
+
+from models.bidirectional_ssm import BidirectionalSSM
+
+
+def _config(time_conditioning=False):
+  return OmegaConf.create({
+    "block_size": 4,
+    "algo": {"time_conditioning": time_conditioning},
+    "model": {
+      "hidden_size": 8,
+      "cond_dim": 8,
+      "n_blocks": 2,
+      "dropout": 0.0,
+      "tie_word_embeddings": True,
+      "ssm_state_size": 3,
+      "ssm_conv_size": 4,
+      "ssm_expand": 2,
+      "ssm_head_dim": 4,
+      "ssm_chunk_size": 4,
+      "ssm_backend": "torch",
+      "mlp_ratio": 2.0,
+    },
+  })
+
+
+def _model(time_conditioning=False):
+  torch.manual_seed(11)
+  return BidirectionalSSM(_config(time_conditioning), vocab_size=13).eval()
+
+
+def _assert_cache_close(actual, expected):
+  assert actual.length == expected.length
+  assert actual.direction == expected.direction
+  for actual_state, expected_state in zip(actual.states, expected.states):
+    torch.testing.assert_close(actual_state.conv, expected_state.conv)
+    torch.testing.assert_close(
+      actual_state.ssm, expected_state.ssm, atol=3e-6, rtol=3e-6)
+
+
+def test_sequential_commits_match_one_shot_clean_prefix():
+  model = _model()
+  prefix = torch.randint(0, 13, (2, 9))
+
+  expected = model.prefill_left(prefix)
+  first = model.prefill_left(prefix[:, :4])
+  actual = model.prefill_left(prefix[:, 4:], first)
+
+  _assert_cache_close(actual, expected)
+
+
+def test_active_denoising_does_not_mutate_clean_caches():
+  model = _model()
+  left = model.prefill_left(torch.randint(0, 13, (2, 6)))
+  right = model.prefill_right(torch.randint(0, 13, (2, 5)))
+  left_snapshot = left.clone()
+  right_snapshot = right.clone()
+
+  noisy = torch.randint(0, 13, (2, 4))
+  model.forward_active(noisy, None, left, right)
+  model.forward_active(torch.flip(noisy, dims=(1,)), None, left, right)
+
+  _assert_cache_close(left, left_snapshot)
+  _assert_cache_close(right, right_snapshot)
+
+
+def test_known_right_flank_changes_conditional_logits():
+  model = _model()
+  left = model.prefill_left(torch.randint(0, 13, (2, 6)))
+  suffix = torch.randint(0, 13, (2, 7))
+  right = model.prefill_right(suffix)
+  noisy = torch.randint(0, 13, (2, 4))
+
+  de_novo = model.forward_active(noisy, None, left_cache=left)
+  infill = model.forward_active(
+    noisy, None, left_cache=left, right_cache=right)
+
+  assert not torch.allclose(de_novo, infill)
+
+
+def test_reverse_active_scan_propagates_within_block():
+  model = _model()
+  noisy = torch.randint(0, 13, (1, 4))
+  changed_future = noisy.clone()
+  changed_future[:, -1] = (changed_future[:, -1] + 1) % 13
+
+  original_logits = model.forward_active(noisy, None)
+  changed_logits = model.forward_active(changed_future, None)
+
+  # Position zero can only see the changed final token through the active
+  # block's reverse scan.
+  assert not torch.allclose(original_logits[:, 0], changed_logits[:, 0])
+
+
+def test_timestep_only_changes_active_path_not_clean_cache():
+  model = _model(time_conditioning=True)
+  prefix = torch.randint(0, 13, (2, 6))
+  cache = model.prefill_left(prefix)
+  snapshot = cache.clone()
+  noisy = torch.randint(0, 13, (2, 4))
+
+  low_noise = model.forward_active(noisy, torch.tensor([0.1, 0.1]), cache)
+  high_noise = model.forward_active(noisy, torch.tensor([0.9, 0.9]), cache)
+
+  assert not torch.allclose(low_noise, high_noise)
+  _assert_cache_close(cache, snapshot)
+
+
+def test_sampler_commits_only_when_store_flag_is_set():
+  model = _model()
+  block = torch.randint(0, 13, (2, 4))
+
+  model.reset_kv_cache()
+  model(block, None, sample_mode=True, store_kv=False)
+  assert model._sampling_left_cache is None
+
+  model(block, None, sample_mode=True, store_kv=True)
+  assert model._sampling_left_cache.length == block.shape[1]
+  first_cache = model._sampling_left_cache.clone()
+
+  model(block, None, sample_mode=True, store_kv=False)
+  _assert_cache_close(model._sampling_left_cache, first_cache)
+

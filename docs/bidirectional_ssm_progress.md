@@ -48,10 +48,10 @@ publicly accessible, so no unreleased source is assumed.
 - [x] Preserve the previous long-range experiment stack in commit `d424822`.
 - [x] Create the dedicated branch `codex/bidirectional-ssm`.
 - [x] Add segment-continuable Mamba-2 mixer with immutable cache states.
-- [ ] Add prefix/active/suffix bidirectional backbone.
+- [x] Add prefix/active/suffix bidirectional backbone.
 - [ ] Add single-active-block unbiased training integration.
 - [ ] Add native block commit sampling integration.
-- [ ] Add C-a right-flank preparation API.
+- [x] Add C-a right-flank preparation API.
 - [ ] Add cache equivalence, leakage, and gradient tests.
 - [ ] Add production and smoke-test configurations/scripts.
 
