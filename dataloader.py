@@ -46,6 +46,24 @@ def _assert_dual_stream_compat(config) -> None:
       "(the in-model k-mer encoder assumes DNATokenizer's ACGT id range).")
 
 
+def _assert_bissm_compat(config) -> None:
+  """Validate the leakage-safe recurrent training/sampling contract."""
+  if config.algo.get('backbone', 'dit') != 'bissm':
+    return
+  if config.model.length % config.block_size:
+    raise ValueError(
+      f"algo.backbone=bissm requires model.length ({config.model.length}) "
+      f"divisible by block_size ({config.block_size}).")
+  if config.algo.get('cross_attn', False):
+    raise ValueError(
+      "algo.backbone=bissm requires algo.cross_attn=False; recurrent clean "
+      "prefixes are passed through explicit boundary caches, not [xt; x0].")
+  if config.data.tokenizer_name_or_path != 'dna':
+    raise ValueError(
+      "The first BiSSM milestone is scoped to the single-nucleotide DNA "
+      "tokenizer. Set data.tokenizer_name_or_path='dna'.")
+
+
 def wt_detokenizer(string):
   # contractions
   string = string.replace("s '", "s'")
@@ -718,6 +736,7 @@ def get_tokenizer(config):
 def get_dataloaders(config, tokenizer, skip_train=False,
                     skip_valid=False, valid_seed=None):
   _assert_dual_stream_compat(config)
+  _assert_bissm_compat(config)
   num_gpus = torch.cuda.device_count()
   if config.trainer.accumulate_grad_batches > 1:
     assert (config.loader.global_batch_size

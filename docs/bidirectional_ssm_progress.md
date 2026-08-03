@@ -49,11 +49,11 @@ publicly accessible, so no unreleased source is assumed.
 - [x] Create the dedicated branch `codex/bidirectional-ssm`.
 - [x] Add segment-continuable Mamba-2 mixer with immutable cache states.
 - [x] Add prefix/active/suffix bidirectional backbone.
-- [ ] Add single-active-block unbiased training integration.
-- [ ] Add native block commit sampling integration.
+- [x] Add single-active-block unbiased training integration.
+- [x] Add native block commit sampling integration.
 - [x] Add C-a right-flank preparation API.
-- [ ] Add cache equivalence, leakage, and gradient tests.
-- [ ] Add production and smoke-test configurations/scripts.
+- [x] Add cache equivalence, leakage, and gradient tests.
+- [x] Add production and smoke-test configurations/scripts.
 
 ## Deliberate first-version constraints
 

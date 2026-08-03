@@ -78,6 +78,9 @@ class Diffusion(L.LightningModule):
     elif self.config.algo.backbone == 'dit_dual':
       self.backbone = models.dit_dual.DualStreamDIT(
         self.config, vocab_size=self.vocab_size)
+    elif self.config.algo.backbone == 'bissm':
+      self.backbone = models.bidirectional_ssm.BidirectionalSSM(
+        self.config, vocab_size=self.vocab_size)
     elif self.config.algo.backbone == 'dimamba':
       self.backbone = models.dimamba.DiMamba(
         self.config,
@@ -143,7 +146,7 @@ class Diffusion(L.LightningModule):
         self.config.sampling.first_hitting:
       assert self.config.loader.eval_batch_size == 1
     assert self.config.algo.backbone in {
-      'dit', 'ar', 'hf_dit', 'dit_dual'}
+      'dit', 'ar', 'hf_dit', 'dit_dual', 'bissm'}
     if self.config.algo.parameterization == 'ar':
       assert not self.config.algo.time_conditioning
     if self.config.sampling.kv_cache:
@@ -899,6 +902,10 @@ class Diffusion(L.LightningModule):
       loss_scale = - torch.ones_like(loss_scale)
     if self.ignore_bos:
       xt[:, 0] = x0[:, 0]
+
+    if self.config.algo.backbone == 'bissm':
+      return self._forward_pass_bissm(
+        x0=x0, xt=xt, p=p, loss_scale=loss_scale)
     
     x_input = xt
     if self.cross_attn:
@@ -932,6 +939,64 @@ class Diffusion(L.LightningModule):
         (-log_p_theta) - (-log_p_shuf) + self.l_use_margin) * masked
       loss = loss + self.l_use_weight * l_use
       self._last_l_use = (l_use.sum() / masked.sum().clamp(min=1)).detach()
+    return loss
+
+  def _forward_pass_bissm(self, x0, xt, p, loss_scale):
+    """Unbiased one-active-block objective for recurrent boundary caches.
+
+    The Transformer backbone can evaluate every active block through a single
+    specialized ``[x_t; x_0]`` attention mask. A recurrent model cannot share
+    that computation without a custom batched boundary-state scan. We instead
+    sample one block uniformly, evaluate the exact inference computation, and
+    multiply by the number of blocks. The resulting full-length loss tensor is
+    an unbiased estimator of the existing all-block objective.
+    """
+    sequence_length = x0.shape[1]
+    if sequence_length % self.block_size:
+      raise ValueError(
+        f"BiSSM requires sequence length ({sequence_length}) divisible by "
+        f"block size ({self.block_size})")
+    num_blocks = sequence_length // self.block_size
+    active_block = int(torch.randint(num_blocks, (), device=x0.device).item())
+    start = active_block * self.block_size
+    end = start + self.block_size
+
+    clean_prefix = x0[:, :start]
+    noisy_active = xt[:, start:end]
+    clean_target = x0[:, start:end]
+    left_cache = self.backbone.prefill_left(clean_prefix)
+
+    right_cache = None
+    right_probability = float(
+      self.config.model.get('right_flank_probability', 0.0))
+    if right_probability < 0 or right_probability > 1:
+      raise ValueError("model.right_flank_probability must be in [0, 1]")
+    use_right = (
+      right_probability == 1.0
+      or (right_probability > 0.0
+          and torch.rand((), device=x0.device) < right_probability))
+    if use_right:
+      # The target block is excluded by construction. An empty suffix at the
+      # last block is legal and reduces to the de-novo reverse initial state.
+      right_cache = self.backbone.prefill_right(x0[:, end:])
+
+    sigma_active = self._sigma_from_p(p[:, start:start + 1]).squeeze(-1)
+    logits = self.backbone.forward_active(
+      noisy_active,
+      sigma_active,
+      left_cache=left_cache,
+      right_cache=right_cache)
+    log_scores = self._subs_parameterization(logits, noisy_active)
+    log_p_theta = torch.gather(
+      input=log_scores,
+      dim=-1,
+      index=clean_target[:, :, None]).squeeze(-1)
+    active_loss = loss_scale[:, start:end] * log_p_theta
+
+    loss = torch.zeros_like(loss_scale)
+    loss[:, start:end] = active_loss * num_blocks
+    self._last_active_block = active_block
+    self._last_right_flank = use_right
     return loss
 
   def _loss(self, x0, attention_mask, t=None, sampling_eps_min=None, sampling_eps_max=None):
