@@ -25,7 +25,10 @@ from einops import rearrange
 
 try:
   from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
-except (ImportError, OSError):
+except (ImportError, OSError, RuntimeError):
+  # Triton initializes its device driver while importing mamba-ssm 2.2.x.
+  # Head/login nodes have no active GPU driver, so they intentionally fall
+  # back to the reference scan even when the package is installed.
   mamba_chunk_scan_combined = None
 
 
@@ -275,4 +278,3 @@ class SegmentMamba2(nn.Module):
   def forward(self, u: torch.Tensor) -> torch.Tensor:
     output, _ = self.scan_segment(u)
     return output
-

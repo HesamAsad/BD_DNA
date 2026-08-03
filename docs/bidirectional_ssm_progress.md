@@ -57,6 +57,13 @@ publicly accessible, so no unreleased source is assumed.
 - [x] Add production and smoke-test configurations/scripts.
 - [ ] Pass fused-vs-reference and end-to-end backward smoke on an H200.
 
+### GPU acceptance attempts
+
+- LSF `96521`: model was not reached. The optional `causal-conv1d` source
+  package could not build because batch nodes expose the CUDA runtime without
+  `nvcc`. Resolution: use Mamba-SSM 2.2.4's pure-Python/Triton installation
+  (`MAMBA_SKIP_CUDA_BUILD=TRUE`) and keep the segment convolution in PyTorch.
+
 ## Deliberate first-version constraints
 
 - The first correct training objective samples one active block per sequence

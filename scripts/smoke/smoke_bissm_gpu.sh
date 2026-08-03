@@ -24,9 +24,9 @@ export TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-9.0}
 export USE_TF=0
 export TF_CPP_MIN_LOG_LEVEL=3
 
-if ! "$PYTHON" -c "import mamba_ssm, causal_conv1d"; then
-  "$PYTHON" -m pip install --no-build-isolation \
-    causal-conv1d==1.6.2.post1 mamba-ssm==2.3.2.post1
+if ! "$PYTHON" -c "import mamba_ssm"; then
+  MAMBA_SKIP_CUDA_BUILD=TRUE "$PYTHON" -m pip install \
+    --user --no-deps --no-build-isolation mamba-ssm==2.2.4
 fi
 
 "$PYTHON" -u scripts/smoke/smoke_bissm_gpu.py
