@@ -56,6 +56,8 @@ publicly accessible, so no unreleased source is assumed.
 - [x] Add cache equivalence, leakage, and gradient tests.
 - [x] Add production and smoke-test configurations/scripts.
 - [x] Pass fused-vs-reference and end-to-end backward smoke on an H200.
+- [x] Supervise every block per training step (folded boundary caches).
+- [ ] Prokaryote perplexity comparison against the Transformer BD3-LM.
 
 ### GPU acceptance attempts
 
@@ -91,14 +93,72 @@ publicly accessible, so no unreleased source is assumed.
   with the auto-selected 128 persistent data workers, so it was terminated to
   release the H200. The launcher now exposes and defaults to a bounded worker
   count; a separate short run verifies clean process teardown.
+- LSF `96534`: teardown check with `NUM_WORKERS=4`. Two optimizer steps, a
+  saved checkpoint, and the process exited on its own 77 s after start
+  (`Successfully completed`), confirming the worker bound fixed the hang.
+
+## All-block training objective
+
+The first version sampled one active block per step and rescaled by the block
+count. That is unbiased for the loss *value*, but gradient only ever reached
+`1/num_blocks` of the tokens, so at the production geometry (L=8192, block
+256) it was a 32:1 learning-signal handicap against the Transformer's
+all-block `[x_t; x_0]` objective — a perplexity comparison would have measured
+the estimator, not the backbone.
+
+`model.active_blocks=all` (the default) now supervises every block per step:
+
+1. `prefill_left_boundaries` scans the clean sequence once, keeping the state
+   entering each block; `prefill_right_boundaries` does the same from the far
+   end for C-a, and block `i`'s suffix state never includes block `i`.
+2. `stack_boundary_caches` folds those per-block states into one cache of
+   batch `batch * num_blocks`, matching a `[batch, L] -> [batch*num_blocks,
+   block]` reshape of the noisy sequence.
+3. One batched `forward_active` call denoises every block.
+
+Cost is one clean scan plus one batched active scan instead of a half-length
+prefix scan plus one block, for `num_blocks` times the supervised tokens.
+`model.active_blocks=one` keeps the original estimator.
+
+Tests cover boundary-state equivalence against per-block prefills (both
+directions), folded-vs-per-block logit equality, agreement between the two
+estimators on the sampled block, and a per-position leakage sweep showing that
+block `i`'s de-novo logits move only for clean tokens strictly before it. The
+H200 acceptance smoke asserts the same folded-vs-per-block equality under the
+fused kernel in BF16.
+
+### Prokaryote perplexity comparison
+
+Protocol — everything except the backbone is held equal: `carbon-prokaryote`
+shard 1 capped at 400k rows (8.09B train / 76.9M validation nucleotides, built
+once by `scripts/eval/pregen_prok_caches.sh` and read by both arms), L=8192,
+block 256, global batch 64 (524k nt per optimizer step), 8000 steps (4.19B nt,
+about half an epoch), dropout 0, lr 3e-4 constant-warmup, seed 1, and the same
+1024-sequence validation subset every 500 steps.
+
+Sizing sweep on one H200 (`scripts/smoke/smoke_prok_arms.sh`, LSF `96596`),
+peak memory and steady-state step time at L=8192:
+
+| arm | micro batch | peak | step | throughput |
+|---|---|---|---|---|
+| BiSSM (all blocks) | 2 | 39.8 GiB | ~2.0 s | ~8.2k nt/s |
+| BiSSM (all blocks) | 4 | 75.1 GiB | ~2.2 s | ~15k nt/s |
+| BiSSM (all blocks) | 8 | OOM | — | — |
+| Transformer | 4 | 41.6 GiB | ~0.6 s | ~55k nt/s |
+| Transformer | 8 | 79.1 GiB | ~0.8 s | ~82k nt/s |
+
+BiSSM step time is flat from micro batch 2 to 4, i.e. the all-block path is
+launch-bound on the `num_blocks x n_layers` sequence of per-block scans, not
+compute-bound. Collapsing that into a per-layer chunked state-passing scan is
+the obvious next optimization; at present the SSM arm costs about 3.7x the
+Transformer's wall-clock per nucleotide.
+
+Runs: LSF `96602` (BiSSM, micro batch 4) and `96604` (Transformer control,
+micro batch 8), both 4xH200. Final held-out numbers come from
+`scripts/eval/ppl_prok_compare.sh`, which scores both checkpoints on the same
+validation batches and reports nats/nt, perplexity, and bits/nt.
 
 ## Deliberate first-version constraints
-
-- The first correct training objective samples one active block per sequence
-  batch and multiplies its loss by the number of blocks. This is an unbiased
-  estimator of the all-block objective and avoids the current Transformer's
-  `[x_t; x_0]` masking trick, which cannot represent exact recurrent boundary
-  states without a custom batched scan.
 - The first backbone is all-Mamba. Sparse local-attention layers will be added
   only after cache/leakage tests pass, because exact attention continuation also
   requires a bounded boundary cache.
