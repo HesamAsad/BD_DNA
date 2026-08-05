@@ -12,6 +12,7 @@ from scripts.eval.dnahnet.mavedb import (
   spearmanr,
   summarize_predictions,
 )
+from scripts.eval.dnahnet.aggregate_mavedb import aggregate_runs
 
 
 MANIFEST = (
@@ -103,3 +104,26 @@ def test_summary_uses_macro_absolute_per_assay_spearman():
   assert summary["num_assays"] == 2
   assert summary["num_variants"] == 6
   assert summary["macro_abs_spearman"] == pytest.approx(1.0)
+
+
+def test_aggregate_runs_averages_scores_and_measures_agreement():
+  def run(scores):
+    return [{
+      "score_set_urn": "a",
+      "score_set_title": "a",
+      "target": "a",
+      "accession": str(index),
+      "experimental_score": str(index),
+      "predicted_fitness": str(score),
+      "predicted_fitness_per_nt": str(score),
+      "wt_nelbo": str(score + 2),
+      "mut_nelbo": "2",
+      "wt_nelbo_per_nt": str(score + 2),
+      "mut_nelbo_per_nt": "2",
+    } for index, score in enumerate(scores)]
+
+  combined, stability = aggregate_runs([run([1, 2, 3]), run([3, 2, 1])])
+  assert [row["predicted_fitness"] for row in combined] == [2, 2, 2]
+  agreement = stability["run_agreements"][0]
+  assert agreement["prediction_spearman"] == pytest.approx(-1.0)
+  assert agreement["mean_absolute_score_delta"] == pytest.approx(4 / 3)

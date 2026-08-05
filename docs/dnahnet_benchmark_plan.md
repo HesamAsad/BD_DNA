@@ -53,6 +53,17 @@ time and corruption mask for each Monte Carlo sample. It reports per-assay
 Spearman, macro mean absolute Spearman (headline), and pooled Spearman so the
 paper's otherwise unspecified aggregation choice remains auditable.
 
+Run at least two independent seeds, then average their per-variant likelihood
+differences and record the between-seed agreement:
+
+```bash
+python scripts/eval/dnahnet/aggregate_mavedb.py \
+  --prediction results/dnahnet/mavedb/bissm-seed1/predictions.csv \
+  --prediction results/dnahnet/mavedb/bissm-seed2/predictions.csv \
+  --output-dir results/dnahnet/mavedb/bissm-ensemble \
+  --label BiSSM
+```
+
 Plot one or more completed results with the paper's Table 5 reference values:
 
 ```bash
