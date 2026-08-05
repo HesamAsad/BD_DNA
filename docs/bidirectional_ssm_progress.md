@@ -57,7 +57,7 @@ publicly accessible, so no unreleased source is assumed.
 - [x] Add production and smoke-test configurations/scripts.
 - [x] Pass fused-vs-reference and end-to-end backward smoke on an H200.
 - [x] Supervise every block per training step (folded boundary caches).
-- [ ] Prokaryote perplexity comparison against the Transformer BD3-LM.
+- [x] Prokaryote perplexity comparison against the Transformer BD3-LM.
 
 ### GPU acceptance attempts
 
@@ -154,9 +154,57 @@ the obvious next optimization; at present the SSM arm costs about 3.7x the
 Transformer's wall-clock per nucleotide.
 
 Runs: LSF `96602` (BiSSM, micro batch 4) and `96604` (Transformer control,
-micro batch 8), both 4xH200. Final held-out numbers come from
-`scripts/eval/ppl_prok_compare.sh`, which scores both checkpoints on the same
-validation batches and reports nats/nt, perplexity, and bits/nt.
+micro batch 8), both 4xH200, both completed 8000 steps and exited cleanly.
+
+#### Result
+
+`scripts/eval/ppl_prok_compare.sh` (LSF `98003`) scored both final
+checkpoints on the same 512 validation batches -- 16.8M held-out nucleotides,
+identical data for both arms:
+
+| arm | val NLL (nats/nt) | perplexity | bits/nt | wall clock |
+|---|---|---|---|---|
+| BiSSM | 1.25232 | 3.4985 | 1.8067 | 20 h 15 m |
+| Transformer BD3-LM | 1.24577 | 3.4756 | 1.7973 | 3 h 59 m |
+
+At matched tokens the Transformer is ahead by 0.0066 nats/nt (0.0094 bits/nt,
+0.66% perplexity). Both are far below the ln(4) = 1.3863 uniform-DNA baseline.
+Training-time validation agreed: the arms bottomed out at 1.25490 and 1.24636
+respectively at step 7500.
+
+Read this as a likelihood result only. The SSM is close but not ahead, and it
+paid 5.1x the wall clock for that, so nothing here yet justifies the recurrent
+backbone on perplexity alone -- the case for it has to come from the O(1)
+commit cache and the C-a infilling mode, which the Transformer cannot do at
+bounded memory.
+
+Checkpoint bookkeeping: both jobs were submitted in the same second, so Hydra
+resolved both to `outputs/carbon-prokaryote/2026.08.03/162751` and interleaved
+their checkpoints. Plain names are the Transformer, `-v1` names are the BiSSM;
+ownership is verifiable from the state dict (`blocks.0.attn` vs
+`mixer.in_proj`). The launchers now stamp the LSF job id into `hydra.run.dir`,
+so this cannot recur.
+
+#### Known cost: the all-block path is launch-bound
+
+Steady state was 0.44 it/s from the first hour to the last, i.e. no
+degradation over 20 h; the SSM arm is simply 3.7x the Transformer's cost per
+nucleotide. `_boundary_caches` walks the clean sequence block by block and
+runs all 12 layers at each step, so a step issues `12 x 32 = 384` sequential
+scan calls, each over only 4 x 256 tokens. Two independent signs of
+launch-bound behaviour: step time rose only 10% (2.0 s to 2.2 s) when the
+micro batch doubled from 2 to 4, and a FLOP count puts roughly 0.12 s of
+arithmetic inside a 2.27 s step (about 5% arithmetic efficiency, consistent
+with the ~20% kernel-busy figure in wandb).
+
+The fix is chunked state passing: compute every block's local scan in one
+folded batched call, carry boundary states across blocks with a cheap
+elementwise recurrence, and apply the standard output correction. That is
+about 2 kernel calls per layer instead of 32 -- roughly 24 launches per step
+rather than 384. This is the same restructuring Mamba-2's chunk scan performs
+internally, applied one level up.
+
+## Deliberate first-version constraints
 
 ## Deliberate first-version constraints
 - The first backbone is all-Mamba. Sparse local-attention layers will be added
