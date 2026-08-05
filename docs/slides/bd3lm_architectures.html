@@ -93,6 +93,102 @@
   .qgrid .q4 { background: #dce9f7; }
   .qgrid .q0 { color: #bbb; }
 
+  /* ---- C-a comparison diagrams ----------------------------------------- */
+  .seqbar { display: grid; grid-template-columns: 1.25fr repeat(3,.72fr) 1.25fr;
+            gap: 0.18em; margin: 0.45em 0; }
+  .seg { border: 1.5px solid #999; border-radius: 5px; padding: 0.55em 0.35em;
+         text-align: center; font-size: 0.6em; line-height: 1.2; background: #fafafa; }
+  .seg.left, .seg.right { background: #dce9f7; border-color: #2f6fb0; }
+  .seg.done { background: #dcecdd; border-color: #3f7a49; }
+  .seg.active { border-color: #b8622f;
+                background: repeating-linear-gradient(45deg,#f8e3d0 0 6px,#f0cfae 6px 8px); }
+  .seg.unknown { border-style: dashed; color: #888; background: #f5f5f5; }
+  .seg .cap { display:block; font-size:.78em; color:#666; margin-top:.15em; }
+
+  .flow { display: flex; align-items: center; justify-content: center; gap: 0.34em;
+          margin: 0.45em 0; }
+  .flow.vertical { flex-direction: column; }
+  .flow-node { border: 1.6px solid #8d8d8d; border-radius: 7px; background: #fafafa;
+               padding: 0.5em 0.62em; text-align: center; font-size: 0.61em;
+               line-height: 1.22; min-width: 0; }
+  .flow-node.clean { background:#dce9f7; border-color:#2f6fb0; }
+  .flow-node.belief { background:#dcecdd; border-color:#3f7a49; }
+  .flow-node.active { background:#f8e3d0; border-color:#b8622f; }
+  .flow-node.logic { background:#eee8f7; border-color:#7653a6; }
+  .flow-node.fixed { border-style: double; border-width: 3px; }
+  .flow-node .cap { display:block; color:#666; font-size:.78em; margin-top:.15em; }
+  .flow-arrow { color:#666; font-size:0.9em; flex: 0 0 auto; text-align:center; }
+  .flow-arrow.left { transform: rotate(180deg); }
+
+  .stage-grid { display:grid; grid-template-columns: repeat(3,minmax(0,1fr));
+                gap:.55em; margin:.5em 0; }
+  .stage { border:1.5px solid #bbb; border-radius:8px; padding:.48em;
+           background:#fcfcfc; min-width:0; }
+  .stage .num { display:inline-grid; place-items:center; width:1.65em; height:1.65em;
+                border-radius:50%; background:#333; color:white; font-size:.55em;
+                font-weight:700; margin-right:.35em; }
+  .stage .title { font-size:.65em; font-weight:700; color:#333; }
+  .stage .micro { font-size:.49em; color:#666; line-height:1.28; margin-top:.35em; }
+
+  .belief-pair { display:grid; grid-template-columns:1fr auto 1fr; gap:.55em;
+                 align-items:center; margin:.35em 0; }
+  .memory-card { border:1.6px solid #3f7a49; background:#dcecdd; border-radius:8px;
+                 padding:.55em; text-align:center; font-size:.62em; }
+  .memory-card.fixed { border-style:double; border-width:3px; }
+  .memory-card .cap { display:block; font-size:.78em; color:#566; margin-top:.15em; }
+  .denoise-core { border:2px solid #b8622f; border-radius:10px; background:#fff7ef;
+                  padding:.68em .5em; text-align:center; font-size:.68em; font-weight:700; }
+
+  .layer-layout { display:grid; grid-template-columns:minmax(0,.82fr) minmax(0,1.65fr) minmax(0,.82fr);
+                  gap:.65em; align-items:center; margin:.35em 0; }
+  .cache-stack { border:1.6px solid #3f7a49; border-radius:8px; background:#edf6ee;
+                 padding:.45em; text-align:center; }
+  .cache-stack .cache-row { border:1px solid #87a88c; background:#fff; border-radius:4px;
+                            padding:.18em; margin:.18em 0; font-size:.49em; }
+  .layer-pipe { border:1.7px solid #7653a6; background:#f6f2fb; border-radius:9px;
+                padding:.5em; }
+  .layer-pipe .pipe-title { text-align:center; font-size:.59em; font-weight:700; margin-bottom:.35em; }
+  .pipe-row { display:grid; grid-template-columns:1fr auto 1fr; gap:.28em; align-items:center; }
+  .pipe-box { border:1.3px solid #999; background:white; border-radius:5px;
+              padding:.38em .2em; font-size:.49em; text-align:center; line-height:1.2; }
+  .pipe-sum { font-size:.72em; color:#7653a6; text-align:center; font-weight:700; }
+
+  .compare-matrix { display:grid; grid-template-columns:1.05fr 1.22fr 1.35fr;
+                    border:1.5px solid #aaa; border-radius:8px; overflow:hidden;
+                    margin:.4em 0; }
+  .cmp { padding:.38em .5em; border-right:1px solid #ddd; border-bottom:1px solid #ddd;
+         font-size:.54em; line-height:1.24; min-width:0; }
+  .cmp:nth-child(3n) { border-right:0; }
+  .cmp.head { background:#333; color:white; font-weight:700; font-size:.57em; }
+  .cmp.rowhead { background:#f2f2f2; font-weight:700; color:#444; }
+  .cmp.same { background:#edf6ee; }
+  .cmp.diff { background:#fff5e9; }
+  .tag { display:inline-block; border-radius:999px; padding:.08em .42em; margin-right:.3em;
+         font-size:.82em; font-weight:700; }
+  .tag.same { background:#3f7a49; color:white; }
+  .tag.diff { background:#b8622f; color:white; }
+
+  .train-lanes { display:grid; grid-template-columns:.65fr 2.1fr 1fr;
+                 gap:.35em; align-items:stretch; margin:.4em 0; }
+  .lane-label { display:flex; align-items:center; font-size:.54em; font-weight:700; color:#444; }
+  .lane-body { border:1.5px solid #aaa; border-radius:7px; padding:.38em; background:#fafafa; }
+  .lane-result { display:flex; align-items:center; justify-content:center; border-radius:7px;
+                 padding:.35em; text-align:center; font-size:.51em; line-height:1.2; }
+  .lane-result.ok { background:#edf6ee; border:1.5px solid #3f7a49; }
+  .lane-result.gap { background:#fff5e9; border:1.5px solid #b8622f; }
+  .mini-seq { display:flex; align-items:stretch; gap:.12em; }
+  .mini-seq span { flex:1 1 0; border:1px solid #999; border-radius:3px; padding:.3em .16em;
+                   text-align:center; font-size:.48em; line-height:1.12; }
+  .mini-seq .c { background:#dce9f7; border-color:#2f6fb0; }
+  .mini-seq .n { background:#f8e3d0; border-color:#b8622f; }
+  .mini-seq .g { background:#f5f5f5; border-style:dashed; color:#777; }
+
+  .intuition { display:grid; grid-template-columns:auto 1fr; align-items:center; gap:.55em;
+               border-left:4px solid #7653a6; background:#f6f2fb; padding:.48em .62em;
+               margin-top:.5em; }
+  .intuition .icon { font-size:1.3em; }
+  .intuition .words { font-size:.61em; line-height:1.3; color:#3f3450; }
+
   .reveal table { font-size: 0.62em; margin: 0.3em 0; border-collapse: collapse; width: 100%; }
   .reveal table th { border-bottom: 2px solid #999; text-align: left; padding: 0.22em 0.45em; }
   .reveal table td { padding: 0.2em 0.45em; border-bottom: 1px solid #e4e4e4; }
@@ -374,7 +470,7 @@
     <div class="row">
       <div class="box clean wide">clean prefix \(x_0^{&lt;b}\)</div>
       <div class="box noisy">active noisy block</div>
-      <div class="box clean wide">clean suffix \(x_0^{&gt;b}\) <span class="cap">C-a only</span></div>
+      <div class="box clean wide">observed external right flank \(r\) <span class="cap">C-a only</span></div>
     </div>
     <div class="row" style="margin-top:0.35em">
       <div style="flex:2 1 0; text-align:center"><span class="lbl g">forward scan, no timestep &#8594;</span></div>
@@ -515,49 +611,253 @@
 
 <!-- 12 =================================================================== -->
 <section>
-  <h2>C-a mode: infilling against a fixed right flank</h2>
+  <h2>C-a intuition: two memories around a moving frontier</h2>
 
-  <p class="small">The sampler can initialize the reverse scan from an
-  <em>observed</em> right flank instead of the empty state. It is built once and
-  never mutated as blocks commit left to right.</p>
+  <div class="seqbar">
+    <div class="seg left">left flank<span class="cap">observed</span></div>
+    <div class="seg done">\(b_1\)<span class="cap">committed</span></div>
+    <div class="seg active">\(b_2\)<span class="cap">denoise now</span></div>
+    <div class="seg unknown">\(b_3\)<span class="cap">unknown</span></div>
+    <div class="seg right">right flank<span class="cap">observed</span></div>
+  </div>
 
-  <div class="dgm">
-    <div class="row">
-      <div class="box clean">left context<span class="cap">given</span></div>
-      <div class="box state">committed</div>
-      <div class="box noisy">active</div>
-      <div class="box ghost">gap<span class="cap">still masked</span></div>
-      <div class="box clean">right flank<span class="cap">given</span></div>
+  <div class="belief-pair">
+    <div class="memory-card">
+      \(h_m^{\rightarrow}\)
+      <span class="cap">left flank + committed gap</span>
+      <span class="cap">advances after every commit \(\rightarrow\)</span>
     </div>
-    <div class="row" style="margin-top:0.3em">
-      <div style="flex:2 1 0"><span class="lbl g">left cache advances one block per commit</span></div>
-      <div style="flex:1 1 0"></div>
-      <div style="flex:2 1 0; text-align:right"><span class="lbl g">right cache computed once, held fixed</span></div>
+    <div class="denoise-core">
+      noisy \(b_m\)<br>
+      \(\Downarrow\ T\) reverse steps<br>
+      clean \(b_m\)
+    </div>
+    <div class="memory-card fixed">
+      \(H_{\text{down}}\)
+      <span class="cap">entire observed right flank</span>
+      <span class="cap">\(\leftarrow\) feeds every block &middot; never changes</span>
     </div>
   </div>
 
-  <div class="cols">
-    <div>
-      <h3>What is implemented</h3>
-      <p class="small"><code>sample_infill_ca</code> generates a whole-block gap
-      left to right while holding only the external observed-flank state fixed.
-      Unknown, uncommitted gap blocks never enter either cache.</p>
-    </div>
-    <div>
-      <h3>What is not established yet</h3>
-      <p class="small">Training can draw each target block's clean suffix with
-      probability <code>right_flank_probability</code>, but the evaluated 8k
-      checkpoint used <strong>0.0</strong>. It has not been trained or benchmarked
-      for suffix conditioning, and matched multi-block-gap training is still
-      absent.</p>
-    </div>
+  <div class="flow" style="margin-top:.65em">
+    <div class="flow-node belief">commit \(b_2\)<span class="cap">update left memory</span></div>
+    <div class="flow-arrow">&#8594;</div>
+    <div class="flow-node active">activate \(b_3\)</div>
+    <div class="flow-arrow">&#8592;</div>
+    <div class="flow-node belief fixed">reuse the same \(H_{\text{down}}\)</div>
   </div>
-  <p class="tiny">De-novo perplexity and generation never use a right cache;
-  doing so would be an oracle. C-a results must be reported as conditional
-  infilling, not de-novo likelihood.</p>
+
+  <div class="intuition">
+    <div class="icon">&#8644;</div>
+    <div class="words"><strong>Intuition.</strong> The left memory says “where we
+    came from”; the fixed right memory says “what we are heading into.” It does
+    not reveal the still-unknown gap.</div>
+  </div>
 </section>
 
 <!-- 13 =================================================================== -->
+<section>
+  <h2>The supplied C-a algorithm — three operations</h2>
+
+  <div class="stage-grid">
+    <div class="stage">
+      <div><span class="num">1</span><span class="title">Cache downstream once</span></div>
+      <div class="flow vertical">
+        <div class="flow-node clean">right-flank blocks</div>
+        <div class="flow-arrow">&#8595; reverse order</div>
+        <div class="flow-node logic"><code>SUMMARIZE</code><br>+ backward Mamba step</div>
+        <div class="flow-arrow">&#8595;</div>
+        <div class="flow-node belief fixed">\(H_{\text{down}}\)</div>
+      </div>
+      <div class="micro">A fixed summary of the external flank—not of the gap.</div>
+    </div>
+
+    <div class="stage">
+      <div><span class="num">2</span><span class="title">Cache upstream once</span></div>
+      <div class="flow vertical">
+        <div class="flow-node clean">left-flank blocks</div>
+        <div class="flow-arrow">&#8595; forward order</div>
+        <div class="flow-node logic"><code>SUMMARIZE</code><br>+ forward Mamba step</div>
+        <div class="flow-arrow">&#8595;</div>
+        <div class="flow-node belief">\(h^{\rightarrow}\)</div>
+      </div>
+      <div class="micro">This memory grows as generated blocks become clean.</div>
+    </div>
+
+    <div class="stage">
+      <div><span class="num">3</span><span class="title">Stream through the gap</span></div>
+      <div class="flow vertical">
+        <div class="flow-node active">masked block \(x_m\)</div>
+        <div class="flow-arrow">&#8595; \(T\) steps</div>
+        <div class="flow-node logic"><code>FineDenoiser</code><span class="cap">local exact window + both beliefs</span></div>
+        <div class="flow-arrow">&#8595;</div>
+        <div class="flow-node belief">commit + update \(h^{\rightarrow}\)</div>
+      </div>
+      <div class="micro">\(H_{\text{down}}\) stays fixed for every block.</div>
+    </div>
+  </div>
+
+  <div class="intuition">
+    <div class="icon">&#9678;</div>
+    <div class="words">C-a is a <strong>conditioning contract</strong>: fixed
+    downstream belief, advancing upstream belief, no ungenerated neighbour in
+    either. The LaTeX leaves the internal FineDenoiser architecture open.</div>
+  </div>
+</section>
+
+<!-- 14 =================================================================== -->
+<section>
+  <h2>Our implementation: inject C-a at every Mamba layer</h2>
+
+  <div class="layer-layout">
+    <div>
+      <div class="flow-node clean">raw left nucleotides</div>
+      <div class="flow-arrow">&#8595; forward prefill</div>
+      <div class="cache-stack">
+        <strong style="font-size:.58em">left cache tuple</strong>
+        <div class="cache-row">\(S_L^1=(\text{conv},\text{SSM})\)</div>
+        <div class="cache-row">\(S_L^2\)</div>
+        <div class="cache-row">&vellip;</div>
+        <div class="cache-row">\(S_L^{12}\)</div>
+      </div>
+    </div>
+
+    <div class="layer-pipe">
+      <div class="pipe-title">BiMambaLayer \(\ell\) &nbsp;&middot;&nbsp; repeated 12&times;</div>
+      <div class="pipe-row">
+        <div class="pipe-box">\(S_L^\ell\)<br>&#8595;<br>forward scan \(\rightarrow\)</div>
+        <div class="pipe-sum">+</div>
+        <div class="pipe-box">\(S_R^\ell\)<br>&#8595;<br>\(\leftarrow\) reverse scan</div>
+      </div>
+      <div class="flow-arrow">&#8595; shared <code>SegmentMamba2</code> weights</div>
+      <div class="pipe-box" style="background:#fff7ef">position-aligned sum over noisy block</div>
+      <div class="flow-arrow">&#8595;</div>
+      <div class="pipe-box">residual + MLP</div>
+    </div>
+
+    <div>
+      <div class="flow-node clean">raw right nucleotides</div>
+      <div class="flow-arrow">&#8595; reverse prefill</div>
+      <div class="cache-stack">
+        <strong style="font-size:.58em">right cache tuple</strong>
+        <div class="cache-row">\(S_R^1=(\text{conv},\text{SSM})\)</div>
+        <div class="cache-row">\(S_R^2\)</div>
+        <div class="cache-row">&vellip;</div>
+        <div class="cache-row">\(S_R^{12}\)</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow" style="margin-top:.6em">
+    <div class="flow-node active">denoise active block repeatedly<span class="cap">both cache tuples immutable</span></div>
+    <div class="flow-arrow">&#8594;</div>
+    <div class="flow-node clean">commit raw clean block</div>
+    <div class="flow-arrow">&#8594;</div>
+    <div class="flow-node belief">advance only \(\{S_L^\ell\}_{1:12}\)</div>
+  </div>
+
+  <div class="intuition">
+    <div class="icon">&#8660;</div>
+    <div class="words">The C-a pseudocode feeds two belief summaries <em>to</em> a
+    denoiser. We make the denoiser itself resume from left and right boundary
+    states at every layer, so downstream information is mixed position by
+    position across the active block.</div>
+  </div>
+</section>
+
+<!-- 15 =================================================================== -->
+<section>
+  <h2>C-a vs current BiSSM: same contract, different mechanism</h2>
+
+  <div class="compare-matrix">
+    <div class="cmp head">design axis</div>
+    <div class="cmp head">supplied C-a algorithm</div>
+    <div class="cmp head">current repository</div>
+
+    <div class="cmp rowhead">generation factorization</div>
+    <div class="cmp same"><span class="tag same">same</span>left-to-right blocks; fixed right flank</div>
+    <div class="cmp same">same; <code>sample_infill_ca</code></div>
+
+    <div class="cmp rowhead">belief granularity</div>
+    <div class="cmp diff"><span class="tag diff">different</span>summarize each block into \(h^{\rightarrow},H_{\text{down}}\)</div>
+    <div class="cmp diff">nucleotide-resolution scan; \((\text{conv},\text{SSM})\) state for every layer</div>
+
+    <div class="cmp rowhead">where right context enters</div>
+    <div class="cmp diff">conditioning argument to <code>FineDenoiser</code></div>
+    <div class="cmp diff">initial state of the reverse active scan in all 12 layers</div>
+
+    <div class="cmp rowhead">exact local prefix</div>
+    <div class="cmp diff">explicit trailing window \((L\parallel gen)[w:]\)</div>
+    <div class="cmp diff">no attention window; context only through recurrent state</div>
+
+    <div class="cmp rowhead">inside active block</div>
+    <div class="cmp same"><span class="tag same">same</span>bidirectional denoising</div>
+    <div class="cmp same">forward + reversed Mamba scan, then direct sum</div>
+
+    <div class="cmp rowhead">strand symmetry</div>
+    <div class="cmp diff">recommends reverse-complement-equivariant sharing</div>
+    <div class="cmp diff">directions share weights, but reverse order only—no complement transform</div>
+
+    <div class="cmp rowhead">unknown gap blocks</div>
+    <div class="cmp same"><span class="tag same">same</span>never enter \(H_{\text{down}}\)</div>
+    <div class="cmp same">excluded from both caches until committed</div>
+  </div>
+</section>
+
+<!-- 16 =================================================================== -->
+<section>
+  <h2>The important gap is training—not sampler wiring</h2>
+
+  <div class="train-lanes">
+    <div class="lane-label">C-a design</div>
+    <div class="lane-body">
+      <div class="mini-seq">
+        <span class="c">clean left</span><span class="n">active \(b_1\)</span>
+        <span class="g">unknown \(b_2\)</span><span class="g">unknown \(b_3\)</span>
+        <span class="c">clean right</span>
+      </div>
+    </div>
+    <div class="lane-result ok">desired: matched<br>middle-span infilling</div>
+
+    <div class="lane-label">checkpoint used</div>
+    <div class="lane-body">
+      <div class="mini-seq">
+        <span class="c">clean prefix</span><span class="n">one active block</span>
+        <span class="g">future hidden</span><span class="g">future hidden</span>
+      </div>
+    </div>
+    <div class="lane-result gap"><code>right_flank_probability=0</code><br>suffix-state route untrained</div>
+
+    <div class="lane-label">optional code path</div>
+    <div class="lane-body">
+      <div class="mini-seq">
+        <span class="c">clean prefix</span><span class="n">one active block</span>
+        <span class="c">clean suffix</span><span class="c">clean suffix</span>
+      </div>
+    </div>
+    <div class="lane-result ok">valid single-block-hole<br>conditional objective</div>
+
+    <div class="lane-label">current sampler</div>
+    <div class="lane-body">
+      <div class="mini-seq">
+        <span class="c">clean left</span><span class="n">active</span>
+        <span class="g">unknown gap</span><span class="g">unknown gap</span>
+        <span class="c">clean right</span>
+      </div>
+    </div>
+    <div class="lane-result gap">multi-block API works;<br>quality is untrained</div>
+  </div>
+
+  <div class="flow" style="margin-top:.7em">
+    <div class="flow-node logic">matched span training</div>
+    <div class="flow-arrow">&#8594;</div>
+    <div class="flow-node logic">true / zero / shuffled right state</div>
+    <div class="flow-arrow">&#8594;</div>
+    <div class="flow-node belief">distance-resolved interior \(\Delta\)NLL</div>
+  </div>
+</section>
+
+<!-- 17 =================================================================== -->
 <section>
   <h2>Cost profile side by side</h2>
 
@@ -583,7 +883,7 @@
   </div>
 </section>
 
-<!-- 14 =================================================================== -->
+<!-- 18 =================================================================== -->
 <section>
   <h2>Measured: prokaryote, matched tokens</h2>
 
@@ -617,7 +917,7 @@
   </div>
 </section>
 
-<!-- 15 =================================================================== -->
+<!-- 19 =================================================================== -->
 <section>
   <h2>Recent benchmarks: what they do and do not show</h2>
 
@@ -650,7 +950,7 @@
   </div>
 </section>
 
-<!-- 16 =================================================================== -->
+<!-- 20 =================================================================== -->
 <section>
   <h2>Next decisive experiment</h2>
 
@@ -682,7 +982,8 @@
   <code>models/dit_dual.py</code>, <code>diffusion.py</code>,
   <code>docs/bidirectional_ssm_progress.md</code>. Runs: LSF 96602 / 96604 /
   98003 (likelihood), 98850 / 98851 / 98856 / 98857 (MaveDB), 98871 / 98876
-  (forward scaling). External reference: dnaHNet, arXiv:2602.10603, Table 5.</p>
+  (forward scaling). Design reference: supplied <code>5_Context_BiDir.tex</code>
+  C-a pseudocode. External reference: dnaHNet, arXiv:2602.10603, Table 5.</p>
 </section>
 
 </div></div>
