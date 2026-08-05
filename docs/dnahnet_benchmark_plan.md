@@ -69,9 +69,14 @@ Plot one or more completed results with the paper's Table 5 reference values:
 ```bash
 python scripts/eval/dnahnet/plot_mavedb.py \
   --result BiSSM=results/dnahnet/mavedb/bissm/summary.json \
-  --result Transformer=results/dnahnet/mavedb/transformer/summary.json \
+  --result "BD3-LM Transformer=results/dnahnet/mavedb/transformer/summary.json" \
   --output results/dnahnet/mavedb/mavedb_comparison.png
 ```
+
+The first completed comparison uses two seeds with eight paired Monte Carlo
+samples per seed. Its seed-to-seed score correlation is only about 0.48 for
+both backbones, so it is a preliminary ranking estimate. Increase the Monte
+Carlo count before using small differences as a publication claim.
 
 ## Interpretation constraints
 

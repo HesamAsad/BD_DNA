@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 PUBLISHED = [
   ("dnaHNet", 0.3266, r"$6.4\times10^{19}$ FLOPs"),
   ("StripedHyena2", 0.3110, r"$7.11\times10^{19}$ FLOPs"),
-  ("Transformer", 0.1555, r"$8.0\times10^{19}$ FLOPs"),
+  ("Transformer\n(paper)", 0.1555, r"$8.0\times10^{19}$ FLOPs"),
 ]
 
 
@@ -34,7 +34,10 @@ def main():
       summary = json.load(handle)
     labels.append(label)
     values.append(float(summary["macro_abs_spearman"]))
-    notes.append(f"ours, n={summary['num_variants']:,}")
+    num_runs = int(summary.get("num_independent_runs", 1))
+    notes.append(
+      f"ours, n={summary['num_variants']:,}\n{num_runs} seed"
+      f"{'s' if num_runs != 1 else ''}")
     colors.append("#4c78a8")
     hatches.append("")
   for label, value, compute in PUBLISHED:

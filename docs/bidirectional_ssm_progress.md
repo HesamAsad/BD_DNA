@@ -224,6 +224,37 @@ uses exact autoregressive likelihood and substantially more pretraining data.
 The preparation, scorer, plotter and interpretation contract are documented in
 `docs/dnahnet_benchmark_plan.md`.
 
+#### First MaveDB result
+
+Full H200 evaluations completed for BiSSM (`98850`, `98856`) and the matched
+BD3-LM Transformer (`98851`, `98857`). Each run scores all 21,250 variants with
+eight paired NELBO samples; the reported ensemble averages each variant's two
+independent-seed scores before computing Spearman:
+
+| arm | seed 1 macro | seed 2 macro | ensemble macro | ensemble pooled | seed score agreement |
+|---|---:|---:|---:|---:|---:|
+| BiSSM | 0.0851 | 0.0947 | **0.1035** | 0.1739 | 0.4794 |
+| Transformer BD3-LM | 0.1030 | 0.1161 | **0.1239** | 0.0455 | 0.4784 |
+
+The Transformer leads the BiSSM by 0.0204 macro absolute Spearman on this
+evaluation. Both independent seeds give the same ordering. The raw per-variant
+seed agreement is nevertheless modest, so these MC-8 numbers are preliminary;
+raise the Monte Carlo count before interpreting smaller changes. Macro is the
+headline because pooled correlation is strongly affected by between-assay
+score offsets and composition.
+
+For scale, dnaHNet Table 5 reports 0.3266 for dnaHNet, 0.3110 for
+StripedHyena2, and 0.1555 for its Transformer at the largest listed compute.
+Those are reference bars, not matched controls: our checkpoints saw 4.19B
+nucleotides rather than dnaHNet's reported 144B, and paired diffusion NELBO is
+not exact autoregressive likelihood. These MaveDB targets are at most 216 nt
+and fit in one 256-nt block, so the result exercises within-block modelling but
+not the recurrent prefix cache or C-a right-flank path.
+
+Machine-readable outputs and the inspected figure are under the ignored
+`results/dnahnet/mavedb/` tree; the figure is
+`mavedb_comparison.png`.
+
 ## Deliberate first-version constraints
 - The first backbone is all-Mamba. Sparse local-attention layers will be added
   only after cache/leakage tests pass, because exact attention continuation also
