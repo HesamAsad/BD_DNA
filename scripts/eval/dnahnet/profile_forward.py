@@ -47,6 +47,14 @@ def parse_lengths(value: str) -> tuple[int, ...]:
   return lengths
 
 
+def classify_capacity_error(error: Exception) -> str | None:
+  if isinstance(error, torch.cuda.OutOfMemoryError):
+    return "oom"
+  if "64-bit indexing is not yet implemented for triton templates" in str(error):
+    return "backend_limit"
+  return None
+
+
 def _atomic_json(path: Path, value):
   path.parent.mkdir(parents=True, exist_ok=True)
   with tempfile.NamedTemporaryFile(
@@ -181,11 +189,14 @@ def main():
         f"latency={record['latency_seconds']:.4f}s "
         f"peak={record['peak_memory_gib']:.2f}GiB",
         flush=True)
-    except torch.cuda.OutOfMemoryError as error:
+    except Exception as error:
+      status = classify_capacity_error(error)
+      if status is None:
+        raise
       record = {
-        "status": "oom", "length": length,
+        "status": status, "length": length,
         "error": str(error).splitlines()[0]}
-      print(f"[{args.label}] length={length} OOM", flush=True)
+      print(f"[{args.label}] length={length} {status.upper()}", flush=True)
     summary["records"].append(record)
     _atomic_json(args.output, summary)
     gc.collect()

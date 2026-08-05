@@ -1,7 +1,11 @@
 import pytest
 import torch
 
-from scripts.eval.dnahnet.profile_forward import DEFAULT_LENGTHS, parse_lengths
+from scripts.eval.dnahnet.profile_forward import (
+  DEFAULT_LENGTHS,
+  classify_capacity_error,
+  parse_lengths,
+)
 from scripts.eval.dnahnet.score_mavedb import _loss_from_fixed_corruption
 
 
@@ -48,3 +52,12 @@ def test_fixed_corruption_expands_sequence_time_for_multiblock_bissm():
   losses = _loss_from_fixed_corruption(
     Model(), x0, torch.full((2, 1), 0.5), torch.ones((2, 8)))
   assert losses.shape == x0.shape
+
+
+def test_profile_classifies_known_capacity_failures():
+  assert classify_capacity_error(
+    torch.cuda.OutOfMemoryError("out of memory")) == "oom"
+  assert classify_capacity_error(RuntimeError(
+    "64-bit indexing is not yet implemented for triton templates"
+  )) == "backend_limit"
+  assert classify_capacity_error(RuntimeError("unrelated")) is None
