@@ -112,8 +112,14 @@ def _loss_from_fixed_corruption(model, x0, t, common_uniform):
     xt[:, 0] = x0[:, 0]
 
   if model.config.algo.backbone == "bissm":
+    # The all-block path takes one noise value at each block boundary. A fixed
+    # sequence-level time has shape [batch, 1], so materialize its broadcast
+    # explicitly for sequences containing more than one block.
     return model._forward_pass_bissm(
-      x0=x0, xt=xt, p=p, loss_scale=loss_scale)
+      x0=x0,
+      xt=xt,
+      p=p.expand_as(x0),
+      loss_scale=loss_scale.expand_as(x0))
 
   x_input = torch.cat((xt, x0), dim=-1) if model.cross_attn else xt
   log_scores = model.forward(x_input, sigma=sigma)
