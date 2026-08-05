@@ -18,6 +18,37 @@ protocol-aligned rather than data- or compute-matched unless explicitly stated.
 The direct comparison is always de novo. C-a scores condition on an observed
 right flank and therefore belong in a separate supplemental evaluation.
 
+## Wall-clock forward scaling
+
+dnaHNet Appendix A.5 measures batch-one BF16 forward passes on a single H100
+from 2^10 through 2^19 nucleotides. Run the analogous checkpoint-backed
+diffusion likelihood forward on H200 for each arm:
+
+```bash
+bsub -env "all,CKPT=/absolute/bissm.ckpt,LABEL=bissm" \
+  < scripts/eval/dnahnet/forward_profile.sh
+bsub -env "all,CKPT=/absolute/transformer.ckpt,LABEL=transformer" \
+  < scripts/eval/dnahnet/forward_profile.sh
+```
+
+Each point reconstructs the checkpoint at that context length, scores one
+fixed `t=0.5` corruption at batch size one in BF16, excludes one warm-up, and
+reports the median of three forwards plus peak allocated GPU memory. Results
+are written after every length so an OOM still leaves a usable prefix of the
+curve. Plot the same three panels used by dnaHNet:
+
+```bash
+python scripts/eval/dnahnet/plot_forward_profile.py \
+  --result BiSSM=results/dnahnet/forward/bissm.json \
+  --result Transformer=results/dnahnet/forward/transformer.json \
+  --output results/dnahnet/forward/forward_scaling.png
+```
+
+This matches the paper's metric family and length sweep, but not its hardware
+or objective: the paper uses autoregressive H100 forwards, whereas these are
+diffusion likelihood forwards on H200. Do not present the curves as direct
+dnaHNet speed ratios without an author checkpoint and identical hardware.
+
 ## MaveDB snapshot
 
 The paper reports twelve nucleotide-level E. coli K-12 datasets containing
