@@ -1,0 +1,93 @@
+{
+  "benchmark": "dnaHNet MaveDB E. coli K-12 variant-effect prediction",
+  "paper": "https://arxiv.org/abs/2602.10603",
+  "source_api": "https://api.mavedb.org/api/v1",
+  "selection_note": "Pinned twelve combined-score sets whose variant counts sum to the 21,250 examples reported by dnaHNet. A broad live search is deliberately not used because MaveDB gained another matching E. coli K-12 set after the paper snapshot.",
+  "expected_total_variants": 21250,
+  "score_sets": [
+    {
+      "urn": "urn:mavedb:00000122-0-1",
+      "title": "argR combined scores",
+      "target": "argR",
+      "expected_variants": 1521,
+      "target_sequence_sha256": "6632dcc49c34550c2bf8a4e693a3a5fd277b50cfe81d861cd276e18dd86e9343"
+    },
+    {
+      "urn": "urn:mavedb:00000160-0-1",
+      "title": "cspA combined scores",
+      "target": "cspA",
+      "expected_variants": 1481,
+      "target_sequence_sha256": "2bd4c944414fc9dcce08d1b05947bbfb0c753ab88e649323739efdebb56ecb25"
+    },
+    {
+      "urn": "urn:mavedb:00000630-0-1",
+      "title": "CspA combined scores",
+      "target": "CspA",
+      "expected_variants": 1457,
+      "target_sequence_sha256": "69489936d8ade022c89b664838f36dea7c390855525866f65b16ac62990702d7"
+    },
+    {
+      "urn": "urn:mavedb:00000161-0-1",
+      "title": "cspA (G17A) combined scores",
+      "target": "cspA (G17A)",
+      "expected_variants": 1499,
+      "target_sequence_sha256": "af36477c45273000d034d13e615d36c9dff12c0956cc7f83f27f0ef3916ad6f1"
+    },
+    {
+      "urn": "urn:mavedb:00000162-0-1",
+      "title": "cspA (L43S) combined scores",
+      "target": "cspA (L43S)",
+      "expected_variants": 1500,
+      "target_sequence_sha256": "d62b53706202a223aa613eaa9f6f9d07eb0ea64cb1f87dc9120908bb6972d470"
+    },
+    {
+      "urn": "urn:mavedb:00000369-0-1",
+      "title": "exbD combined scores",
+      "target": "exbD",
+      "expected_variants": 2526,
+      "target_sequence_sha256": "822a7a83365ad5094054b5888f0049f0de9f627eb73380ac9446c9e7183cceba"
+    },
+    {
+      "urn": "urn:mavedb:00000233-0-1",
+      "title": "FecA combined scores",
+      "target": "FecA",
+      "expected_variants": 2165,
+      "target_sequence_sha256": "f3ed74e4388a55c7c8cf3696ddb2425f5729e9148fcbd0480672ab5a00b4723e"
+    },
+    {
+      "urn": "urn:mavedb:00000214-0-1",
+      "title": "nusA combined scores",
+      "target": "nusA",
+      "expected_variants": 2244,
+      "target_sequence_sha256": "b6c9dac937f8a9a2775d5b537c47ad392ce77d090071644a99a85ae90702cd57"
+    },
+    {
+      "urn": "urn:mavedb:00000230-0-1",
+      "title": "sucB combined scores",
+      "target": "sucB",
+      "expected_variants": 1070,
+      "target_sequence_sha256": "d10604b80a1fad1d2c3c82b517f8ff4e4382761ebb9215f8eed80c83ce97a39e"
+    },
+    {
+      "urn": "urn:mavedb:00000383-0-1",
+      "title": "sucB combined scores",
+      "target": "sucB",
+      "expected_variants": 1115,
+      "target_sequence_sha256": "c7dfebab92a1d7352df0d3f3a045f358eeabb01153b8c4237e3e06c4fc9dd90b"
+    },
+    {
+      "urn": "urn:mavedb:00000213-0-1",
+      "title": "sucB combined scores",
+      "target": "sucB",
+      "expected_variants": 2079,
+      "target_sequence_sha256": "c29e700be3546ed9639d3703e0e30ad2cefd99fe72f5db426ba1933f3a551424"
+    },
+    {
+      "urn": "urn:mavedb:00000282-0-1",
+      "title": "yaiA combined scores",
+      "target": "yaiA",
+      "expected_variants": 2593,
+      "target_sequence_sha256": "2c19b7ecc71d441645b0d70f701d17b7cc56dd7c755cb575787e3b2f22c665b9"
+    }
+  ]
+}
