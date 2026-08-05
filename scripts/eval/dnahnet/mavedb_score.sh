@@ -24,6 +24,7 @@ DATA=${DATA:-$REPO/data_cache/dnahnet/mavedb_ecoli_k12_21250.jsonl.gz}
 BATCH_SIZE=${BATCH_SIZE:-16}
 MC_SAMPLES=${MC_SAMPLES:-8}
 MODEL_LENGTH=${MODEL_LENGTH:-256}
+SEED=${SEED:-1}
 MAX_VARIANTS=${MAX_VARIANTS:-}
 RUN_TAG=${LSB_JOBID:-$(date +%Y%m%d-%H%M%S)}
 OUTPUT_DIR=${OUTPUT_DIR:-$REPO/results/dnahnet/mavedb/${LABEL}-${RUN_TAG}}
@@ -36,7 +37,7 @@ mkdir -p "$OUTPUT_DIR" logs
 EXTRA_ARGS=()
 [ -n "$MAX_VARIANTS" ] && EXTRA_ARGS+=(--max-variants "$MAX_VARIANTS")
 
-echo "[$(date)] MaveDB | label=$LABEL | checkpoint=$CKPT | pairs=$BATCH_SIZE | MC=$MC_SAMPLES | L=$MODEL_LENGTH | output=$OUTPUT_DIR"
+echo "[$(date)] MaveDB | label=$LABEL | checkpoint=$CKPT | pairs=$BATCH_SIZE | MC=$MC_SAMPLES | seed=$SEED | L=$MODEL_LENGTH | output=$OUTPUT_DIR"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv
 "$PYTHON" -u scripts/eval/dnahnet/score_mavedb.py \
   --checkpoint "$CKPT" \
@@ -46,6 +47,7 @@ nvidia-smi --query-gpu=index,name,memory.total --format=csv
   --batch-size "$BATCH_SIZE" \
   --mc-samples "$MC_SAMPLES" \
   --model-length "$MODEL_LENGTH" \
+  --seed "$SEED" \
   "${EXTRA_ARGS[@]}"
 
 echo "[$(date)] MaveDB scoring exited"
