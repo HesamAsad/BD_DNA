@@ -188,3 +188,6 @@ mdlm/
 ssd-lm/logging/
 # prebuilt wheels (e.g. flash_attn-*.whl, ~177 MB)
 *.whl
+
+# Vendored presentation libraries (re-fetch with docs/slides/README.md)
+docs/slides/vendor/

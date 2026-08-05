@@ -1,0 +1,722 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BD3-LM DNA backbones: dual-stream and bidirectional SSM</title>
+
+<link rel="stylesheet" href="vendor/reveal.css">
+<link rel="stylesheet" href="vendor/theme/white.css" id="theme">
+
+<style>
+  :root {
+    --clean:   #2f6fb0;  --clean-fill:  #dce9f7;
+    --noisy:   #b8622f;  --noisy-fill:  #f8e3d0;
+    --state:   #3f7a49;  --state-fill:  #dcecdd;
+    --muted:   #666;     --muted-fill:  #eeeeee;
+    --ink:     #1a1a1a;
+  }
+  .reveal { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  .reveal h1, .reveal h2, .reveal h3 { text-transform: none; letter-spacing: -0.01em; font-weight: 650; }
+  .reveal h2 { font-size: 1.55em; margin-bottom: 0.4em; }
+  .reveal h3 { font-size: 1.05em; color: #333; }
+  .reveal section { text-align: left; }
+  .reveal .slides section.center { text-align: center; }
+  .reveal p, .reveal li { font-size: 0.78em; line-height: 1.45; }
+  .reveal .small  { font-size: 0.62em; color: #444; }
+  .reveal .tiny   { font-size: 0.52em; color: #555; }
+  .reveal .note   { font-size: 0.58em; color: #555; border-left: 3px solid #ccc; padding-left: 0.7em; margin-top: 0.6em; }
+  .reveal .good   { color: #2c6e33; font-weight: 600; }
+  .reveal .bad    { color: #a33; font-weight: 600; }
+  .reveal code    { font-size: 0.85em; background: #f4f4f4; padding: 0.05em 0.3em; border-radius: 3px; }
+  .reveal table   { font-size: 0.62em; margin: 0.4em 0; }
+  .reveal table th { border-bottom: 2px solid #999; text-align: left; padding: 0.25em 0.6em; }
+  .reveal table td { padding: 0.22em 0.6em; border-bottom: 1px solid #e2e2e2; }
+  .reveal table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .reveal .cols   { display: grid; grid-template-columns: 1fr 1fr; gap: 1.1em; align-items: start; }
+  .reveal .cols3  { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.9em; align-items: start; }
+  .reveal .kicker { font-size: 0.5em; text-transform: uppercase; letter-spacing: 0.14em; color: #777; margin-bottom: 0.2em; }
+  .reveal svg text { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; fill: var(--ink); }
+  .reveal .mjx-container { font-size: 0.85em !important; }
+  .legend { font-size: 0.5em; color: #555; margin-top: 0.3em; }
+  .legend span { margin-right: 1.1em; white-space: nowrap; }
+  .swatch { display: inline-block; width: 0.75em; height: 0.75em; border-radius: 2px; vertical-align: -0.05em; margin-right: 0.3em; border: 1px solid rgba(0,0,0,.25); }
+</style>
+
+<script>
+  window.MathJax = {
+    tex: {
+      inlineMath: [['\\(', '\\)']],
+      displayMath: [['$$', '$$'], ['\\[', '\\]']]
+    },
+    // 'local' not 'global': reveal.js hides inactive slides with display:none,
+    // and a shared glyph cache resolved from a hidden subtree drops glyphs on
+    // every slide but the first.
+    svg: { fontCache: 'local', scale: 1.0 },
+    options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre'] }
+  };
+</script>
+<script src="vendor/tex-svg.js" id="MathJax-script"></script>
+</head>
+
+<body>
+<div class="reveal"><div class="slides">
+
+<!-- ===================================================================== -->
+<section class="center">
+  <p class="kicker">bd3lms &middot; branch codex/bidirectional-ssm</p>
+  <h1 style="font-size:1.7em">Two long-context DNA backbones</h1>
+  <h3 style="font-weight:400">Dual-stream Transformer &nbsp;&middot;&nbsp; Leakage-safe bidirectional SSM</h3>
+  <p class="small" style="margin-top:1.4em">
+    Both are drop-in backbones under the same BD3-LM block-diffusion objective,
+    at single-nucleotide resolution on the Carbon corpus.
+  </p>
+</section>
+
+<!-- ===================================================================== -->
+<section>
+  <h2>The shared substrate: BD3-LM block diffusion</h2>
+
+  <p class="small">Split the sequence into \(N = L/B\) blocks. Each block gets its
+  <em>own</em> noise level \(t_b\); a block is denoised conditioned on all
+  <em>clean</em> earlier blocks. Autoregressive across blocks, diffusion within one.</p>
+
+  <svg viewBox="0 0 960 190" style="width:100%;height:auto">
+    <defs>
+      <pattern id="hatch1" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+        <rect width="7" height="7" fill="#f8e3d0"/><line x1="0" y1="0" x2="0" y2="7" stroke="#b8622f" stroke-width="2.5"/>
+      </pattern>
+      <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#555"/>
+      </marker>
+    </defs>
+
+    <text x="0" y="20" font-size="15" font-weight="600">x₀ (clean)</text>
+    <g>
+      <rect x="120" y="6"  width="150" height="34" rx="4" fill="#dce9f7" stroke="#2f6fb0" stroke-width="1.6"/>
+      <rect x="278" y="6"  width="150" height="34" rx="4" fill="#dce9f7" stroke="#2f6fb0" stroke-width="1.6"/>
+      <rect x="436" y="6"  width="150" height="34" rx="4" fill="#dce9f7" stroke="#2f6fb0" stroke-width="1.6"/>
+      <rect x="594" y="6"  width="150" height="34" rx="4" fill="#dce9f7" stroke="#2f6fb0" stroke-width="1.6"/>
+      <rect x="752" y="6"  width="150" height="34" rx="4" fill="#dce9f7" stroke="#2f6fb0" stroke-width="1.6"/>
+      <text x="195" y="28" font-size="14" text-anchor="middle">block 1</text>
+      <text x="353" y="28" font-size="14" text-anchor="middle">block 2</text>
+      <text x="511" y="28" font-size="14" text-anchor="middle">block 3</text>
+      <text x="669" y="28" font-size="14" text-anchor="middle">block 4</text>
+      <text x="827" y="28" font-size="14" text-anchor="middle">block 5</text>
+    </g>
+
+    <text x="0" y="105" font-size="15" font-weight="600">denoise b=3</text>
+    <g>
+      <rect x="120" y="88" width="150" height="34" rx="4" fill="#dce9f7" stroke="#2f6fb0" stroke-width="1.6"/>
+      <rect x="278" y="88" width="150" height="34" rx="4" fill="#dce9f7" stroke="#2f6fb0" stroke-width="1.6"/>
+      <rect x="436" y="88" width="150" height="34" rx="4" fill="url(#hatch1)" stroke="#b8622f" stroke-width="2"/>
+      <rect x="594" y="88" width="150" height="34" rx="4" fill="#f6f6f6" stroke="#bbb" stroke-width="1.4" stroke-dasharray="4 3"/>
+      <rect x="752" y="88" width="150" height="34" rx="4" fill="#f6f6f6" stroke="#bbb" stroke-width="1.4" stroke-dasharray="4 3"/>
+      <text x="511" y="110" font-size="14" text-anchor="middle" font-weight="600">x_t of block 3</text>
+      <text x="669" y="110" font-size="13" text-anchor="middle" fill="#999">not visible</text>
+      <text x="827" y="110" font-size="13" text-anchor="middle" fill="#999">not visible</text>
+    </g>
+
+    <path d="M195,44 C195,70 460,66 500,84" fill="none" stroke="#555" stroke-width="1.5" marker-end="url(#a1)"/>
+    <path d="M353,44 C353,70 470,68 505,84" fill="none" stroke="#555" stroke-width="1.5" marker-end="url(#a1)"/>
+    <text x="250" y="150" font-size="13" fill="#555">clean prefix conditions the active block</text>
+    <text x="620" y="150" font-size="13" fill="#555">the target block's own clean tokens are never an input</text>
+  </svg>
+
+  <div class="legend">
+    <span><i class="swatch" style="background:#dce9f7"></i>clean \(x_0\)</span>
+    <span><i class="swatch" style="background:#f8e3d0"></i>noisy \(x_t\) (active)</span>
+    <span><i class="swatch" style="background:#f6f6f6"></i>masked out of view</span>
+  </div>
+</section>
+
+<!-- ===================================================================== -->
+<section>
+  <h2>Objective and parameterization</h2>
+
+  <div class="cols">
+    <div>
+      <h3>Forward process</h3>
+      <p class="small">Absorbing-state masking. With log-linear schedule the move
+      chance is exactly \(t\):</p>
+      $$q(x_t^i \mid x_0^i) = (1-t)\,\delta_{x_0^i} + t\,\delta_{\mathbf{M}}$$
+      <p class="small">Each block draws its own \(t_b \sim \mathcal U[\epsilon, 1]\),
+      antithetically stratified over batch &times; blocks.</p>
+
+      <h3>SUBS parameterization</h3>
+      <p class="small">Two constraints are baked into the logits, not learned:</p>
+      $$p_\theta^i(\mathbf{M}) = 0, \qquad
+        x_t^i \neq \mathbf{M} \;\Rightarrow\; p_\theta^i = \delta_{x_t^i}$$
+      <p class="tiny">Zero mask probability + carry-over unmasking. Unmasked
+      positions contribute \(\log p = 0\), so only masked tokens carry loss.</p>
+    </div>
+    <div>
+      <h3>Block-diffusion NELBO</h3>
+      $$\mathcal{L} \;=\; \sum_{b=1}^{N}\;
+        \mathbb{E}_{t_b}\!\left[\frac{1}{t_b}
+        \sum_{i \in \mathcal{B}_b}
+        -\log p_\theta^{\,i}\!\left(x_0^i \,\middle|\, x_{t_b}^{\mathcal{B}_b},\, x_0^{&lt;b}\right)\right]$$
+
+      <p class="small">The \(1/t_b\) weight is <code>loss_scale</code> in
+      <code>noise_schedule.py</code>; the inner conditioning set is exactly what
+      each backbone must realize <em>without leaking</em> \(x_0^{\mathcal{B}_b}\)
+      or anything to its right.</p>
+
+      <div class="note">
+        Every architecture that follows changes only <strong>how</strong>
+        \(x_0^{&lt;b}\) reaches the denoiser. The loss, the tokenizer, the sampler
+        contract and the evaluation are identical, which is what makes the
+        backbones comparable.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================================== -->
+<section>
+  <h2>Reference point: the Transformer BD3-LM</h2>
+
+  <p class="small">One forward pass over a <em>doubled</em> sequence
+  \([x_t; x_0]\) of length \(2L\). A single block mask lets every block be
+  supervised at once: query rows in the \(x_t\) half see their own block
+  bidirectionally, plus the \(x_0\) half strictly before their block.</p>
+
+  <svg viewBox="0 0 960 240" style="width:100%;height:auto">
+    <defs>
+      <pattern id="hatch2" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+        <rect width="7" height="7" fill="#f8e3d0"/><line x1="0" y1="0" x2="0" y2="7" stroke="#b8622f" stroke-width="2.5"/>
+      </pattern>
+      <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#555"/>
+      </marker>
+    </defs>
+
+    <text x="20" y="30" font-size="14" font-weight="600">input, length 2L</text>
+    <rect x="20"  y="42" width="300" height="30" rx="4" fill="url(#hatch2)" stroke="#b8622f" stroke-width="1.8"/>
+    <text x="170" y="62" font-size="14" text-anchor="middle" font-weight="600">x_t   (L)</text>
+    <rect x="326" y="42" width="300" height="30" rx="4" fill="#dce9f7" stroke="#2f6fb0" stroke-width="1.8"/>
+    <text x="476" y="62" font-size="14" text-anchor="middle" font-weight="600">x₀   (L)</text>
+
+    <path d="M323,90 L323,112" fill="none" stroke="#555" stroke-width="1.4" marker-end="url(#a2)"/>
+    <rect x="20" y="116" width="606" height="30" rx="4" fill="#eeeeee" stroke="#777" stroke-width="1.4"/>
+    <text x="323" y="136" font-size="14" text-anchor="middle">12 &#215; full self-attention over 2L  &#160;·&#160; block_diff_mask</text>
+
+    <path d="M323,146 L323,168" fill="none" stroke="#555" stroke-width="1.4" marker-end="url(#a2)"/>
+    <rect x="20" y="172" width="300" height="30" rx="4" fill="#dcecdd" stroke="#3f7a49" stroke-width="1.6"/>
+    <text x="170" y="192" font-size="14" text-anchor="middle">logits for all N blocks</text>
+
+    <g transform="translate(680,30)">
+      <text x="0" y="0" font-size="13" font-weight="600">mask structure</text>
+      <rect x="0" y="10" width="110" height="110" fill="#fff" stroke="#999"/>
+      <path d="M0,10 L110,120" stroke="#ccc" stroke-width="1"/>
+      <rect x="0" y="10" width="55" height="55" fill="#f8e3d0" opacity="0.55"/>
+      <rect x="55" y="65" width="55" height="55" fill="#dce9f7" opacity="0.75"/>
+      <text x="27" y="42" font-size="10" text-anchor="middle">x_t → x_t</text>
+      <text x="83" y="97" font-size="10" text-anchor="middle">x_t → x₀</text>
+      <text x="0" y="140" font-size="11" fill="#555">block-diagonal (own block)</text>
+      <text x="0" y="156" font-size="11" fill="#555">+ block-causal (clean past)</text>
+    </g>
+  </svg>
+
+  <p class="small"><strong>Cost.</strong> Attention is \(O((2L)^2)\).
+  At \(L=8192\) that is a 16k-token attention per layer — affordable with a
+  block-sparse FlexAttention kernel, but it grows quadratically and the
+  KV cache at sampling grows linearly with everything committed.</p>
+</section>
+
+<!-- ===================================================================== -->
+<section>
+  <h2>Variant 2 — dual stream: cheap global context</h2>
+
+  <p class="small">Keep the fine stream at nucleotide resolution but make its
+  self-attention <em>local</em> (a &plusmn;8-block band). Recover long range from a
+  second, much cheaper stream that reads \(x_0\) at \(L/k\) resolution through
+  non-overlapping \(k\)-mers.</p>
+
+  <svg viewBox="0 0 960 300" style="width:100%;height:auto">
+    <defs>
+      <pattern id="hatch3" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+        <rect width="7" height="7" fill="#f8e3d0"/><line x1="0" y1="0" x2="0" y2="7" stroke="#b8622f" stroke-width="2.5"/>
+      </pattern>
+      <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#3f7a49"/>
+      </marker>
+      <marker id="a3g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#555"/>
+      </marker>
+    </defs>
+
+    <!-- coarse stream -->
+    <text x="20" y="24" font-size="13" font-weight="600" fill="#3f7a49">COARSE STREAM — clean context only</text>
+    <rect x="20" y="34" width="500" height="26" rx="4" fill="#dce9f7" stroke="#2f6fb0" stroke-width="1.5"/>
+    <text x="270" y="52" font-size="13" text-anchor="middle">x₀, length L</text>
+    <path d="M270,60 L270,78" stroke="#3f7a49" stroke-width="1.4" marker-end="url(#a3)"/>
+    <rect x="120" y="82" width="300" height="26" rx="4" fill="#dcecdd" stroke="#3f7a49" stroke-width="1.5"/>
+    <text x="270" y="100" font-size="13" text-anchor="middle">k-mer ids, length L/k &#160;(k=6, vocab 4⁶+1)</text>
+    <path d="M270,108 L270,126" stroke="#3f7a49" stroke-width="1.4" marker-end="url(#a3)"/>
+    <rect x="120" y="130" width="300" height="30" rx="4" fill="#dcecdd" stroke="#3f7a49" stroke-width="1.8"/>
+    <text x="270" y="150" font-size="13" text-anchor="middle" font-weight="600">4 layers, d=384, CAUSAL self-attn</text>
+    <text x="120" y="178" font-size="11" fill="#3f7a49">no timestep conditioning · causal ⇒ c_j is suffix-invariant</text>
+
+    <!-- fine stream -->
+    <text x="580" y="24" font-size="13" font-weight="600" fill="#b8622f">FINE STREAM — diffusion target</text>
+    <rect x="580" y="34" width="360" height="26" rx="4" fill="url(#hatch3)" stroke="#b8622f" stroke-width="1.5"/>
+    <text x="760" y="52" font-size="13" text-anchor="middle">[x_t ; x₀], length 2L</text>
+
+    <g>
+      <rect x="580" y="76" width="360" height="150" rx="6" fill="#fafafa" stroke="#888" stroke-width="1.4"/>
+      <text x="760" y="94" font-size="12" text-anchor="middle" font-weight="600">× 12 layers (d=768), adaLN by t</text>
+
+      <rect x="596" y="102" width="328" height="26" rx="3" fill="#f8e3d0" stroke="#b8622f" stroke-width="1.2"/>
+      <text x="760" y="120" font-size="12" text-anchor="middle">1 · local self-attn, ±8 blocks</text>
+
+      <rect x="596" y="134" width="328" height="26" rx="3" fill="#dcecdd" stroke="#3f7a49" stroke-width="1.2"/>
+      <text x="760" y="152" font-size="12" text-anchor="middle">2 · cross-attn → coarse memory</text>
+
+      <rect x="596" y="166" width="328" height="26" rx="3" fill="#eeeeee" stroke="#777" stroke-width="1.2"/>
+      <text x="760" y="184" font-size="12" text-anchor="middle">3 · MLP</text>
+
+      <text x="760" y="212" font-size="11" text-anchor="middle" fill="#555">each residual scaled by a zero-init adaLN gate</text>
+    </g>
+
+    <path d="M424,145 C500,145 520,147 592,147" fill="none" stroke="#3f7a49" stroke-width="2" marker-end="url(#a3)"/>
+    <text x="470" y="138" font-size="11" fill="#3f7a49" text-anchor="middle">c memory</text>
+
+    <path d="M760,226 L760,248" stroke="#555" stroke-width="1.4" marker-end="url(#a3g)"/>
+    <rect x="640" y="252" width="240" height="26" rx="4" fill="#dcecdd" stroke="#3f7a49" stroke-width="1.5"/>
+    <text x="760" y="270" font-size="13" text-anchor="middle">logits, length L</text>
+  </svg>
+</section>
+
+<!-- ===================================================================== -->
+<section>
+  <h2>Dual stream — why it is leak-free</h2>
+
+  <div class="cols">
+    <div>
+      <h3>Two masks do the work</h3>
+      <p class="small"><strong>Fine self-attention:</strong> the standard BD3-LM
+      mask ANDed with a locality band</p>
+      $$\text{block}(q) - \text{block}(kv) \le W,\quad W = 8$$
+
+      <p class="small"><strong>Fine → coarse cross-attention:</strong> strictly
+      block-causal. Fine block \(i\) may read coarse token \(j\) only if that
+      \(k\)-mer window lies entirely inside completed context:</p>
+      $$j \le \left\lfloor \frac{v_i}{k} \right\rfloor - 1,
+        \qquad v_i = \text{visible nucleotides}$$
+    </div>
+    <div>
+      <h3>The subtle part</h3>
+      <p class="small">The position-level cross-attention mask is safe
+      <em>only because the coarse self-attention is causal</em>.</p>
+      <div class="note">
+        With a bidirectional coarse encoder, a coarse token in the visible past
+        would already have absorbed the clean current and future target through
+        its own self-attention — the mask would look correct and the model would
+        still leak.
+      </div>
+      <p class="small">Causality also makes \(c_j\) suffix-invariant, so the coarse
+      memory a fine block reads at sampling time is bit-identical to training.</p>
+
+      <p class="tiny">Alignment: keep <code>block_size</code> divisible by
+      <code>k_coarse</code>. Otherwise coverage is slightly short at block
+      boundaries (no leak) and the sampler asserts.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================================== -->
+<section>
+  <h2>Dual stream — layer equations</h2>
+
+  <p class="small">Per fine layer, with adaLN modulation \((\gamma,\beta,g)\) produced
+  from the diffusion timestep:</p>
+
+  $$\begin{aligned}
+    h &\leftarrow h + g_{\text{self}} \cdot W_o\,\mathrm{Attn}_{\text{local}}\!\big(\mathrm{LN}(h)\odot(1+\gamma_1)+\beta_1\big) \\[2pt]
+    h &\leftarrow h + g_{\text{cross}} \cdot \mathrm{XAttn}\big(h,\; c\big) \\[2pt]
+    h &\leftarrow h + g_{\text{mlp}} \cdot \mathrm{MLP}\!\big(\mathrm{LN}(h)\odot(1+\gamma_2)+\beta_2\big)
+  \end{aligned}$$
+
+  <p class="small">Seven adaLN modulators per layer; all gates are zero-init.</p>
+
+  <div class="note">
+    <strong>Implementation trap recorded in the code.</strong> The cross-attention
+    residual is \(g_{\text{cross}} \cdot W_o(\cdot)\). Zero-initializing
+    <em>both</em> the gate and \(W_o\) makes the product a dead zero: the gradient
+    w.r.t. the gate is proportional to \(W_o\) and vice versa, so neither ever
+    leaves zero and the route is permanently disabled. Standard adaLN-zero
+    zeroes only the gate.
+  </div>
+
+  <p class="tiny">In-repo observation: even with that fixed, an aligned-pointer probe run
+  measured \(g_{\text{cross}} \approx 0.044\) — the coarse route stayed
+  largely unrecruited on real DNA, so long-range benefit could not express itself
+  in the loss. That is a finding about the data and the incentive, not a proof
+  the wiring is wrong.</p>
+</section>
+
+<!-- ===================================================================== -->
+<section>
+  <h2>Variant 3 — bidirectional SSM: the target computation</h2>
+
+  <p class="small">Replace attention with a Mamba-2 selective scan whose boundary
+  state can be handed across segments. Context arrives as a <em>fixed-size
+  recurrent state</em>, not as keys and values.</p>
+
+  <svg viewBox="0 0 960 250" style="width:100%;height:auto">
+    <defs>
+      <pattern id="hatch4" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+        <rect width="7" height="7" fill="#f8e3d0"/><line x1="0" y1="0" x2="0" y2="7" stroke="#b8622f" stroke-width="2.5"/>
+      </pattern>
+      <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#3f7a49"/>
+      </marker>
+      <marker id="a4b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#b8622f"/>
+      </marker>
+    </defs>
+
+    <rect x="20"  y="30" width="300" height="34" rx="4" fill="#dce9f7" stroke="#2f6fb0" stroke-width="1.6"/>
+    <text x="170" y="52" font-size="14" text-anchor="middle">clean prefix  x₀^{&lt;b}</text>
+
+    <rect x="360" y="30" width="220" height="34" rx="4" fill="url(#hatch4)" stroke="#b8622f" stroke-width="2"/>
+    <text x="470" y="52" font-size="14" text-anchor="middle" font-weight="600">active noisy block</text>
+
+    <rect x="620" y="30" width="300" height="34" rx="4" fill="#dce9f7" stroke="#2f6fb0" stroke-width="1.6"/>
+    <text x="770" y="52" font-size="14" text-anchor="middle">clean suffix (C-a only)</text>
+
+    <!-- scans -->
+    <path d="M30,78 L310,78" stroke="#3f7a49" stroke-width="2" marker-end="url(#a4)"/>
+    <text x="170" y="95" font-size="12" text-anchor="middle" fill="#3f7a49">forward scan, no timestep</text>
+    <path d="M910,78 L630,78" stroke="#3f7a49" stroke-width="2" marker-end="url(#a4)"/>
+    <text x="770" y="95" font-size="12" text-anchor="middle" fill="#3f7a49">reverse scan, no timestep</text>
+
+    <rect x="300" y="108" width="72" height="34" rx="6" fill="#dcecdd" stroke="#3f7a49" stroke-width="1.8" stroke-dasharray="5 3"/>
+    <text x="336" y="130" font-size="12" text-anchor="middle" font-weight="600">s_left</text>
+    <rect x="568" y="108" width="80" height="34" rx="6" fill="#dcecdd" stroke="#3f7a49" stroke-width="1.8" stroke-dasharray="5 3"/>
+    <text x="608" y="130" font-size="12" text-anchor="middle" font-weight="600">s_right</text>
+
+    <path d="M336,142 C336,165 400,160 420,172" stroke="#b8622f" stroke-width="1.8" marker-end="url(#a4b)" fill="none"/>
+    <path d="M608,142 C608,165 545,160 522,172" stroke="#b8622f" stroke-width="1.8" marker-end="url(#a4b)" fill="none"/>
+
+    <rect x="360" y="176" width="220" height="40" rx="4" fill="#f8e3d0" stroke="#b8622f" stroke-width="1.8"/>
+    <text x="470" y="194" font-size="12" text-anchor="middle">fwd scan  +  rev scan</text>
+    <text x="470" y="210" font-size="12" text-anchor="middle">inside the block only</text>
+
+    <text x="20" y="200" font-size="12" fill="#555">state size is independent of</text>
+    <text x="20" y="216" font-size="12" fill="#555">how much has been committed</text>
+    <text x="700" y="200" font-size="12" fill="#555">≈2.40 MiB per direction,</text>
+    <text x="700" y="216" font-size="12" fill="#555">BF16, batch 1, 12 layers</text>
+  </svg>
+
+  $$\begin{aligned}
+    s^{\text{left}}_{l} &= \mathrm{scan}\big(x_0^{&lt;b}\big), \qquad
+    s^{\text{right}}_{l} = \mathrm{scan}\big(\mathrm{rev}(x_0^{>b})\big) \\
+    a^{\text{fwd}} &= \mathrm{scan}\big(x_t^{\mathcal B_b},\, s^{\text{left}}_l\big), \qquad
+    a^{\text{rev}} = \mathrm{rev}\,\mathrm{scan}\big(\mathrm{rev}(x_t^{\mathcal B_b}),\, s^{\text{right}}_l\big) \\
+    h &\leftarrow h + a^{\text{fwd}} + a^{\text{rev}}
+  \end{aligned}$$
+
+  <p class="tiny">Direct sum, no zero-init route gate — deliberately, so neither
+  direction can be silently switched off the way the dual stream's cross route was.</p>
+</section>
+
+<!-- ===================================================================== -->
+<section>
+  <h2>What lives in a boundary state</h2>
+
+  <div class="cols">
+    <div>
+      <p class="small">The Mamba-2 diagonal selective recurrence, continued from
+      an immutable input state:</p>
+      $$\begin{aligned}
+        S_i &= S_{i-1}\odot e^{\Delta_i A} + \Delta_i\, B_i x_i^{\top} \\
+        y_i &= \langle S_i, C_i\rangle + D \odot x_i
+      \end{aligned}$$
+
+      <p class="small">A segment state is the pair</p>
+      $$\texttt{Mamba2State} = \big(\underbrace{\text{conv}}_{d_{\text{conv}} \text{ raw inputs}},\;
+        \underbrace{S}_{H \times P \times \mathcal{N}}\big)$$
+    </div>
+    <div>
+      <h3>Why this is the whole game</h3>
+      <p class="small">Exactness: splitting a scan at any boundary and resuming from
+      the stored state reproduces the one-shot result — verified fused-vs-reference
+      on an H200 (max abs diff 0.0078 in BF16, convolution states bit-exact).</p>
+
+      <p class="small">Immutability: denoising the active block never mutates the
+      clean caches, so the same cache serves every diffusion step of that block.</p>
+
+      <div class="note">
+        Consequence for sampling: committing a block costs one scan over that
+        block and <em>zero</em> growth in cache size. A Transformer's KV cache
+        grows with every committed token.
+      </div>
+    </div>
+  </div>
+
+  <p class="tiny">Geometry: d=768, 12 layers, state 64, conv width 4, expand 2, head dim 64,
+  chunk 128, block 256 → 100.69M trainable parameters.</p>
+</section>
+
+<!-- ===================================================================== -->
+<section>
+  <h2>The training-objective problem</h2>
+
+  <p class="small">A Transformer supervises all \(N\) blocks in one pass because the
+  \([x_t;x_0]\) mask packs them together. A recurrent model cannot: each block needs
+  a <em>different</em> boundary state.</p>
+
+  <div class="cols">
+    <div>
+      <h3 class="bad">v1 — one block per step</h3>
+      $$\hat{\mathcal L}_{\text{one}} = N \cdot \ell_{b},\qquad b \sim \mathcal U\{1..N\}$$
+      <p class="small">Unbiased for the loss <em>value</em>:
+      \(\mathbb E_b[\hat{\mathcal L}_{\text{one}}] = \mathcal L\).</p>
+      <p class="small bad">But gradient reaches only \(1/N\) of the tokens per step.
+      At \(L=8192,\,B=256\) that is \(N=32\) — a 32:1 learning-signal handicap
+      against the Transformer.</p>
+      <p class="tiny">A perplexity comparison run this way measures the estimator,
+      not the backbone.</p>
+    </div>
+    <div>
+      <h3 class="good">v2 — every block per step</h3>
+      $$\mathcal L_{\text{all}} = \sum_{b=1}^{N} \ell_b \quad\text{(exact)}$$
+      <p class="small">One clean scan yields the state entering <em>every</em> block;
+      fold blocks into the batch dimension and denoise them in a single call.</p>
+      <table>
+        <tr><th></th><th>per step</th></tr>
+        <tr><td>v1 cost</td><td>½L scan + 1 block</td></tr>
+        <tr><td>v2 cost</td><td>L scan + 2L active</td></tr>
+        <tr><td>v2 signal</td><td class="good">N× more supervised tokens</td></tr>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================================== -->
+<section>
+  <h2>All-block supervision by cache folding</h2>
+
+  <svg viewBox="0 0 960 260" style="width:100%;height:auto">
+    <defs>
+      <marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#555"/>
+      </marker>
+    </defs>
+
+    <text x="20" y="22" font-size="13" font-weight="600">1 · one clean scan, keep the state entering each block</text>
+    <g>
+      <rect x="20"  y="32" width="140" height="30" rx="4" fill="#dce9f7" stroke="#2f6fb0" stroke-width="1.5"/>
+      <rect x="168" y="32" width="140" height="30" rx="4" fill="#dce9f7" stroke="#2f6fb0" stroke-width="1.5"/>
+      <rect x="316" y="32" width="140" height="30" rx="4" fill="#dce9f7" stroke="#2f6fb0" stroke-width="1.5"/>
+      <rect x="464" y="32" width="140" height="30" rx="4" fill="#dce9f7" stroke="#2f6fb0" stroke-width="1.5"/>
+      <text x="90"  y="52" font-size="12" text-anchor="middle">x₀ block 1</text>
+      <text x="238" y="52" font-size="12" text-anchor="middle">x₀ block 2</text>
+      <text x="386" y="52" font-size="12" text-anchor="middle">x₀ block 3</text>
+      <text x="534" y="52" font-size="12" text-anchor="middle">x₀ block 4</text>
+
+      <circle cx="20"  cy="80" r="12" fill="#dcecdd" stroke="#3f7a49" stroke-width="1.6"/>
+      <circle cx="168" cy="80" r="12" fill="#dcecdd" stroke="#3f7a49" stroke-width="1.6"/>
+      <circle cx="316" cy="80" r="12" fill="#dcecdd" stroke="#3f7a49" stroke-width="1.6"/>
+      <circle cx="464" cy="80" r="12" fill="#dcecdd" stroke="#3f7a49" stroke-width="1.6"/>
+      <text x="20"  y="105" font-size="11" text-anchor="middle">s₀ = ∅</text>
+      <text x="168" y="105" font-size="11" text-anchor="middle">s₁</text>
+      <text x="316" y="105" font-size="11" text-anchor="middle">s₂</text>
+      <text x="464" y="105" font-size="11" text-anchor="middle">s₃</text>
+    </g>
+
+    <text x="640" y="22" font-size="13" font-weight="600">2 · fold blocks into the batch axis</text>
+    <rect x="640" y="32" width="290" height="86" rx="5" fill="#fafafa" stroke="#888" stroke-width="1.4"/>
+    <text x="785" y="54" font-size="12" text-anchor="middle">x_t : [B, L] → [B·N, 256]</text>
+    <text x="785" y="76" font-size="12" text-anchor="middle">caches: stack s₀..s₃ → batch B·N</text>
+    <text x="785" y="100" font-size="12" text-anchor="middle" font-weight="600">one batched forward_active call</text>
+
+    <path d="M480,150 L480,172" stroke="#555" stroke-width="1.4" marker-end="url(#a5)"/>
+    <text x="20" y="150" font-size="13" font-weight="600">3 · every block denoised, every token supervised</text>
+    <g>
+      <rect x="20"  y="176" width="140" height="30" rx="4" fill="#f8e3d0" stroke="#b8622f" stroke-width="1.5"/>
+      <rect x="168" y="176" width="140" height="30" rx="4" fill="#f8e3d0" stroke="#b8622f" stroke-width="1.5"/>
+      <rect x="316" y="176" width="140" height="30" rx="4" fill="#f8e3d0" stroke="#b8622f" stroke-width="1.5"/>
+      <rect x="464" y="176" width="140" height="30" rx="4" fill="#f8e3d0" stroke="#b8622f" stroke-width="1.5"/>
+      <text x="90"  y="196" font-size="12" text-anchor="middle">ℓ₁</text>
+      <text x="238" y="196" font-size="12" text-anchor="middle">ℓ₂</text>
+      <text x="386" y="196" font-size="12" text-anchor="middle">ℓ₃</text>
+      <text x="534" y="196" font-size="12" text-anchor="middle">ℓ₄</text>
+      <text x="640" y="196" font-size="13">← loss over the full length, no 1/N rescaling</text>
+    </g>
+    <text x="20" y="235" font-size="11" fill="#555">row b·N + i of the folded batch carries sequence b's state for block i</text>
+  </svg>
+
+  <p class="tiny">Tested: boundary states equal per-block prefills in both directions;
+  folded logits equal block-by-block logits; the two estimators agree on the sampled
+  block; and a per-position sweep confirms block \(i\)'s de-novo logits move only for
+  clean tokens strictly before it.</p>
+</section>
+
+<!-- ===================================================================== -->
+<section>
+  <h2>C-a mode: infilling with a fixed right flank</h2>
+
+  <p class="small">The same machinery, with the reverse cache built from an
+  <em>observed</em> right flank instead of the empty state. The right cache is
+  prepared once and never mutated as blocks are committed left-to-right.</p>
+
+  <svg viewBox="0 0 960 150" style="width:100%;height:auto">
+    <defs>
+      <pattern id="hatch5" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+        <rect width="7" height="7" fill="#f8e3d0"/><line x1="0" y1="0" x2="0" y2="7" stroke="#b8622f" stroke-width="2.5"/>
+      </pattern>
+    </defs>
+    <rect x="20"  y="30" width="200" height="34" rx="4" fill="#dce9f7" stroke="#2f6fb0" stroke-width="1.6"/>
+    <text x="120" y="52" font-size="13" text-anchor="middle">left context (given)</text>
+
+    <rect x="240" y="30" width="130" height="34" rx="4" fill="#dcecdd" stroke="#3f7a49" stroke-width="1.6"/>
+    <text x="305" y="52" font-size="13" text-anchor="middle">committed</text>
+
+    <rect x="390" y="30" width="130" height="34" rx="4" fill="url(#hatch5)" stroke="#b8622f" stroke-width="2"/>
+    <text x="455" y="52" font-size="13" text-anchor="middle" font-weight="600">active</text>
+
+    <rect x="540" y="30" width="180" height="34" rx="4" fill="#f6f6f6" stroke="#bbb" stroke-width="1.4" stroke-dasharray="4 3"/>
+    <text x="630" y="52" font-size="13" text-anchor="middle" fill="#888">gap, still masked</text>
+
+    <rect x="740" y="30" width="200" height="34" rx="4" fill="#dce9f7" stroke="#2f6fb0" stroke-width="1.6"/>
+    <text x="840" y="52" font-size="13" text-anchor="middle">right flank (given)</text>
+
+    <text x="120" y="92" font-size="12" fill="#3f7a49">left cache advances by one block per commit</text>
+    <text x="740" y="92" font-size="12" fill="#3f7a49">right cache computed once, held fixed</text>
+    <text x="20" y="122" font-size="12" fill="#555">Training draws the suffix cache with probability model.right_flank_probability, so one model can serve both modes.</text>
+  </svg>
+
+  <p class="small">De-novo perplexity and generation never use a right cache — it
+  would be an oracle. C-a is a separate, conditional task.</p>
+</section>
+
+<!-- ===================================================================== -->
+<section>
+  <h2>Cost profile side by side</h2>
+
+  <table style="font-size:0.58em">
+    <tr>
+      <th></th><th>Transformer BD3-LM</th><th>Dual stream</th><th>Bidirectional SSM</th>
+    </tr>
+    <tr>
+      <td>context mechanism</td>
+      <td>full attention over \([x_t;x_0]\)</td>
+      <td>local band + coarse cross-attn</td>
+      <td>recurrent boundary state</td>
+    </tr>
+    <tr>
+      <td>train compute in \(L\)</td>
+      <td>\(O(L^2)\)</td>
+      <td>\(O(LW) + O((L/k)^2)\)</td>
+      <td>\(O(L)\)</td>
+    </tr>
+    <tr>
+      <td>sampling cache</td>
+      <td>grows with committed tokens</td>
+      <td>grows (fine KV + coarse re-encode)</td>
+      <td class="good">constant, ≈2.40 MiB/direction</td>
+    </tr>
+    <tr>
+      <td>all-block supervision</td>
+      <td>native (one mask)</td>
+      <td>native (one mask)</td>
+      <td>via folded boundary caches</td>
+    </tr>
+    <tr>
+      <td>bidirectional inside block</td>
+      <td>yes (attention)</td>
+      <td>yes (attention)</td>
+      <td>yes (fwd + rev scan)</td>
+    </tr>
+    <tr>
+      <td>right-flank infilling</td>
+      <td>not at bounded memory</td>
+      <td>not at bounded memory</td>
+      <td class="good">C-a mode</td>
+    </tr>
+  </table>
+
+  <div class="note">
+    The SSM's argument is not that it is a better density model. It is that
+    committing a block costs \(O(1)\) memory, which is what makes
+    chromosome-scale generation and infilling tractable at all.
+  </div>
+</section>
+
+<!-- ===================================================================== -->
+<section>
+  <h2>Measured: prokaryote, matched tokens</h2>
+
+  <p class="small">Identical data, geometry, batch, schedule and seed; only the
+  backbone differs. 8000 steps &times; 524k nt = 4.19B nt; scored on 16.8M held-out
+  nucleotides.</p>
+
+  <table>
+    <tr><th>arm</th><th class="num">NLL (nats/nt)</th><th class="num">PPL</th><th class="num">bits/nt</th><th class="num">wall clock</th></tr>
+    <tr><td>Bidirectional SSM</td><td class="num">1.25232</td><td class="num">3.4985</td><td class="num">1.8067</td><td class="num">20 h 15 m</td></tr>
+    <tr><td>Transformer BD3-LM</td><td class="num"><strong>1.24577</strong></td><td class="num"><strong>3.4756</strong></td><td class="num"><strong>1.7973</strong></td><td class="num"><strong>3 h 59 m</strong></td></tr>
+    <tr><td class="small">uniform baseline</td><td class="num">1.38629</td><td class="num">4.0000</td><td class="num">2.0000</td><td class="num">—</td></tr>
+  </table>
+
+  <p class="small">Transformer ahead by <strong>0.0066 nats/nt</strong> — 0.0094 bits/nt,
+  0.66% perplexity — at 5.1&times; less wall clock.</p>
+
+  <div class="note">
+    Read narrowly: one seed, one geometry, half an epoch. The gap is small enough
+    that seed variance is worth measuring before treating the ordering as settled.
+    The wall-clock gap is an implementation artifact — the all-block path issues
+    \(12 \times 32 = 384\) sequential scan calls per step and runs at roughly 5%
+    arithmetic efficiency.
+  </div>
+</section>
+
+<!-- ===================================================================== -->
+<section>
+  <h2>Where this goes next</h2>
+
+  <div class="cols">
+    <div>
+      <h3>Performance</h3>
+      <p class="small">Chunked state passing: compute each block's local scan in one
+      folded call, carry boundary states with a cheap elementwise recurrence, apply
+      the standard output correction. ~24 launches per step instead of ~384 — the
+      same restructuring Mamba-2's chunk scan does internally, one level up.</p>
+    </div>
+    <div>
+      <h3>Science</h3>
+      <p class="small">The likelihood comparison is a floor, not the case. What only
+      the SSM can do:</p>
+      <ul class="small">
+        <li>commit at \(O(1)\) memory over chromosome-scale generation</li>
+        <li>C-a infilling against a fixed observed right flank</li>
+        <li>exact resumption from a stored state</li>
+      </ul>
+    </div>
+  </div>
+
+  <p class="tiny" style="margin-top:1em">Sources: <code>models/bidirectional_ssm.py</code>,
+  <code>models/mamba2_segment.py</code>, <code>models/dit_dual.py</code>,
+  <code>diffusion.py</code>, <code>docs/bidirectional_ssm_progress.md</code>.
+  Runs: LSF 96602 / 96604 / 98003.</p>
+</section>
+
+</div></div>
+
+<script src="vendor/reveal.js"></script>
+<script>
+  Reveal.initialize({
+    hash: true,
+    slideNumber: 'c/t',
+    width: 1100,
+    height: 760,
+    margin: 0.06,
+    controls: true,
+    progress: true,
+    transition: 'slide'
+  });
+</script>
+</body>
+</html>
