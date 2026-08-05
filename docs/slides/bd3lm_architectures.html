@@ -121,10 +121,10 @@
 <!-- 1 ==================================================================== -->
 <section class="center">
   <p class="kicker">bd3lms &middot; branch codex/bidirectional-ssm</p>
-  <h1>Two long-context DNA backbones</h1>
-  <h3 style="font-weight:400; font-size:1.1em">Dual-stream Transformer &nbsp;&middot;&nbsp; Leakage-safe bidirectional SSM</h3>
+  <h1>Long-context DNA backbones</h1>
+  <h3 style="font-weight:400; font-size:1.1em">Transformer reference &nbsp;&middot;&nbsp; Dual stream &nbsp;&middot;&nbsp; Bidirectional SSM</h3>
   <p class="small" style="margin-top:1.6em">
-    Drop-in backbones under one BD3-LM block-diffusion objective,<br>
+    De-novo backbones under one BD3-LM block-diffusion objective,<br>
     at single-nucleotide resolution on the Carbon corpus.
   </p>
 </section>
@@ -156,9 +156,10 @@
     </div>
   </div>
 
-  <p class="small">The clean prefix conditions the active block. The target
-  block's own clean tokens, and everything to its right, are never inputs —
-  that single constraint is what every backbone here has to honour.</p>
+  <p class="small">In the de-novo objective, the clean prefix conditions the
+  active block. The target block's own clean tokens, and everything to its
+  right, are never visible to its logits — that single constraint is what every
+  backbone here has to honour.</p>
 
   <div class="legend">
     <span><i class="sw clean"></i>clean \(x_0\)</span>
@@ -195,9 +196,10 @@
       is what each backbone must realize without leaking.</p>
 
       <div class="note">
-        Every architecture that follows changes only <strong>how</strong>
-        \(x_0^{&lt;b}\) reaches the denoiser. Loss, tokenizer, sampler contract
-        and evaluation are identical — that is what makes them comparable.
+        In the matched de-novo comparison, each architecture changes only
+        <strong>how</strong> \(x_0^{&lt;b}\) reaches the denoiser. Loss, tokenizer,
+        data and evaluation are held fixed; their sampling implementations
+        differ, and C-a is a separate conditional task.
       </div>
     </div>
   </div>
@@ -230,12 +232,14 @@
         <div class="q1">own block<br>(bidirectional)</div>
         <div class="q2">clean past</div>
         <div class="q0">&#8709;</div>
-        <div class="q4">clean past</div>
+        <div class="q4">own + clean past</div>
       </div>
       <p class="tiny" style="margin-top:0.4em">Top row: \(x_t\) queries.
       Bottom row: \(x_0\) queries.</p>
-      <p class="small"><strong>Cost.</strong> \(O((2L)^2)\) attention, and a KV
-      cache that grows with every committed token.</p>
+      <p class="small"><strong>Cost.</strong> \(O((2L)^2)\) full-forward
+      attention. An exact full-prefix sampler would need \(O(L)\) KV memory;
+      the repository's current sampler instead caps/slides that cache at 1024
+      tokens.</p>
     </div>
   </div>
 </section>
@@ -244,9 +248,10 @@
 <section>
   <h2>Variant 2 — dual stream</h2>
 
-  <p class="small">Keep the fine stream at nucleotide resolution but band its
-  attention to \(\pm 8\) blocks; recover long range from a cheap stream reading
-  \(x_0\) at \(L/k\) resolution through non-overlapping \(k\)-mers.</p>
+  <p class="small">Keep the fine stream at nucleotide resolution. Each query
+  sees its own block and at most eight <em>preceding</em> blocks; recover longer
+  range from a cheap stream reading \(x_0\) at \(L/k\) resolution through
+  non-overlapping \(k\)-mers.</p>
 
   <div class="row" style="align-items:stretch; gap:0.9em">
     <div style="flex:1 1 0; min-width:0">
@@ -275,8 +280,8 @@
         <div class="box noisy" style="width:100%">\([x_t; x_0]\), length \(2L\)</div>
         <span class="arr">&#8595;</span>
         <div class="grouped" style="width:100%">
-          <span class="lbl" style="text-align:center">\(\times\,12\) layers, \(d=768\), adaLN by \(t\)</span>
-          <div class="box noisy">1 &middot; local self-attention, \(\pm 8\) blocks</div>
+          <span class="lbl" style="text-align:center">\(\times\,12\) layers, \(d=768\), adaLN gates</span>
+          <div class="box noisy">1 &middot; own block + 8 preceding blocks</div>
           <div class="box state">2 &middot; cross-attention \(\rightarrow\) coarse memory</div>
           <div class="box plain">3 &middot; MLP</div>
         </div>
@@ -295,8 +300,11 @@
     <div>
       <h3>Two masks do the work</h3>
       <p class="small"><strong>Fine self-attention:</strong> the BD3-LM mask ANDed
-      with a locality band,</p>
+      with a one-sided locality band,</p>
       $$\mathrm{blk}(q) - \mathrm{blk}(kv) \le W, \quad W = 8$$
+      <p class="tiny">All base-mask rules already satisfy
+      \(\mathrm{blk}(q)\ge\mathrm{blk}(kv)\); only the query's own active block
+      is bidirectional.</p>
       <p class="small"><strong>Fine \(\rightarrow\) coarse:</strong> strictly
       block-causal. Fine block \(i\) reads coarse token \(j\) only if that
       \(k\)-mer window lies wholly inside completed context,</p>
@@ -327,7 +335,7 @@
   <h2>Dual stream — layer equations</h2>
 
   <p class="small">Per fine layer, with adaLN modulation
-  \((\gamma,\beta,g)\) from the diffusion timestep:</p>
+  \((\gamma,\beta,g)\) from a conditioning embedding:</p>
 
   $$\begin{aligned}
     h &\leftarrow h + g_{\text{self}}\, W_o\,\mathrm{Attn}_{\text{loc}}\!\big(\mathrm{LN}(h)(1+\gamma_1)+\beta_1\big) \\
@@ -335,7 +343,10 @@
     h &\leftarrow h + g_{\text{mlp}}\, \mathrm{MLP}\!\big(\mathrm{LN}(h)(1+\gamma_2)+\beta_2\big)
   \end{aligned}$$
 
-  <p class="small">Seven adaLN modulators per layer; all gates zero-init.</p>
+  <p class="small">Seven adaLN modulators per layer; all gates zero-init. In
+  the production BD3-LM configs, <code>time_conditioning=false</code>, so the
+  supplied \(\sigma\) is zeroed and these modulators are constant with respect
+  to diffusion time.</p>
 
   <div class="note">
     <strong>Trap recorded in the code.</strong> The cross residual is
@@ -405,15 +416,15 @@
     </div>
     <div>
       <h3>Why this is the whole game</h3>
-      <p class="small"><strong>Exactness.</strong> Splitting a scan at any
-      boundary and resuming from the stored state reproduces the one-shot result
-      — verified fused-vs-reference on an H200 (max abs diff \(0.0078\) in BF16;
-      convolution states bit-exact).</p>
+      <p class="small"><strong>Continuation.</strong> Splitting a scan at any
+      boundary and resuming from the stored state matches the one-shot result to
+      BF16 kernel tolerance — verified fused-vs-reference on an H200 (max abs
+      diff \(0.0078\); convolution states bit-exact).</p>
       <p class="small"><strong>Immutability.</strong> Denoising never mutates the
       clean caches, so one cache serves every diffusion step of that block.</p>
       <div class="note">
         Committing a block costs one scan over that block and <em>zero</em>
-        growth in cache size.
+        growth in recurrent-cache size. The returned token buffer still grows.
       </div>
     </div>
   </div>
@@ -428,8 +439,8 @@
   <h2>The training-objective problem</h2>
 
   <p class="small">A Transformer supervises all \(N\) blocks in one pass because
-  the mask packs them together. A recurrent model cannot: each block needs a
-  <em>different</em> boundary state.</p>
+  the mask packs them together. A recurrent model cannot natively reuse one
+  boundary: each block needs a <em>different</em> state.</p>
 
   <div class="cols">
     <div>
@@ -437,8 +448,9 @@
       $$\hat{\mathcal L}_{\text{one}} = N \cdot \ell_b, \quad b \sim \mathcal U\{1..N\}$$
       <p class="small">Unbiased for the loss value,
       \(\mathbb E_b[\hat{\mathcal L}_{\text{one}}] = \mathcal L\).</p>
-      <p class="small bad">But gradient reaches only \(1/N\) of the tokens. At
-      \(L=8192, B=256\) that is \(N=32\) — a 32:1 signal handicap.</p>
+      <p class="small bad">But gradient reaches only \(1/N\) of the tokens per
+      step. At \(L=8192, B=256\) that is \(N=32\) — 32&times; less token
+      supervision and a much noisier estimate.</p>
     </div>
     <div>
       <h3 class="good">v2 — every block per step</h3>
@@ -447,9 +459,11 @@
       blocks into the batch dimension and denoise them together.</p>
       <table>
         <tr><th>per step</th><th>cost</th><th>signal</th></tr>
-        <tr><td>v1</td><td>\(\tfrac12 L\) + 1 block</td><td>\(B\) tokens</td></tr>
-        <tr><td>v2</td><td>\(L\) + \(2L\)</td><td class="good">\(N\!\times\) more</td></tr>
+        <tr><td>v1</td><td>\(\tfrac12 L\) clean + \(2B\) active</td><td>\(B\) tokens</td></tr>
+        <tr><td>v2</td><td>\(L\) clean + \(2L\) active</td><td class="good">\(N\!\times\) more</td></tr>
       </table>
+      <p class="tiny">The active term is the forward and reverse scan over all
+      folded target blocks; shared MLP/projection work is omitted.</p>
     </div>
   </div>
   <p class="tiny">Run the comparison with v1 and you measure the estimator, not the backbone.</p>
@@ -460,7 +474,7 @@
   <h2>All-block supervision by cache folding</h2>
 
   <div class="dgm">
-    <p class="lbl" style="font-weight:700">1 &middot; one clean scan, keep the state entering each block</p>
+    <p class="lbl" style="font-weight:700">1 &middot; one logical continuation scan, keep each entering state</p>
     <div class="row tight">
       <div class="box clean">\(x_0^{\mathcal B_1}\)</div>
       <div class="box clean">\(x_0^{\mathcal B_2}\)</div>
@@ -494,14 +508,16 @@
   \(b\)'s state for block \(i\). Tested: boundary states equal per-block prefills
   in both directions; folded logits equal block-by-block logits; the estimators
   agree on the sampled block; and a per-position sweep confirms block \(i\)'s
-  de-novo logits move only for clean tokens strictly before it.</p>
+  de-novo logits move only for clean tokens strictly before it. The current
+  implementation realizes that logical clean scan with a Python block loop:
+  \(32\times12=384\) short layer scans at \(L=8192\).</p>
 </section>
 
 <!-- 12 =================================================================== -->
 <section>
   <h2>C-a mode: infilling against a fixed right flank</h2>
 
-  <p class="small">Same machinery, but the reverse cache starts from an
+  <p class="small">The sampler can initialize the reverse scan from an
   <em>observed</em> right flank instead of the empty state. It is built once and
   never mutated as blocks commit left to right.</p>
 
@@ -520,10 +536,25 @@
     </div>
   </div>
 
-  <p class="small">Training draws the suffix cache with probability
-  <code>model.right_flank_probability</code>, so one model serves both modes.
-  De-novo perplexity and generation never use a right cache — that would be an
-  oracle.</p>
+  <div class="cols">
+    <div>
+      <h3>What is implemented</h3>
+      <p class="small"><code>sample_infill_ca</code> generates a whole-block gap
+      left to right while holding only the external observed-flank state fixed.
+      Unknown, uncommitted gap blocks never enter either cache.</p>
+    </div>
+    <div>
+      <h3>What is not established yet</h3>
+      <p class="small">Training can draw each target block's clean suffix with
+      probability <code>right_flank_probability</code>, but the evaluated 8k
+      checkpoint used <strong>0.0</strong>. It has not been trained or benchmarked
+      for suffix conditioning, and matched multi-block-gap training is still
+      absent.</p>
+    </div>
+  </div>
+  <p class="tiny">De-novo perplexity and generation never use a right cache;
+  doing so would be an oracle. C-a results must be reported as conditional
+  infilling, not de-novo likelihood.</p>
 </section>
 
 <!-- 13 =================================================================== -->
@@ -535,20 +566,20 @@
     <tr><td>context mechanism</td><td>full attention on \([x_t;x_0]\)</td>
         <td>local band + coarse cross-attn</td><td>recurrent boundary state</td></tr>
     <tr><td>train compute in \(L\)</td><td>\(O(L^2)\)</td>
-        <td>\(O(LW) + O((L/k)^2)\)</td><td>\(O(L)\)</td></tr>
-    <tr><td>sampling cache</td><td>grows with commits</td>
-        <td>grows (fine KV + re-encode)</td>
-        <td class="good">constant, \(\approx\)2.40 MiB</td></tr>
+        <td>\(O(LBW) + O((L/k)^2)\)</td><td>\(O(L)\)</td></tr>
+    <tr><td>current sampling path</td><td>1024-token sliding KV cache</td>
+        <td>no KV path; re-encodes a bounded window</td>
+        <td class="good">constant recurrent cache, \(\approx\)2.40 MiB/direction</td></tr>
     <tr><td>all-block supervision</td><td>native</td><td>native</td>
         <td>via folded boundary caches</td></tr>
-    <tr><td>right-flank infilling</td><td>not at bounded memory</td>
-        <td>not at bounded memory</td><td class="good">C-a mode</td></tr>
+    <tr><td>right-flank infilling</td><td>not implemented</td>
+        <td>not implemented</td><td>C-a API; checkpoint untrained</td></tr>
   </table>
 
   <div class="note">
-    The SSM's argument is not that it is a better density model. It is that
-    committing a block costs \(O(1)\) memory, which is what makes
-    chromosome-scale generation and infilling tractable at all.
+    Here \(W\) is measured in blocks and \(B\) is block size. The SSM has not
+    yet proved a quality advantage; bounded recurrent context memory is its
+    systems hypothesis for long incremental generation and infilling.
   </div>
 </section>
 
@@ -556,9 +587,10 @@
 <section>
   <h2>Measured: prokaryote, matched tokens</h2>
 
-  <p class="small">Identical data, geometry, batch, schedule, seed; only the
-  backbone differs. 8000 steps \(\times\) 524k nt = 4.19B nt trained; scored on
-  16.8M held-out nucleotides.</p>
+  <p class="small">Matched data, geometry, <em>global</em> batch, schedule, seed
+  and token budget. Microbatches differed for memory (BiSSM 4, Transformer 8).
+  8000 steps \(\times\) 524k nt = 4.19B nt trained; scored on 16.8M held-out
+  nucleotides.</p>
 
   <table>
     <tr><th>arm</th><th class="num">NLL (nats/nt)</th><th class="num">PPL</th>
@@ -578,41 +610,79 @@
   <div class="note">
     One seed, one geometry, half an epoch. The gap is small enough that seed
     variance is worth measuring before treating the ordering as settled. The
-    wall-clock gap is an implementation artifact: the all-block path issues
-    \(12 \times 32 = 384\) sequential scan calls per step, at roughly 5%
-    arithmetic efficiency.
+    wall-clock gap is dominated by the current launch-bound boundary builder
+    plus the SSM's forward/reverse active scans; it is not an architecture-only
+    comparison. The all-block path issues \(12 \times 32 = 384\) sequential
+    short scan calls per step, at roughly 5% arithmetic efficiency.
   </div>
 </section>
 
 <!-- 15 =================================================================== -->
 <section>
-  <h2>Where this goes next</h2>
+  <h2>Recent benchmarks: what they do and do not show</h2>
 
   <div class="cols">
     <div>
-      <h3>Performance</h3>
-      <p class="small">Chunked state passing: each block's local scan in one
-      folded call, boundary states carried by a cheap elementwise recurrence,
-      then the standard output correction. About 24 launches per step instead of
-      384 — the restructuring Mamba-2's chunk scan already does internally,
-      applied one level up.</p>
+      <h3>MaveDB, 21,250 variants</h3>
+      <table>
+        <tr><th>arm</th><th class="num">macro |Spearman|</th></tr>
+        <tr><td>BiSSM ensemble</td><td class="num">0.1035</td></tr>
+        <tr><td>Transformer ensemble</td><td class="num"><strong>0.1239</strong></td></tr>
+        <tr><td class="tiny">dnaHNet paper</td><td class="num">0.3266</td></tr>
+      </table>
+      <p class="tiny">Two MC-8 seeds; per-variant seed agreement is only
+      \(\approx0.48\), so this is preliminary. All targets are \(\le216\) nt and
+      fit inside one 256-nt block: this benchmark does <em>not</em> exercise the
+      prefix or C-a caches. dnaHNet is a reference bar, not a matched control:
+      144B training nt and exact AR likelihood versus our 4.19B nt and diffusion
+      NELBO.</p>
     </div>
     <div>
-      <h3>Science</h3>
-      <p class="small">The likelihood result is a floor, not the case. What only
-      the SSM can do:</p>
+      <h3>Full-forward scaling, one H200</h3>
+      <p class="small">BiSSM stays near 18k nt/s through 512K, but remains
+      2.0&times; slower than the Transformer at 256K. The Transformer stops at
+      512K on a Triton 32-bit indexing limit, not GPU OOM.</p>
+      <p class="tiny">Both full-likelihood paths use \(O(L)\) memory: BiSSM
+      retains every block boundary to score all blocks (38.70 GiB at 512K).
+      Constant cache memory applies to incremental <code>denoise_block +
+      commit</code>, which still needs a dedicated benchmark.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 16 =================================================================== -->
+<section>
+  <h2>Next decisive experiment</h2>
+
+  <div class="cols">
+    <div>
+      <h3>Does the model use the prefix state?</h3>
+      <p class="small">Run a fixed-corruption, depth-resolved intervention on
+      512 validation sequences:</p>
       <ul class="small">
-        <li>commit at \(O(1)\) memory over chromosome-scale generation</li>
-        <li>C-a infilling against a fixed observed right flank</li>
-        <li>exact resumption from a stored state</li>
+        <li>full prefix versus no prefix</li>
+        <li>same-depth shuffled prefix state</li>
+        <li>only the last 256 nt or 1024 nt</li>
       </ul>
+      <p class="tiny">Report \(\Delta\)NLL by block depth. This directly tests
+      the recurrent route that MaveDB and aggregate perplexity do not isolate.</p>
+    </div>
+    <div>
+      <h3>Then, only if the route is live</h3>
+      <p class="small">Benchmark incremental <code>denoise_block + commit</code>
+      for throughput and peak cache memory; next run the dnaHNet-aligned DEG
+      subset. Train a suffix-conditioned checkpoint before claiming C-a quality.
+      Chunked boundary construction is the main training-speed optimization,
+      but it should not replace the causal-use test.</p>
     </div>
   </div>
 
   <p class="tiny" style="margin-top:1.2em">Sources:
   <code>models/bidirectional_ssm.py</code>, <code>models/mamba2_segment.py</code>,
   <code>models/dit_dual.py</code>, <code>diffusion.py</code>,
-  <code>docs/bidirectional_ssm_progress.md</code>. Runs: LSF 96602 / 96604 / 98003.</p>
+  <code>docs/bidirectional_ssm_progress.md</code>. Runs: LSF 96602 / 96604 /
+  98003 (likelihood), 98850 / 98851 / 98856 / 98857 (MaveDB), 98871 / 98876
+  (forward scaling). External reference: dnaHNet, arXiv:2602.10603, Table 5.</p>
 </section>
 
 </div></div>
