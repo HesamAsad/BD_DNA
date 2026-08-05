@@ -46,11 +46,16 @@ def main():
     int(record["length"])
     for _, _, records in profiles for record in records})
   for axis, (field, ylabel, log_y) in zip(axes, fields):
-    for label, _, records in profiles:
-      axis.plot(
+    for label, summary, records in profiles:
+      line, = axis.plot(
         [record["length"] for record in records],
         [record[field] for record in records],
         marker="o", linewidth=2.2, label=label)
+      for record in summary["records"]:
+        if record["status"] != "ok":
+          axis.axvline(
+            record["length"], color=line.get_color(), linestyle=":",
+            linewidth=1.5, alpha=0.75)
     axis.set_xscale("log", base=2)
     if log_y:
       axis.set_yscale("log")
@@ -66,7 +71,8 @@ def main():
     0.01, 0.01,
     "Fixed t=0.5 corruption; medians exclude one warm-up. "
     f"GPU: {', '.join(gpu_names)}. dnaHNet reports the same three metrics "
-    "for autoregressive H100 forwards; objectives and hardware differ.",
+    "for autoregressive H100 forwards; objectives and hardware differ. "
+    "Dotted endpoint: backend capacity limit.",
     fontsize=8)
   figure.tight_layout(rect=(0, 0.07, 1, 0.95))
   args.output.parent.mkdir(parents=True, exist_ok=True)

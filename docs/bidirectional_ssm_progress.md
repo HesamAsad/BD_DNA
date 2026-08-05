@@ -255,6 +255,42 @@ Machine-readable outputs and the inspected figure are under the ignored
 `results/dnahnet/mavedb/` tree; the figure is
 `mavedb_comparison.png`.
 
+#### dnaHNet-style forward scaling
+
+The paper's Appendix A.5 protocol was adapted directly: batch-one BF16 forward
+passes on one H200, powers-of-two context lengths from 1K through 512K, one
+warm-up and the median of three measured calls. Here a forward is a fixed
+`t=0.5` diffusion likelihood evaluation, so the metric family and length sweep
+match dnaHNet while the objective and H200 hardware do not.
+
+LSF `98871` completed every BiSSM length. Transformer `98876` completed through
+256K; at 512K its internal `[x_t; x_0]` working sequence reaches 1,048,576 and
+TorchInductor flex attention requires a stride above 32-bit range. Triton 2.7.1
+does not implement 64-bit indexing for that template, so this is a cleanly
+recorded backend limit rather than an H200 OOM. LSF `98872` first exposed the
+exception and `98875` verified its classification before the final full rerun.
+
+| context | BiSSM nt/s | Transformer nt/s | BiSSM peak | Transformer peak |
+|---:|---:|---:|---:|---:|
+| 1K | 15.0k | 97.1k | 0.66 GiB | 0.61 GiB |
+| 8K | 18.4k | 291.9k | 1.18 GiB | 1.05 GiB |
+| 64K | 18.2k | 118.9k | 5.35 GiB | 4.60 GiB |
+| 128K | 17.9k | 68.1k | 10.11 GiB | 8.68 GiB |
+| 256K | 18.1k | 35.4k | 19.64 GiB | 16.93 GiB |
+| 512K | 18.0k | backend limit | 38.70 GiB | — |
+
+BiSSM throughput is essentially length-independent, but this unoptimized
+all-block likelihood path is still 2.0x slower at 256K and much slower at short
+contexts. Both arms use O(length) memory for a full forward. BiSSM must retain
+every per-block boundary state to score all blocks simultaneously; its O(1)
+state claim applies instead to incremental block generation, where only the
+latest cache is kept. The next systems experiment should therefore measure
+`denoise_block + commit` separately rather than presenting this full-forward
+curve as a constant-memory result.
+
+Machine-readable profiles and the inspected triptych are under the ignored
+`results/dnahnet/forward/` tree; the figure is `forward_scaling.png`.
+
 ## Deliberate first-version constraints
 - The first backbone is all-Mamba. Sparse local-attention layers will be added
   only after cache/leakage tests pass, because exact attention continuation also
