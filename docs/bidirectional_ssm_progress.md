@@ -58,6 +58,7 @@ publicly accessible, so no unreleased source is assumed.
 - [x] Pass fused-vs-reference and end-to-end backward smoke on an H200.
 - [x] Supervise every block per training step (folded boundary caches).
 - [x] Prokaryote perplexity comparison against the Transformer BD3-LM.
+- [x] Add and smoke-test the protocol-aligned dnaHNet MaveDB harness.
 
 ### GPU acceptance attempts
 
@@ -204,7 +205,24 @@ about 2 kernel calls per layer instead of 32 -- roughly 24 launches per step
 rather than 384. This is the same restructuring Mamba-2's chunk scan performs
 internally, applied one level up.
 
-## Deliberate first-version constraints
+### dnaHNet benchmark alignment
+
+The first downstream benchmark is pinned to twelve historical MaveDB E. coli
+K-12 combined-score sets. Their counts sum exactly to the 21,250 variants
+reported by dnaHNet; a thirteenth matching set is now present in the live API,
+so the committed manifest prevents dataset drift. All 21,250 CC0 rows, target
+hashes, finite scores and coding-HGVS substitutions/indels validate. H200 jobs
+`98848` (BiSSM) and `98849` (Transformer) passed an eight-variant end-to-end
+smoke: both loaded the step-8000 EMA weights at a rebuilt 256-nt model length,
+produced finite paired WT/mutant NELBO differences, returned exactly zero for
+the identity variant, wrote predictions, and aggregated per-assay Spearman.
+
+The full benchmark uses common diffusion times and corruption masks within
+each WT/mutant pair and reports the macro mean absolute Spearman across the
+twelve assays. It is protocol-aligned, not data- or compute-matched: dnaHNet
+uses exact autoregressive likelihood and substantially more pretraining data.
+The preparation, scorer, plotter and interpretation contract are documented in
+`docs/dnahnet_benchmark_plan.md`.
 
 ## Deliberate first-version constraints
 - The first backbone is all-Mamba. Sparse local-attention layers will be added
