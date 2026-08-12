@@ -887,34 +887,39 @@
 <section>
   <h2>Measured: prokaryote, matched tokens</h2>
 
-  <p class="small">Matched data, geometry, <em>global</em> batch, schedule, seed
-  and token budget. 8000 steps \(\times\) 524k nt = 4.19B nt trained; scored on
-  16.8M held-out nucleotides, all arms on raw (non-EMA) weights.</p>
+  <p class="small">All arms: raw (non-EMA) weights, fixed-budget
+  \(\texttt{0-8000}\) checkpoint, each backbone at its own tuned recipe,
+  8000 steps \(\times\) 524k nt = 4.19B nt, scored on 16.8M held-out nt.</p>
 
   <table>
-    <tr><th>arm</th><th class="num">NLL (nats/nt)</th><th class="num">PPL</th>
+    <tr><th>arm</th><th class="num">NLL</th><th class="num">PPL</th>
         <th class="num">bits/nt</th><th class="num">wall clock</th></tr>
-    <tr><td>Bidirectional SSM</td><td class="num"><strong>1.24725</strong></td>
-        <td class="num">3.4808</td><td class="num">1.7994</td>
-        <td class="num">22 h 35 m \(\rightarrow\) <strong class="good">6 h 16 m</strong></td></tr>
-    <tr><td>Unidirectional SSM</td><td class="num">1.28580</td>
-        <td class="num">3.6176</td><td class="num">1.8550</td>
-        <td class="num">21 h 23 m</td></tr>
-    <tr><td>Transformer BD3-LM</td><td class="num">pending</td><td class="num">&mdash;</td>
-        <td class="num">&mdash;</td><td class="num">\(\approx\)4 h</td></tr>
+    <tr><td>uSSM-AR</td><td class="num"><strong>1.19305</strong></td>
+        <td class="num">3.2971</td><td class="num">1.7212</td>
+        <td class="num">6h44m \(\rightarrow\) <strong class="good">2h33m</strong></td></tr>
+    <tr><td>Transformer-AR</td><td class="num">1.19864</td><td class="num">3.3156</td>
+        <td class="num">1.7293</td><td class="num">2h11m</td></tr>
+    <tr><td>Transformer-BD</td><td class="num"><strong>1.24653</strong></td>
+        <td class="num">3.4782</td><td class="num">1.7984</td>
+        <td class="num">3h40m</td></tr>
+    <tr><td>BiSSM-BD</td><td class="num">1.24749</td><td class="num">3.4816</td>
+        <td class="num">1.7997</td>
+        <td class="num">22h35m \(\rightarrow\) <strong class="good">5h42m</strong></td></tr>
+    <tr><td>uSSM-BD</td><td class="num">1.28691</td><td class="num">3.6216</td>
+        <td class="num">1.8566</td>
+        <td class="num">21h23m \(\rightarrow\) <strong class="good">4h20m</strong></td></tr>
     <tr><td class="tiny">uniform baseline</td><td class="num">1.38629</td>
         <td class="num">4.0000</td><td class="num">2.0000</td><td class="num">&mdash;</td></tr>
   </table>
 
   <div class="note">
-    <strong class="bad">The previously reported Transformer row (1.24577) is
-    withdrawn.</strong> It differed from the SSM arms in three ways at once, each
-    larger than the 0.0015 nats/nt it was being compared on: an FP32 rather than
-    bf16 backbone forward (<strong>0.116</strong>), EMA 0.9999 rather than none,
-    and a different optimizer recipe (0.005). A matched replacement &mdash; own
-    recipe, EMA off, FP32 &mdash; is training. The two SSM rows above reproduce to
-    1.2e-4 and 2.0e-5 on re-scoring and are unaffected: they never reach the
-    backbone-forward wrapper the precision change touched.
+    Within block diffusion the Transformer leads BiSSM by
+    <strong>0.00096</strong> nats/nt &mdash; not the 0.0066 previously reported.
+    Within AR, uSSM-AR leads by <strong>0.00560</strong>, a conservative floor:
+    Transformer-AR's number came from an early-stopped \(\texttt{best}\)
+    checkpoint while every other row uses the fixed-budget endpoint.
+    The earlier table compared arms differing in precision (0.116 nats), EMA,
+    and optimizer recipe (0.005) &mdash; each larger than the margin claimed.
   </div>
 </section>
 

@@ -316,6 +316,50 @@ GPU) and `scripts/smoke/ab_boundary_impl.sh` with
 `scripts/smoke/compare_ab_curves.py` (two short training runs differing only in
 `model.boundary_impl`, curves diffed from the CSVLogger output).
 
+### Matched prokaryote comparison (supersedes the table above)
+
+The comparison recorded earlier is withdrawn. The Transformer arm differed from
+the SSM arms in three ways at once, each larger than the 0.0015 nats/nt it was
+being compared on:
+
+| confound | size | evidence |
+|---|---|---|
+| backbone forward precision | **0.116** nats | same checkpoint, FP32 1.24577 vs bf16 1.36194 (LSF 103283 / 103280) |
+| EMA | 0.9999 vs none | `96604` carries EMA state, `100570` does not |
+| optimizer recipe | 0.005 nats | the recipe swap alone moved BiSSM 1.25232 -> 1.24725 |
+
+A fourth applied only to the AR arms: `Diffusion.forward`'s FP32 autocast is not
+symmetric, because `models/dit.py` re-opens bf16 around its own blocks while the
+SSM stack had no such re-entry. `algo=ar backbone=ussm` therefore ran entirely in
+FP32, at the H200's ~67 TFLOP/s ceiling. Fixed by mirroring that re-entry
+(`BidirectionalSSM._compute_autocast`); a no-op for the block-diffusion arms,
+which already enter through a bf16 context.
+
+Every arm below is now scored on raw (non-EMA) weights from the fixed-budget
+`0-8000` checkpoint, each backbone at its own tuned recipe, 512 x 4 x 8192 nt.
+
+| arm | val NLL | PPL | bits/nt | wall clock | LSF |
+|---|---:|---:|---:|---:|---|
+| uSSM-AR | **1.19305** | 3.2971 | 1.7212 | 6h44m -> **2h33m** | 105320 |
+| Transformer-AR | 1.19864 | 3.3156 | 1.7293 | 2h11m | 20260808-v1 |
+| Transformer-BD | **1.24653** | 3.4782 | 1.7984 | 3h40m | 103661 |
+| BiSSM-BD | 1.24749 | 3.4816 | 1.7997 | 22h35m -> **5h42m** | 103297 |
+| uSSM-BD | 1.28691 | 3.6216 | 1.8566 | 21h23m -> **4h20m** | 103298 |
+| uniform baseline | 1.38629 | 4.0000 | 2.0000 | -- | -- |
+
+Two results follow. Within block diffusion the Transformer leads BiSSM by
+**0.00096** nats/nt, not the 0.0066 previously reported -- seven times smaller,
+and inside plausible seed variance. Within AR, uSSM-AR leads the Transformer by
+**0.00560** nats/nt; that is a conservative floor, because Transformer-AR's
+number came from `best.ckpt`, an early-stopped selection, while every other row
+uses the fixed-budget endpoint. A re-score from `0-8000.ckpt` is queued and can
+only move the Transformer worse.
+
+Precision sensitivity turns out to be a property of *which sub-computation* runs
+reduced, not of the model: the SSM tolerates bf16 in its layer stack for 0.00104
+nats (1.19201 -> 1.19305), while the DiT fails to train at all without FP32 in
+its embedding and logit tail.
+
 ### dnaHNet benchmark alignment
 
 The first downstream benchmark is pinned to twelve historical MaveDB E. coli
