@@ -205,6 +205,117 @@ about 2 kernel calls per layer instead of 32 -- roughly 24 launches per step
 rather than 384. This is the same restructuring Mamba-2's chunk scan performs
 internally, applied one level up.
 
+#### Fixed: the boundary prefill is now layer-major
+
+Implemented 2026-08-09. `_boundary_caches` no longer loops over blocks. Each
+layer consumes the whole clean prefix in two well-shaped calls
+(`SegmentMamba2.scan_with_block_boundaries`, `models/mamba2_segment.py`):
+
+1. one full-length causal convolution from a zero state, after which each
+   block's convolution boundary state is a strided `unfold` of the retained raw
+   input history rather than a separate per-block convolution;
+2. one full-length scan for the true layer outputs;
+3. one *folded* `[batch * nblocks, block]` scan giving every block's local final
+   state, combined across blocks by `_block_state_passing` -- the standard SSD
+   inter-chunk recurrence `S[i] = decay * S[i-1] + local[i-1]`, unrolled into a
+   single masked matmul so the cross-block carry costs one kernel rather than a
+   per-block Python loop. The decay exponent is a difference of prefix sums of
+   `dt` with `A < 0`, so every term the mask keeps is non-positive; the state
+   passing runs under `autocast(enabled=False)` because bf16 there would
+   quantise the caches every block's denoiser is conditioned on.
+
+Layer *l*'s boundary states depend only on layer *l-1*'s output over the prefix
+and on layer *l*'s own recurrence, so nothing couples the layers within a block
+and the block loop was never necessary. Call counts per micro-batch at
+L=8192/block 256/12 layers: **372 -> 24 scans and 372 -> 12 convolutions.**
+
+The block-major implementation is retained as `_boundary_caches_sequential` and
+is the oracle the unit tests compare against; `model.boundary_impl`
+(`layer_major` default, `block_major`) selects between them at runtime as a
+rollback switch.
+
+Equivalence, on the kernel training actually uses (fused Mamba-2, BF16
+autocast, 100.69M params, one H200, LSF `102784`):
+
+| micro batch | loss rel_diff | cache.conv | cache.ssm | worst grad rel |
+|---|---:|---:|---:|---:|
+| 4 | 6.2e-5 | 0 (exact) | 3.7e-7 | 2.5e-2 |
+| 8 | 1.4e-5 | 0 (exact) | 3.7e-7 | 2.9e-2 |
+
+The gradient figure is bf16 reassociation noise on depthwise-convolution
+weights, not drift: the same comparison in fp32 on CPU agrees to 3e-4, and the
+unit-test oracle matches every parameter at 2e-5. The pre-existing GPU
+acceptance smoke still reports max_abs_diff 0 for the folded-vs-per-block
+logits and both caches, so the leakage guarantee is unchanged.
+
+Speed and memory, same job:
+
+| micro batch | path | fwd+bwd | peak | speedup |
+|---|---|---:|---:|---:|
+| 4 | block-major | 1.9531 s | 66.93 GiB | 1.00x |
+| 4 | layer-major | 0.5145 s | 69.07 GiB | **3.80x** |
+| 8 | block-major | 2.2539 s | 133.17 GiB | 1.00x |
+| 8 | layer-major | 0.9812 s | 137.45 GiB | **2.30x** |
+
+The batch-4 vs batch-8 split confirms the original diagnosis. Per sequence the
+old path goes 0.488 -> 0.282 s as the batch doubles (sublinear: bigger tiles
+fill the GPU it was leaving idle), while the new path goes 0.129 -> 0.123 s
+(flat: compute-bound). The win is therefore largest exactly at the production
+micro batch of 4.
+
+Two things this did **not** deliver. Peak memory rose slightly rather than
+falling -- the fp32 `[batch, nblocks, heads, headdim, dstate]` state tensors and
+the full-length activations cost about what the 372 saved scan graphs did -- so
+micro batch 8 remains off the table for real AdamW training (137.45 of 143.77
+GiB with no optimizer state). And the folded local-state scan duplicates the
+scan arithmetic, so the prefill now does about 2x the scan FLOPs to remove
+30/31 of the launches; that trade is overwhelmingly favourable at the ~2%
+arithmetic efficiency measured above, but it shrinks as the block count falls
+and would be roughly neutral at `block_size` 1024.
+
+#### Measured in situ: 3.74x end-to-end
+
+LSF `102790` trained the same model twice for 200 optimizer steps, identical
+seed and data order, differing only in `model.boundary_impl`. Steady-state
+median throughput (steps >= 50, `trainer/tokens_per_s`, 4xH200):
+
+| path | tokens/s | s per micro-batch | 8000 steps, train only |
+|---|---:|---:|---:|
+| block-major | 56,010 | 2.340 | 20.80 h |
+| layer-major | **209,260** | **0.626** | **5.57 h** |
+
+**3.74x**, against a pre-run extrapolation of 2.0-2.3x. That extrapolation was
+wrong because it charged 0.611 s per micro-batch to non-model overhead, derived
+by subtracting the standalone benchmark's 1.953 s from the observed 2.564 s
+step. The real in-training model cost is 2.34 s, so the true non-model residual
+is only ~0.22 s: **the pipeline is model-bound, and the end-to-end speedup
+tracks the model-compute speedup almost exactly** (3.74x vs 3.80x). Adding
+validation at the recorded protocol's cadence, the 8000-step prokaryote run
+should take **~6 h instead of 22h35m**, putting the BiSSM arm within ~1.5x of
+the Transformer BD3-LM control's 3h59m rather than 5.8x.
+
+Loss equivalence in situ, same job (`scripts/smoke/compare_ab_curves.py`):
+
+| metric | last (layer) | last (block) | final rel | mean signed rel | max rel |
+|---|---:|---:|---:|---:|---:|
+| `val/nll` | 1.335450 | 1.335254 | 1.5e-4 | +8.1e-4 | 5.4e-3 |
+| `trainer/loss` | 1.308125 | 1.308084 | 3.2e-5 | +2.0e-3 | 2.5e-2 |
+
+Note the max pointwise gap (5.4e-3 on `val/nll`) is much larger than the final
+gap. That is expected and is **not** evidence of a defect: identical seeds plus
+a floating-point association difference perturb the weights, which perturbs
+later losses, so the trajectories separate and then reconverge. The signed-gap
+pattern is mixed (`-++---++` for `val/nll`), i.e. unbiased, and the endpoints
+agree to 1.5e-4. A genuine equivalence break would show a one-sided pattern and
+endpoints that stay apart. The comparison script therefore gates on the final
+gap and the mean signed gap, not on the max pointwise gap, which is the wrong
+statistic for a chaotic trajectory pair.
+
+Harnesses: `scripts/smoke/bench_boundary_caches.{py,sh}` (equivalence + speed on
+GPU) and `scripts/smoke/ab_boundary_impl.sh` with
+`scripts/smoke/compare_ab_curves.py` (two short training runs differing only in
+`model.boundary_impl`, curves diffed from the CSVLogger output).
+
 ### dnaHNet benchmark alignment
 
 The first downstream benchmark is pinned to twelve historical MaveDB E. coli

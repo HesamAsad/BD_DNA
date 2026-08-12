@@ -871,7 +871,7 @@
         <td>no KV path; re-encodes a bounded window</td>
         <td class="good">constant recurrent cache, \(\approx\)2.40 MiB/direction</td></tr>
     <tr><td>all-block supervision</td><td>native</td><td>native</td>
-        <td>via folded boundary caches</td></tr>
+        <td>via folded boundary caches (layer-major)</td></tr>
     <tr><td>right-flank infilling</td><td>not implemented</td>
         <td>not implemented</td><td>C-a API; checkpoint untrained</td></tr>
   </table>
@@ -888,32 +888,106 @@
   <h2>Measured: prokaryote, matched tokens</h2>
 
   <p class="small">Matched data, geometry, <em>global</em> batch, schedule, seed
-  and token budget. Microbatches differed for memory (BiSSM 4, Transformer 8).
-  8000 steps \(\times\) 524k nt = 4.19B nt trained; scored on 16.8M held-out
-  nucleotides.</p>
+  and token budget. 8000 steps \(\times\) 524k nt = 4.19B nt trained; scored on
+  16.8M held-out nucleotides, all arms on raw (non-EMA) weights.</p>
 
   <table>
     <tr><th>arm</th><th class="num">NLL (nats/nt)</th><th class="num">PPL</th>
         <th class="num">bits/nt</th><th class="num">wall clock</th></tr>
-    <tr><td>Bidirectional SSM</td><td class="num">1.25232</td><td class="num">3.4985</td>
-        <td class="num">1.8067</td><td class="num">20 h 15 m</td></tr>
-    <tr><td>Transformer BD3-LM</td><td class="num"><strong>1.24577</strong></td>
-        <td class="num"><strong>3.4756</strong></td><td class="num"><strong>1.7973</strong></td>
-        <td class="num"><strong>3 h 59 m</strong></td></tr>
+    <tr><td>Bidirectional SSM</td><td class="num"><strong>1.24725</strong></td>
+        <td class="num">3.4808</td><td class="num">1.7994</td>
+        <td class="num">22 h 35 m \(\rightarrow\) <strong class="good">6 h 16 m</strong></td></tr>
+    <tr><td>Unidirectional SSM</td><td class="num">1.28580</td>
+        <td class="num">3.6176</td><td class="num">1.8550</td>
+        <td class="num">21 h 23 m</td></tr>
+    <tr><td>Transformer BD3-LM</td><td class="num">pending</td><td class="num">&mdash;</td>
+        <td class="num">&mdash;</td><td class="num">\(\approx\)4 h</td></tr>
     <tr><td class="tiny">uniform baseline</td><td class="num">1.38629</td>
-        <td class="num">4.0000</td><td class="num">2.0000</td><td class="num">—</td></tr>
+        <td class="num">4.0000</td><td class="num">2.0000</td><td class="num">&mdash;</td></tr>
   </table>
 
-  <p class="small">Transformer ahead by <strong>0.0066 nats/nt</strong> —
-  0.0094 bits/nt, 0.66% perplexity — at 5.1&times; less wall clock.</p>
+  <div class="note">
+    <strong class="bad">The previously reported Transformer row (1.24577) is
+    withdrawn.</strong> It differed from the SSM arms in three ways at once, each
+    larger than the 0.0015 nats/nt it was being compared on: an FP32 rather than
+    bf16 backbone forward (<strong>0.116</strong>), EMA 0.9999 rather than none,
+    and a different optimizer recipe (0.005). A matched replacement &mdash; own
+    recipe, EMA off, FP32 &mdash; is training. The two SSM rows above reproduce to
+    1.2e-4 and 2.0e-5 on re-scoring and are unaffected: they never reach the
+    backbone-forward wrapper the precision change touched.
+  </div>
+</section>
+
+<!-- 18b ================================================================== -->
+<section>
+  <h2>The launch-bound builder, fixed</h2>
+
+  <p class="small">The boundary-cache prefill was <em>block-major</em>: a loop over
+  blocks on the outside, the layer loop inside. Layer \(l\)'s boundary states
+  depend only on layer \(l\!-\!1\)'s output and layer \(l\)'s own recurrence,
+  so nothing couples the layers within a block &mdash; the loop was never needed.</p>
+
+  <table>
+    <tr><th></th><th class="num">scan calls / micro-batch</th>
+        <th class="num">conv calls</th><th class="num">tokens/s</th></tr>
+    <tr><td>block-major</td><td class="num">372</td><td class="num">372</td>
+        <td class="num">56,010</td></tr>
+    <tr><td>layer-major</td><td class="num"><strong>24</strong></td>
+        <td class="num"><strong>12</strong></td>
+        <td class="num"><strong>209,260</strong></td></tr>
+  </table>
+
+  <p class="small">Each layer now consumes the whole clean prefix in two
+  well-shaped calls: one full-length scan for the outputs, one folded
+  \([B\!\cdot\!n_b,\, B_s]\) scan whose per-block final states the standard SSD
+  inter-chunk recurrence carries forward as a single masked matmul.
+  <strong class="good">3.74\(\times\)</strong> end-to-end.</p>
 
   <div class="note">
-    One seed, one geometry, half an epoch. The gap is small enough that seed
-    variance is worth measuring before treating the ordering as settled. The
-    wall-clock gap is dominated by the current launch-bound boundary builder
-    plus the SSM's forward/reverse active scans; it is not an architecture-only
-    comparison. The all-block path issues \(12 \times 32 = 384\) sequential
-    short scan calls per step, at roughly 5% arithmetic efficiency.
+    Loss and gradient are unchanged, not approximately: the block-major path is
+    retained as the test oracle, gradients match on every parameter, and both
+    8000-step checkpoints re-score to within 1.2e-4. The remaining cost is
+    intrinsic &mdash; the folded pass duplicates the scan arithmetic to remove
+    30/31 of the launches, a trade that pays at the \(\approx\)2% arithmetic
+    efficiency measured before, and narrows as the block count falls.
+  </div>
+</section>
+
+<!-- 18c ================================================================== -->
+<section>
+  <h2>Related work: CENO (2026)</h2>
+
+  <p class="small">Hybrid Mamba + sparse-attention + MoE, 80M&ndash;1B, 8k\(\rightarrow\)1M
+  context, autoregressive. The strongest published DNA SSM &mdash; and it does not
+  overlap this work.</p>
+
+  <table>
+    <tr><th></th><th>CENO</th><th>ours</th></tr>
+    <tr><td>objective</td><td>autoregressive</td><td>block diffusion</td></tr>
+    <tr><td>reverse scan</td><td><em>none</em> &mdash; 0 occurrences in 4,036 lines</td>
+        <td>in-block, leak-free</td></tr>
+    <tr><td>right-flank infilling</td><td>structurally impossible</td><td>C-a</td></tr>
+    <tr><td class="tiny">B/C groups</td><td class="tiny">8</td>
+        <td class="tiny">1 &mdash; largest untested gap</td></tr>
+    <tr><td class="tiny">layer schedule</td><td class="tiny">48 Mamba + 4 attention</td>
+        <td class="tiny">all-Mamba</td></tr>
+  </table>
+
+  <p class="small">Their fused <code>mamba_split_conv1d_scan_combined</code> is
+  unavailable to us by construction: <code>initial_states</code> covers the SSM state
+  only, the convolution always restarts from zero, and it returns just the output &mdash;
+  hiding the pre-conv activations our per-block conv boundary states are sliced from.
+  A causal model never resumes state at an interior boundary, so the fusion costs
+  CENO nothing and costs us the method.</p>
+
+  <div class="note">
+    The transferable finding is <strong>MSA post-training</strong>: they report
+    +46.4pp BRCA1 AUPRC from scoring reference against mutant under shared
+    homologous context. Variant effect is where we are weakest (0.1317 macro
+    \(|\rho|\) vs dnaHNet 0.3266), and aligned-homolog conditioning is an
+    infilling-shaped problem that two-sided C-a may suit better than AR does.
+    Architecture claims here were verified against released source; their headline
+    results are unchecked.
   </div>
 </section>
 

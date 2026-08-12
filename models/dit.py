@@ -727,18 +727,38 @@ class DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
       # dense (2L x 2L) grid that OOMs at long context. Default off = eager build
       # (the proven path for normal-length training).
       compile_mask = os.environ.get('BD3LM_COMPILE_MASK', '0') == '1'
-      self.block_diff_mask = create_block_mask(
+      mask = create_block_mask(
         partial(block_diff_mask, block_size=block_size, n=seqlen),
         B=None, H=None, Q_LEN=seqlen*2, KV_LEN=seqlen*2,
         _compile=compile_mask)
+      if 'block_diff_mask' in self._buffers:
+        del self._buffers['block_diff_mask']
+      self.block_diff_mask = mask
     elif attn_backend == 'sdpa':
-      self.block_diff_mask = block_diff_mask(
+      mask = block_diff_mask(
         b=None, h=None, q_idx=torch.arange(seqlen*2)[:, None], 
         kv_idx=torch.arange(seqlen*2)[None, :], block_size=block_size, n=seqlen)
+      # A plain tensor attribute is not moved by ``module.cuda()``/``_apply``.
+      # Keep this derived mask out of checkpoints while letting every normal
+      # model device/dtype move carry it with the Transformer.
+      if 'block_diff_mask' in self._buffers:
+        self.block_diff_mask = mask
+      else:
+        if hasattr(self, 'block_diff_mask'):
+          delattr(self, 'block_diff_mask')
+        self.register_buffer(
+          'block_diff_mask', mask, persistent=False)
     else:
       raise ValueError('Unknown attention backend')
     
   def reset_kv_cache(self):
+    if self.causal:
+      # The causal block owns a growing/sliding tensor cache and initializes it
+      # on the first store_kv forward. Preallocating the diffusion cache here
+      # makes the first AR token attend to 1024 zero QKV entries.
+      for block in self.blocks:
+        block.kv_cache = None
+      return
     for block in self.blocks:
       block.kv_cache = torch.zeros(
         self.config.loader.eval_batch_size,

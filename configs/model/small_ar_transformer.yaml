@@ -1,0 +1,15 @@
+# Parameter-matched causal Transformer control for the 100.7M recurrent SSMs.
+# 832 / 13 gives a FlashAttention-friendly head dimension of 64 and 99.8M
+# parameters (within 1% of the 100.7M uSSM/BiSSM backbones).
+name: small_ar_transformer
+type: ddit
+hidden_size: 832
+cond_dim: 128
+length: 8192
+n_blocks: 12
+n_heads: 13
+scale_by_sigma: True
+dropout: 0.0
+tie_word_embeddings: True
+adaln: False
+attn_backend: flash_attn

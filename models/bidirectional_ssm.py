@@ -12,6 +12,7 @@ The clean target block is never used to construct either cache.
 
 from __future__ import annotations
 
+import contextlib
 import math
 from dataclasses import dataclass
 from typing import Optional
@@ -171,6 +172,23 @@ class BiMambaLayer(nn.Module):
     x = x + self.dropout(self.mlp(self.mlp_norm(x)))
     return x, final_state
 
+  def scan_clean_with_boundaries(
+      self,
+      x: torch.Tensor,
+      block_size: int,
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``scan_clean`` over a whole prefix, keeping every block-boundary state.
+
+    Returns the layer output alongside stacked ``[batch, num_blocks + 1, ...]``
+    convolution and SSM states, where index ``i`` is the state entering block
+    ``i`` of this layer's input.
+    """
+    mixed, conv_states, ssm_states = self.mixer.scan_with_block_boundaries(
+      self.mixer_norm(x), block_size)
+    x = x + self.dropout(mixed)
+    x = x + self.dropout(self.mlp(self.mlp_norm(x)))
+    return x, conv_states, ssm_states
+
   def scan_active(
       self,
       x: torch.Tensor,
@@ -202,6 +220,17 @@ class BidirectionalSSM(nn.Module):
     self.block_size = int(config.block_size)
     self.hidden_size = int(model.hidden_size)
     self.time_conditioning = bool(config.algo.time_conditioning)
+    # 'layer_major' scans the whole clean prefix once per layer and harvests
+    # every block's boundary state from it; 'block_major' is the original
+    # one-short-scan-per-block loop, kept as an escape hatch and as the
+    # equivalence oracle the tests compare against. They compute the same
+    # states and the same gradient; only the floating-point association order
+    # and the kernel-launch count differ.
+    self.boundary_impl = str(model.get("boundary_impl", "layer_major"))
+    if self.boundary_impl not in {"layer_major", "block_major"}:
+      raise ValueError(
+        "model.boundary_impl must be 'layer_major' or 'block_major', got "
+        f"{self.boundary_impl!r}")
 
     self.token_embedding = nn.Embedding(vocab_size, self.hidden_size)
     self.time_embedding = (
@@ -236,6 +265,27 @@ class BidirectionalSSM(nn.Module):
         nn.init.xavier_uniform_(module.weight)
         if module.bias is not None:
           nn.init.zeros_(module.bias)
+
+  def _compute_autocast(self, x: torch.Tensor):
+    """bf16 for the layer stack, mirroring ``models/dit.py``'s inner autocast.
+
+    ``Diffusion.forward`` wraps every backbone call in an explicit FP32
+    autocast, because the Transformer needs its embedding, rotary and logit
+    tail in FP32 or it fails to train. The Transformer's *blocks* escape that
+    by re-opening a bf16 autocast of their own; this backbone had no such
+    re-entry, so ``algo=ar`` with an SSM -- the one path that reaches the FP32
+    wrapper without going through ``_forward_pass_bissm`` -- executed entirely
+    in FP32, at the H200's ~67 TFLOP/s FP32 ceiling instead of on bf16 tensor
+    cores. That, not the architecture, was the bulk of uSSM-AR's 3.09x
+    training-time gap against the Transformer AR arm.
+
+    Under the block-diffusion path this is a no-op: ``_forward_pass_bissm``
+    already supplies a bf16 autocast, and nesting the same dtype changes
+    nothing.
+    """
+    if x.device.type != "cuda":
+      return contextlib.nullcontext()
+    return torch.amp.autocast("cuda", dtype=torch.bfloat16)
 
   def _empty_cache(
       self,
@@ -295,26 +345,35 @@ class BidirectionalSSM(nn.Module):
     result = self._prefill(clean_prefix_ids, cache, "left")
     return result.detach() if detach else result
 
-  def _boundary_caches(
+  def _validate_boundary_request(
+      self,
+      token_ids: torch.Tensor,
+      block_size: int,
+  ) -> int:
+    if token_ids.ndim != 2:
+      raise ValueError("Clean context must have shape [batch, length]")
+    length = token_ids.shape[1]
+    if block_size <= 0 or length % block_size:
+      raise ValueError(
+        f"Length ({length}) must be a positive multiple of the block size "
+        f"({block_size})")
+    return length // block_size
+
+  def _boundary_caches_sequential(
       self,
       token_ids: torch.Tensor,
       block_size: int,
       direction: str,
   ) -> tuple[DirectionalCache, ...]:
-    """Scans a clean sequence once, keeping the state entering each block.
+    """Reference block-major implementation, kept as the equivalence oracle.
 
     Entry ``i`` is the state produced by ``token_ids[:, :i * block_size]``, so
-    entry 0 is the empty state. Total work equals one full-length scan: the
-    blocks are consumed in order and each one continues the previous state.
+    entry 0 is the empty state. This walks the blocks in order, running every
+    layer at each one; ``_boundary_caches`` computes the same states with two
+    full-length scans per layer instead, and the tests assert they agree.
     """
-    if token_ids.ndim != 2:
-      raise ValueError("Clean context must have shape [batch, length]")
-    batch_size, length = token_ids.shape
-    if block_size <= 0 or length % block_size:
-      raise ValueError(
-        f"Length ({length}) must be a positive multiple of the block size "
-        f"({block_size})")
-    num_blocks = length // block_size
+    num_blocks = self._validate_boundary_request(token_ids, block_size)
+    batch_size = token_ids.shape[0]
 
     # Match the dtype `_prefill` would pick for an empty cache (the embedding
     # output dtype, which autocast may differ from the weight dtype).
@@ -330,6 +389,106 @@ class BidirectionalSSM(nn.Module):
         token_ids[:, start:start + block_size], cache, direction)
       boundaries.append(cache)
     return tuple(boundaries)
+
+  def _stacked_boundary_states(
+      self,
+      token_ids: torch.Tensor,
+      block_size: int,
+      num_blocks: int,
+  ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """Per-layer block-boundary states, one pass per layer.
+
+    Returns ``(conv, ssm)`` lists holding one ``[batch, num_blocks, ...]``
+    tensor per layer, where index ``i`` is the state entering block ``i``.
+
+    Only tokens strictly before the last block can reach any of these states,
+    so the last block is never scanned -- which is also what keeps a block's
+    own clean target out of its denoiser's cache.
+    """
+    prefix = token_ids[:, :(num_blocks - 1) * block_size]
+    x = self.token_embedding(prefix)
+    conv_per_layer, ssm_per_layer = [], []
+    for layer in self.layers:
+      x, conv_states, ssm_states = layer.scan_clean_with_boundaries(
+        x, block_size)
+      conv_per_layer.append(conv_states)
+      ssm_per_layer.append(ssm_states)
+    return conv_per_layer, ssm_per_layer
+
+  def _boundary_caches(
+      self,
+      token_ids: torch.Tensor,
+      block_size: int,
+      direction: str,
+  ) -> tuple[DirectionalCache, ...]:
+    """Scans a clean sequence once, keeping the state entering each block.
+
+    Entry ``i`` is the state produced by ``token_ids[:, :i * block_size]``, so
+    entry 0 is the empty state.
+
+    The scan is layer-major: each layer consumes the whole prefix in two
+    well-shaped calls rather than one short call per block. Layer ``l``'s
+    boundary states depend only on layer ``l - 1``'s output over the prefix
+    and on layer ``l``'s own recurrence, so nothing couples the layers within
+    a block and the block loop is unnecessary.
+    """
+    if self.boundary_impl == "block_major":
+      return self._boundary_caches_sequential(
+        token_ids, block_size, direction)
+    num_blocks = self._validate_boundary_request(token_ids, block_size)
+    if num_blocks == 1:
+      return (self._empty_cache(
+        token_ids.shape[0],
+        token_ids.device,
+        self.token_embedding(token_ids[:, :1]).dtype,
+        direction),)
+    conv_per_layer, ssm_per_layer = self._stacked_boundary_states(
+      token_ids, block_size, num_blocks)
+    return tuple(
+      DirectionalCache(
+        tuple(
+          Mamba2State(conv[:, index], ssm[:, index])
+          for conv, ssm in zip(conv_per_layer, ssm_per_layer)),
+        index * block_size,
+        direction)
+      for index in range(num_blocks))
+
+  def _boundary_caches_stacked(
+      self,
+      token_ids: torch.Tensor,
+      block_size: int,
+      direction: str,
+      reverse_blocks: bool = False,
+  ) -> DirectionalCache:
+    """``_boundary_caches`` folded straight into the batch dimension.
+
+    Equivalent to ``stack_boundary_caches(self._boundary_caches(...))`` but
+    without materialising ``num_blocks * n_layers`` intermediate slices; row
+    ``b * num_blocks + i`` holds sequence ``b``'s state entering block ``i``.
+    """
+    if self.boundary_impl == "block_major":
+      caches = self._boundary_caches_sequential(
+        token_ids, block_size, direction)
+      return stack_boundary_caches(
+        tuple(reversed(caches)) if reverse_blocks else caches)
+    num_blocks = self._validate_boundary_request(token_ids, block_size)
+    if num_blocks == 1:
+      return self._empty_cache(
+        token_ids.shape[0],
+        token_ids.device,
+        self.token_embedding(token_ids[:, :1]).dtype,
+        direction)
+    conv_per_layer, ssm_per_layer = self._stacked_boundary_states(
+      token_ids, block_size, num_blocks)
+    states = []
+    for conv, ssm in zip(conv_per_layer, ssm_per_layer):
+      if reverse_blocks:
+        conv, ssm = conv.flip(1), ssm.flip(1)
+      states.append(
+        Mamba2State(conv.flatten(0, 1), ssm.flatten(0, 1)))
+    # The folded rows cover different context lengths, so a single scalar
+    # length is meaningless here; -1 marks it as heterogeneous.
+    return DirectionalCache(tuple(states), length=-1, direction=direction)
 
   def prefill_left_boundaries(
       self,
@@ -355,6 +514,26 @@ class BidirectionalSSM(nn.Module):
     # Reversed block ``j`` is original block ``num_blocks - 1 - j``, so the
     # state entering reversed block ``j`` is the original block's suffix state.
     return tuple(reversed(reversed_boundaries))
+
+  def prefill_left_boundaries_stacked(
+      self,
+      clean_ids: torch.Tensor,
+      block_size: int,
+  ) -> DirectionalCache:
+    """``prefill_left_boundaries`` already folded into the batch dimension."""
+    return self._boundary_caches_stacked(clean_ids, block_size, "left")
+
+  def prefill_right_boundaries_stacked(
+      self,
+      clean_ids: torch.Tensor,
+      block_size: int,
+  ) -> DirectionalCache:
+    """``prefill_right_boundaries`` already folded into the batch dimension."""
+    return self._boundary_caches_stacked(
+      torch.flip(clean_ids, dims=(1,)),
+      block_size,
+      "right",
+      reverse_blocks=True)
 
   def prefill_right(
       self,
@@ -392,12 +571,13 @@ class BidirectionalSSM(nn.Module):
     self._validate_cache(left_cache, batch_size, "left")
     self._validate_cache(right_cache, batch_size, "right")
 
-    for layer_index, layer in enumerate(self.layers):
-      x = layer.scan_active(
-        x,
-        left_cache.states[layer_index],
-        right_cache.states[layer_index])
-    return self.output(self.final_norm(x))
+    with self._compute_autocast(x):
+      for layer_index, layer in enumerate(self.layers):
+        x = layer.scan_active(
+          x,
+          left_cache.states[layer_index],
+          right_cache.states[layer_index])
+      return self.output(self.final_norm(x))
 
   def prepare_right_cache(self, clean_suffix_ids: torch.Tensor):
     """Prepare the fixed C-a cache used by subsequent active-block calls."""

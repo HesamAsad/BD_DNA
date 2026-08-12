@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+#BSUB -J ssm_prefix
+#BSUB -G s10396
+#BSUB -q training-parallel
+#BSUB -n 16
+#BSUB -W 12:00
+#BSUB -R "span[hosts=1]"
+#BSUB -R "select[mem>128000 && hname!='farm-gpu0504']"
+#BSUB -R "rusage[mem=128000]"
+#BSUB -M 128000
+#BSUB -gpu "num=1:mode=exclusive_process:gmodel=NVIDIAH200"
+#BSUB -cwd /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms
+#BSUB -o /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/logs/ssm_prefix_%J.out
+#BSUB -e /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/logs/ssm_prefix_%J.err
+set -euo pipefail
+
+REPO=/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms
+cd "$REPO"
+PYTHON=${PYTHON:-/software/cellgen/team361/ha11/envs/nichejepa/bin/python}
+CKPT=${CKPT:?set CKPT=/path/to/checkpoint.ckpt}
+LABEL=${LABEL:?set LABEL=ussm-ar, ussm-bd, or bissm-bd}
+BATCH_SIZE=${BATCH_SIZE:-4}
+NUM_SEQUENCES=${NUM_SEQUENCES:-64}
+MC_SAMPLES=${MC_SAMPLES:-16}
+SEED=${SEED:-1}
+RUN_TAG=${LSB_JOBID:-$(date +%Y%m%d-%H%M%S)}
+OUTPUT_DIR=${OUTPUT_DIR:-$REPO/results/prefix_intervention/${LABEL}-${RUN_TAG}}
+
+export PYTHONPATH="$REPO:${PYTHONPATH:-}"
+export TOKENIZERS_PARALLELISM=false USE_TF=0 TF_CPP_MIN_LOG_LEVEL=3
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+mkdir -p "$OUTPUT_DIR" logs
+nvidia-smi --query-gpu=index,name,memory.total --format=csv
+"$PYTHON" -u scripts/eval/ssm_prefix_intervention.py \
+  --checkpoint "$CKPT" --output-dir "$OUTPUT_DIR" --label "$LABEL" \
+  --batch-size "$BATCH_SIZE" --num-sequences "$NUM_SEQUENCES" \
+  --mc-samples "$MC_SAMPLES" --seed "$SEED" \
+  --radii 256 1024 4096

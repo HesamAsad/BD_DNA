@@ -167,14 +167,17 @@ class SegmentMamba2(nn.Module):
     one-for-one with the new segment.
     """
     raw = xBC.transpose(1, 2)
-    history = torch.cat((initial_state, raw), dim=-1)
+    history = torch.cat((initial_state.to(dtype=raw.dtype), raw), dim=-1)
     convolved = F.conv1d(
       history,
       self.conv1d.weight,
       self.conv1d.bias,
       groups=self.conv_dim)
-    convolved = convolved[:, :, 1:].transpose(1, 2)
-    return F.silu(convolved), history[:, :, -self.d_conv:]
+    # `narrow` rather than fancy slicing: same values, but its backward is a
+    # view-scatter instead of a full-tensor zeros+copy.
+    convolved = convolved.narrow(-1, 1, raw.shape[-1]).transpose(1, 2)
+    return F.silu(convolved), history.narrow(
+      -1, history.shape[-1] - self.d_conv, self.d_conv)
 
   def _reference_scan(
       self,
@@ -226,6 +229,163 @@ class SegmentMamba2(nn.Module):
       return_final_states=True)
     return result
 
+  def _zero_ssm(
+      self,
+      batch_size: int,
+      device: torch.device,
+      dtype: torch.dtype,
+  ) -> torch.Tensor:
+    return torch.zeros(
+      batch_size, self.nheads, self.headdim, self.d_state,
+      device=device, dtype=dtype)
+
+  def _scan(
+      self,
+      x: torch.Tensor,
+      dt: torch.Tensor,
+      B: torch.Tensor,
+      C: torch.Tensor,
+      initial_ssm: Optional[torch.Tensor],
+      backend: str,
+  ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Dispatch one selective scan, treating ``None`` as the zero state."""
+    if backend == "fused":
+      return self._fused_scan(x, dt, B, C, initial_ssm)
+    if initial_ssm is None:
+      initial_ssm = self._zero_ssm(x.shape[0], x.device, x.dtype)
+    return self._reference_scan(x, dt, B, C, initial_ssm)
+
+  def _gated_output(
+      self,
+      y: torch.Tensor,
+      z: torch.Tensor,
+  ) -> torch.Tensor:
+    """Official Mamba-2 tail: SiLU gate, RMSNorm, output projection."""
+    y = rearrange(y, "b l h p -> b l (h p)")
+    y = y * F.silu(z)
+    variance = y.float().pow(2).mean(dim=-1, keepdim=True)
+    y = y * torch.rsqrt(variance.to(dtype=y.dtype) + 1e-5)
+    y = y * self.norm_weight.to(dtype=y.dtype)
+    return self.out_proj(y)
+
+  def _block_state_passing(
+      self,
+      dt: torch.Tensor,
+      local_ssm: torch.Tensor,
+      block_size: int,
+  ) -> torch.Tensor:
+    """Combine per-block local final states into per-block entry states.
+
+    This is the standard SSD inter-chunk recurrence
+    ``S[i] = decay[i-1] * S[i-1] + local[i-1]`` applied one level up, at block
+    rather than chunk granularity.  Unrolling it into a single masked matmul
+    keeps the whole cross-block carry in one kernel instead of a per-block
+    Python loop.
+
+    ``decay`` is a difference of prefix sums of ``dt``, and ``A`` is negative,
+    so every exponent the mask keeps is non-positive; the clamp only guards
+    the masked-out upper triangle, whose gradient the mask discards anyway.
+    """
+    batch_size, seqlen, _ = dt.shape
+    num_seg = seqlen // block_size
+    # Autocast would demote the matmul to bf16 and quantize the caches that
+    # every block's denoiser is conditioned on; the recurrence is cheap enough
+    # to always run in fp32.
+    with torch.autocast(device_type=dt.device.type, enabled=False):
+      A = -torch.exp(self.A_log.float())
+      dt_eff = F.softplus(dt.float() + self.dt_bias.float())
+      segment_dt = dt_eff.reshape(
+        batch_size, num_seg, block_size, self.nheads).sum(dim=2)
+      # cumulative[i] sums dt over the blocks strictly before block i.
+      cumulative = F.pad(
+        torch.cumsum(segment_dt, dim=1), (0, 0, 1, 0))
+      # exponent[b, i, j, h] carries block j's final state to block i's entry.
+      exponent = A * (
+        cumulative[:, :, None, :] - cumulative[:, None, 1:, :])
+      keep = (
+        torch.arange(num_seg, device=dt.device)[None, :]
+        < torch.arange(num_seg + 1, device=dt.device)[:, None])
+      decay = torch.where(
+        keep[None, :, :, None],
+        torch.exp(exponent.clamp(max=0.0)),
+        exponent.new_zeros(()))
+      return torch.einsum(
+        "bijh,bjhpn->bihpn", decay, local_ssm.float())
+
+  def scan_with_block_boundaries(
+      self,
+      u: torch.Tensor,
+      block_size: int,
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Scan ``u`` from the zero state, keeping every block-boundary state.
+
+    ``u`` must hold a whole number of blocks.  The returned state tensors have
+    a leading block axis of length ``num_seg + 1``: entry ``i`` is the state a
+    scan has reached after consuming ``u[:, :i * block_size]``, so entry 0 is
+    the zero state and entry ``num_seg`` is the final state.
+
+    This replaces a ``num_seg``-iteration loop of short ``scan_segment`` calls
+    with two well-shaped scans -- one full-length pass for the outputs, one
+    folded pass whose per-block final states the inter-block recurrence
+    carries forward.  It computes the same function of the input; only the
+    association order of the floating-point sums differs.
+    """
+    if u.ndim != 3 or u.shape[-1] != self.d_model:
+      raise ValueError(
+        f"Expected [batch, length, {self.d_model}], received {tuple(u.shape)}")
+    batch_size, seqlen, _ = u.shape
+    if block_size <= 0 or seqlen % block_size:
+      raise ValueError(
+        f"Length ({seqlen}) must be a positive multiple of the block size "
+        f"({block_size})")
+    num_seg = seqlen // block_size
+
+    zxbcdt = self.in_proj(u)
+    z, xBC, dt = torch.split(
+      zxbcdt,
+      [self.d_inner, self.conv_dim, self.nheads],
+      dim=-1)
+
+    # One full-length causal convolution from a zero state.  `history` retains
+    # every raw projected input, so a block's convolution boundary state is a
+    # strided window of it rather than a separate per-block convolution.
+    raw = xBC.transpose(1, 2)
+    history = torch.cat(
+      (torch.zeros(
+        batch_size, self.conv_dim, self.d_conv,
+        device=raw.device, dtype=raw.dtype), raw), dim=-1)
+    convolved = F.conv1d(
+      history,
+      self.conv1d.weight,
+      self.conv1d.bias,
+      groups=self.conv_dim)
+    xBC = F.silu(convolved.narrow(-1, 1, seqlen).transpose(1, 2))
+    # Window i spans history[..., i * block : i * block + d_conv], i.e. exactly
+    # the d_conv raw inputs preceding token i * block; window 0 is the zero
+    # state and window num_seg is the final state.
+    conv_states = history.unfold(-1, self.d_conv, block_size).permute(
+      0, 2, 1, 3).contiguous()
+
+    x, B, C = torch.split(
+      xBC, [self.d_inner, self.d_state, self.d_state], dim=-1)
+    x = rearrange(x, "b l (h p) -> b l h p", p=self.headdim)
+    B = rearrange(B, "b l n -> b l 1 n")
+    C = rearrange(C, "b l n -> b l 1 n")
+
+    backend = self._select_backend(u)
+    # (1) The true outputs, from one contiguous scan over the whole prefix.
+    y, _ = self._scan(x, dt, B, C, None, backend)
+    # (2) Every block's *local* final state, from one folded batched scan.
+    def fold(tensor):
+      return tensor.reshape(
+        batch_size * num_seg, block_size, *tensor.shape[2:])
+    _, local_ssm = self._scan(
+      fold(x), fold(dt), fold(B), fold(C), None, backend)
+    local_ssm = local_ssm.reshape(
+      batch_size, num_seg, self.nheads, self.headdim, self.d_state)
+    ssm_states = self._block_state_passing(dt, local_ssm, block_size)
+    return self._gated_output(y, z), conv_states, ssm_states
+
   def scan_segment(
       self,
       u: torch.Tensor,
@@ -261,19 +421,9 @@ class SegmentMamba2(nn.Module):
     B = rearrange(B, "b l n -> b l 1 n")
     C = rearrange(C, "b l n -> b l 1 n")
 
-    if self._select_backend(u) == "fused":
-      y, final_ssm = self._fused_scan(x, dt, B, C, initial_state.ssm)
-    else:
-      y, final_ssm = self._reference_scan(x, dt, B, C, initial_state.ssm)
-
-    y = rearrange(y, "b l h p -> b l (h p)")
-    # Official Mamba-2 default: RMSNorm after applying the SiLU gate.
-    y = y * F.silu(z)
-    variance = y.float().pow(2).mean(dim=-1, keepdim=True)
-    y = y * torch.rsqrt(variance.to(dtype=y.dtype) + 1e-5)
-    y = y * self.norm_weight.to(dtype=y.dtype)
-    output = self.out_proj(y)
-    return output, Mamba2State(final_conv, final_ssm)
+    y, final_ssm = self._scan(
+      x, dt, B, C, initial_state.ssm, self._select_backend(u))
+    return self._gated_output(y, z), Mamba2State(final_conv, final_ssm)
 
   def forward(self, u: torch.Tensor) -> torch.Tensor:
     output, _ = self.scan_segment(u)

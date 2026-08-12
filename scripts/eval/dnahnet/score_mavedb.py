@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Score the pinned dnaHNet MaveDB set with paired diffusion NELBO samples.
+"""Score the pinned dnaHNet MaveDB set with the checkpoint's own objective.
 
-The paper uses deterministic autoregressive log-likelihood differences. For a
-diffusion model, WT and mutant members of each pair receive the same sampled
-time and the same corruption mask. Common random numbers make their NELBO
+AR checkpoints use deterministic exact next-token negative log-likelihood.
+For a diffusion checkpoint, WT and mutant members of each pair receive the
+same sampled time and corruption mask. Common random numbers make their NELBO
 difference substantially lower variance than two independent estimates.
 """
 
@@ -54,7 +54,7 @@ def load_checkpoint_model(
   config.loader.eval_batch_size = eval_batch_size
   config.loader.eval_global_batch_size = eval_batch_size
   config.eval.checkpoint_path = str(checkpoint_path)
-  if config.algo.backbone == "bissm":
+  if config.algo.backbone in {"bissm", "ussm"}:
     config.model.active_blocks = "all"
     config.model.right_flank_probability = 0.0
 
@@ -108,10 +108,14 @@ def _loss_from_fixed_corruption(model, x0, t, common_uniform):
     p = 1 - torch.exp(-sigma)
     loss_scale = -(dsigma / torch.expm1(sigma))
   xt = torch.where(common_uniform <= p, model.mask_index, x0)
-  if model.ignore_bos:
+  if hasattr(model, "_preserve_observed_bos"):
+    xt = model._preserve_observed_bos(xt, x0)
+  elif model.ignore_bos:
+    # Compatibility for the lightweight test double; checkpoint-backed models
+    # always use the token-aware method above.
     xt[:, 0] = x0[:, 0]
 
-  if model.config.algo.backbone == "bissm":
+  if model.config.algo.backbone in {"bissm", "ussm"}:
     # The all-block path takes one noise value at each block boundary. A fixed
     # sequence-level time has shape [batch, 1], so materialize its broadcast
     # explicitly for sequences containing more than one block.
@@ -128,6 +132,24 @@ def _loss_from_fixed_corruption(model, x0, t, common_uniform):
   return loss_scale * log_p_theta
 
 
+def _exact_ar_losses(model, x0):
+  """Per-position exact next-token NLL, aligned to ``x0`` positions.
+
+  Position zero has no left context in this benchmark and is assigned zero;
+  callers must exclude it from the scored-token mask. No corruption or Monte
+  Carlo estimate is involved.
+  """
+  if x0.shape[1] < 2:
+    raise ValueError("AR scoring requires sequences of at least two tokens")
+  log_probs = model.forward(x0[:, :-1], sigma=None)
+  target_nll = -torch.gather(
+    input=log_probs, dim=-1, index=x0[:, 1:, None]).squeeze(-1)
+  losses = torch.zeros(
+    x0.shape, dtype=target_nll.dtype, device=target_nll.device)
+  losses[:, 1:] = target_nll
+  return losses
+
+
 def score_batch(
     model,
     tokenizer,
@@ -139,39 +161,55 @@ def score_batch(
 ):
   x0_cpu, token_mask_cpu = build_pair_tensors(
     records, tokenizer, model_length)
-  if model.ignore_bos:
-    token_mask_cpu[:, 0] = False
+  bos_rows = model._bos_rows(x0_cpu)
+  if bos_rows.any():
+    token_mask_cpu[bos_rows, 0] = False
   x0 = x0_cpu.to(model.device)
   token_mask = token_mask_cpu.to(model.device)
   totals = torch.zeros(x0.shape[0], dtype=torch.float64, device=model.device)
 
-  for _ in range(mc_samples):
-    pair_t = torch.rand((len(records), 1), generator=generator)
-    pair_t = pair_t * (1.0 - epsilon) + epsilon
-    t = pair_t.repeat_interleave(2, dim=0).to(model.device)
-    common_uniform = torch.rand(
-      (len(records), model_length), generator=generator)
-    common_uniform = common_uniform.repeat_interleave(2, dim=0).to(model.device)
-    losses = _loss_from_fixed_corruption(model, x0, t, common_uniform)
-    totals += (losses.double() * token_mask).sum(dim=-1)
+  is_ar = str(model.parameterization) == "ar"
+  if is_ar:
+    token_mask[:, 0] = False
+    token_mask_cpu[:, 0] = False
+    losses = _exact_ar_losses(model, x0)
+    totals = (losses.double() * token_mask).sum(dim=-1)
+  else:
+    for _ in range(mc_samples):
+      pair_t = torch.rand((len(records), 1), generator=generator)
+      pair_t = pair_t * (1.0 - epsilon) + epsilon
+      t = pair_t.repeat_interleave(2, dim=0).to(model.device)
+      common_uniform = torch.rand(
+        (len(records), model_length), generator=generator)
+      common_uniform = common_uniform.repeat_interleave(2, dim=0).to(model.device)
+      losses = _loss_from_fixed_corruption(model, x0, t, common_uniform)
+      totals += (losses.double() * token_mask).sum(dim=-1)
+    totals /= mc_samples
 
-  totals = (totals / mc_samples).cpu()
+  totals = totals.cpu()
+  objective = "exact_ar_nll" if is_ar else "paired_diffusion_nelbo"
   scored = []
   for index, record in enumerate(records):
-    wt_nelbo = float(totals[2 * index])
-    mut_nelbo = float(totals[2 * index + 1])
+    wt_loss = float(totals[2 * index])
+    mut_loss = float(totals[2 * index + 1])
     wt_tokens = int(token_mask_cpu[2 * index].sum())
     mut_tokens = int(token_mask_cpu[2 * index + 1].sum())
     scored_record = dict(record)
     scored_record.update({
-      "wt_nelbo": wt_nelbo,
-      "mut_nelbo": mut_nelbo,
-      # log p(mut) - log p(WT), estimated as -NELBO(mut) + NELBO(WT).
-      "predicted_fitness": wt_nelbo - mut_nelbo,
-      "wt_nelbo_per_nt": wt_nelbo / wt_tokens,
-      "mut_nelbo_per_nt": mut_nelbo / mut_tokens,
+      "loss_type": objective,
+      "wt_loss": wt_loss,
+      "mut_loss": mut_loss,
+      # Compatibility aliases retained for aggregate_mavedb.py and old runs.
+      "wt_nelbo": wt_loss,
+      "mut_nelbo": mut_loss,
+      # log p(mut) - log p(WT) = loss(WT) - loss(mutant).
+      "predicted_fitness": wt_loss - mut_loss,
+      "wt_loss_per_nt": wt_loss / wt_tokens,
+      "mut_loss_per_nt": mut_loss / mut_tokens,
+      "wt_nelbo_per_nt": wt_loss / wt_tokens,
+      "mut_nelbo_per_nt": mut_loss / mut_tokens,
       "predicted_fitness_per_nt": (
-        wt_nelbo / wt_tokens - mut_nelbo / mut_tokens),
+        wt_loss / wt_tokens - mut_loss / mut_tokens),
       "wt_scored_tokens": wt_tokens,
       "mut_scored_tokens": mut_tokens,
     })
@@ -192,7 +230,8 @@ def _atomic_csv(path: Path, records):
   fields = [
     "score_set_urn", "score_set_title", "target", "accession",
     "hgvs_nt", "hgvs_pro", "experimental_score", "predicted_fitness",
-    "predicted_fitness_per_nt", "wt_nelbo", "mut_nelbo",
+    "predicted_fitness_per_nt", "loss_type", "wt_loss", "mut_loss",
+    "wt_loss_per_nt", "mut_loss_per_nt", "wt_nelbo", "mut_nelbo",
     "wt_nelbo_per_nt", "mut_nelbo_per_nt", "wt_scored_tokens",
     "mut_scored_tokens", "license", "source_url",
   ]
@@ -255,6 +294,7 @@ def main():
         flush=True)
 
   summary = summarize_predictions(scored)
+  is_ar = str(model.parameterization) == "ar"
   summary.update({
     "label": args.label,
     "checkpoint": str(args.checkpoint.resolve()),
@@ -262,10 +302,14 @@ def main():
     "backbone": str(config.algo.backbone),
     "model_length": args.model_length,
     "block_size": int(config.block_size),
-    "mc_samples": args.mc_samples,
+    "parameterization": str(model.parameterization),
+    "mc_samples": 1 if is_ar else args.mc_samples,
+    "requested_mc_samples": args.mc_samples,
     "epsilon": args.epsilon,
     "seed": args.seed,
-    "score_definition": "NELBO(WT) - NELBO(mutant)",
+    "score_definition": (
+      "exact NLL(WT) - exact NLL(mutant)"
+      if is_ar else "paired NELBO(WT) - paired NELBO(mutant)"),
     "headline_metric": "macro mean absolute per-assay Spearman",
   })
   args.output_dir.mkdir(parents=True, exist_ok=True)

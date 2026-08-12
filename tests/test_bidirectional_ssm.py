@@ -1,3 +1,4 @@
+import pytest
 import torch
 from omegaconf import OmegaConf
 
@@ -187,6 +188,119 @@ def test_all_block_logits_never_depend_on_present_or_future_clean_tokens():
     if first_affected < num_blocks:
       assert not torch.allclose(
         logits[first_affected:], reference[first_affected:])
+
+
+def test_layer_major_boundaries_match_the_block_major_oracle():
+  # The whole point of the layer-major rewrite: same states, two full-length
+  # scans per layer instead of one short scan per block per layer.
+  model = _model()
+  clean = torch.randint(0, 13, (2, 20))
+
+  for direction in ("left", "right"):
+    actual = model._boundary_caches(clean, 4, direction)
+    expected = model._boundary_caches_sequential(clean, 4, direction)
+    assert len(actual) == len(expected) == 5
+    for index, (got, want) in enumerate(zip(actual, expected)):
+      assert got.length == want.length == index * 4
+      _assert_cache_close(got, want)
+
+
+def test_layer_major_boundaries_survive_a_single_block():
+  # num_blocks == 1 scans nothing at all: the only block's cache is empty.
+  model = _model()
+  clean = torch.randint(0, 13, (2, 4))
+
+  boundaries = model._boundary_caches(clean, 4, "left")
+  assert len(boundaries) == 1
+  _assert_cache_close(
+    boundaries[0], model._boundary_caches_sequential(clean, 4, "left")[0])
+  stacked = model.prefill_left_boundaries_stacked(clean, 4)
+  _assert_cache_close(stacked, boundaries[0])
+
+
+def test_stacked_boundaries_match_stacking_the_tuple():
+  model = _model()
+  clean = torch.randint(0, 13, (3, 16))
+
+  for stacked, tupled in (
+      (model.prefill_left_boundaries_stacked(clean, 4),
+       stack_boundary_caches(model.prefill_left_boundaries(clean, 4))),
+      (model.prefill_right_boundaries_stacked(clean, 4),
+       stack_boundary_caches(model.prefill_right_boundaries(clean, 4)))):
+    _assert_cache_close(stacked, tupled)
+
+
+def test_boundary_caches_stay_differentiable_through_every_block():
+  # The BD3-LM objective backprops into the clean prefill; the rewrite must
+  # not quietly detach it, and every block that has context must receive
+  # gradient.
+  model = _model()
+  clean = torch.randint(0, 13, (1, 16))
+
+  boundaries = model.prefill_left_boundaries(clean, 4)
+  # Block 0 has no context. It is now a slice of the stacked tensor rather
+  # than a freshly allocated zero, so it carries an (inert) grad_fn; what has
+  # to hold is that it is exactly zero and passes no gradient back.
+  for state in boundaries[0].states:
+    assert not state.ssm.any() and not state.conv.any()
+  for cache in boundaries[1:]:
+    assert cache.states[0].ssm.requires_grad
+    assert cache.states[-1].conv.requires_grad
+
+  model.zero_grad()
+  sum(cache.states[-1].ssm.sum() for cache in boundaries[1:]).backward()
+  assert model.token_embedding.weight.grad.abs().sum() > 0
+  assert model.layers[0].mixer.in_proj.weight.grad.abs().sum() > 0
+
+
+def test_layer_major_rewrite_reproduces_the_block_major_gradient():
+  # Equivalence of the states is not enough: the BD3-LM objective backprops
+  # through the prefill, so the rewrite has to reproduce the gradient too.
+  model = _model()
+  clean = torch.randint(0, 13, (2, 20))
+  noisy = torch.randint(0, 13, (2, 20))
+  block_size, num_blocks = 4, 5
+
+  def loss_from(boundaries):
+    logits = model.forward_active(
+      noisy.reshape(2 * num_blocks, block_size),
+      None,
+      left_cache=stack_boundary_caches(boundaries))
+    return logits.square().mean()
+
+  grads = []
+  for build in (model._boundary_caches, model._boundary_caches_sequential):
+    model.zero_grad(set_to_none=True)
+    loss_from(build(clean, block_size, "left")).backward()
+    grads.append({
+      name: parameter.grad.clone()
+      for name, parameter in model.named_parameters()
+      if parameter.grad is not None})
+
+  actual, expected = grads
+  assert set(actual) == set(expected) and actual
+  for name in expected:
+    torch.testing.assert_close(
+      actual[name], expected[name], atol=2e-5, rtol=2e-5, msg=lambda m: f"{name}: {m}")
+
+
+def test_boundary_impl_flag_selects_the_block_major_path():
+  # The escape hatch has to route the real training entry points, both
+  # directions, and produce the same caches as the default.
+  clean = torch.randint(0, 13, (2, 16))
+  fast = _model()
+  slow = _model()
+  slow.boundary_impl = "block_major"
+
+  for left in (True, False):
+    build = (lambda m: m.prefill_left_boundaries_stacked(clean, 4)) if left \
+      else (lambda m: m.prefill_right_boundaries_stacked(clean, 4))
+    _assert_cache_close(build(slow), build(fast))
+
+  with pytest.raises(ValueError, match="boundary_impl"):
+    config = _config()
+    config.model.boundary_impl = "sideways"
+    BidirectionalSSM(config, vocab_size=13)
 
 
 def test_sampler_commits_only_when_store_flag_is_set():

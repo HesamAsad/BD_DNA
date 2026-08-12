@@ -1,3 +1,4 @@
+import contextlib
 import itertools
 import time
 from dataclasses import dataclass
@@ -62,6 +63,25 @@ class Diffusion(L.LightningModule):
       self.vocab_size += 1
     else:
       self.mask_index = self.tokenizer.mask_token_id
+    prepend_bos = self.config.sampling.get('prepend_bos', None)
+    if prepend_bos is None:
+      prepend_bos = bool(
+        self.config.data.get('insert_train_special', True))
+    self.prepend_bos = bool(prepend_bos)
+
+    # DNA generation is sequence generation, not special-token generation.
+    # Keep the generic text-LM behavior unchanged, while limiting DNA content
+    # to A/C/G/T/N and admitting EOS only as a variable-length control token.
+    generation_ids = getattr(self.tokenizer, 'generation_token_ids', None)
+    if generation_ids is None:
+      generation_mask = torch.ones(self.vocab_size, dtype=torch.bool)
+    else:
+      generation_mask = torch.zeros(self.vocab_size, dtype=torch.bool)
+      generation_mask[list(generation_ids)] = True
+      if self.config.sampling.var_length:
+        generation_mask[self.tokenizer.eos_token_id] = True
+    self.register_buffer(
+      '_generation_token_mask', generation_mask, persistent=False)
     if hasattr(self.config, 'algo'):
       self.parameterization = self.config.algo.parameterization
     else:
@@ -80,6 +100,9 @@ class Diffusion(L.LightningModule):
         self.config, vocab_size=self.vocab_size)
     elif self.config.algo.backbone == 'bissm':
       self.backbone = models.bidirectional_ssm.BidirectionalSSM(
+        self.config, vocab_size=self.vocab_size)
+    elif self.config.algo.backbone == 'ussm':
+      self.backbone = models.unidirectional_ssm.UnidirectionalSSM(
         self.config, vocab_size=self.vocab_size)
     elif self.config.algo.backbone == 'dimamba':
       self.backbone = models.dimamba.DiMamba(
@@ -146,11 +169,14 @@ class Diffusion(L.LightningModule):
         self.config.sampling.first_hitting:
       assert self.config.loader.eval_batch_size == 1
     assert self.config.algo.backbone in {
-      'dit', 'ar', 'hf_dit', 'dit_dual', 'bissm'}
+      'dit', 'ar', 'hf_dit', 'dit_dual', 'bissm', 'ussm'}
     if self.config.algo.parameterization == 'ar':
       assert not self.config.algo.time_conditioning
     if self.config.sampling.kv_cache:
       assert self.config.algo.name in {'ar', 'bd3lm'}
+    if self.prepend_bos and self.tokenizer.bos_token_id is None:
+      raise ValueError(
+        'sampling.prepend_bos=True requires a tokenizer BOS token')
       
     if self.parameterization in {'sedd'}:
       assert self.time_conditioning
@@ -330,10 +356,112 @@ class Diffusion(L.LightningModule):
     assert sigma.ndim == 1, sigma.shape
     return sigma
 
+  def _model_autocast_context(self):
+    """Use the configured mixed precision in direct and Lightning calls.
+
+    Lightning already supplies this context during fit/validate. Nesting the
+    same context is harmless and also makes checkpoint evaluation and native
+    sampling use the identical model dtype instead of silently falling back to
+    FP32.
+    """
+    if self.device.type != 'cuda':
+      return contextlib.nullcontext()
+    precision = str(self.config.trainer.precision).lower()
+    if precision.startswith('bf16'):
+      return torch.autocast('cuda', dtype=torch.bfloat16)
+    if precision in {'16', '16-mixed', 'fp16', 'fp16-mixed'}:
+      return torch.autocast('cuda', dtype=torch.float16)
+    return contextlib.nullcontext()
+
+  def _bos_rows(self, tokens):
+    """Rows whose first token really is BOS (rather than the first base)."""
+    if not self.ignore_bos or self.tokenizer.bos_token_id is None:
+      return torch.zeros(
+        tokens.shape[0], dtype=torch.bool, device=tokens.device)
+    return tokens[:, 0].eq(self.tokenizer.bos_token_id)
+
+  def _preserve_observed_bos(self, noisy_tokens, clean_tokens):
+    bos_rows = self._bos_rows(clean_tokens)
+    if bos_rows.any():
+      noisy_tokens[bos_rows, 0] = clean_tokens[bos_rows, 0]
+    return noisy_tokens
+
+  def _restrict_generation_probs(self, probabilities, current_tokens=None):
+    """Remove non-alphabet symbols and renormalize sampling probabilities."""
+    mask = self._generation_token_mask.to(probabilities.device)
+    if mask.all():
+      return probabilities
+    restricted = probabilities * mask.to(probabilities.dtype)
+    normalizer = restricted.sum(dim=-1, keepdim=True)
+    if torch.any(normalizer <= 0):
+      if current_tokens is None:
+        raise RuntimeError(
+          'The model assigned zero probability to every allowed generation token')
+      # Substitution parameterization represents observed control tokens (for
+      # example an explicitly requested BOS) as a point mass. Preserve those
+      # already-observed positions without making BOS sampleable elsewhere.
+      fallback = F.one_hot(
+        current_tokens, num_classes=self.vocab_size).to(probabilities.dtype)
+      restricted = torch.where(normalizer <= 0, fallback, restricted)
+      normalizer = restricted.sum(dim=-1, keepdim=True)
+    return restricted / normalizer
+
+  def _initialize_ar_tokens(self, batch_size, sequence_length):
+    if sequence_length <= 0:
+      raise ValueError('Generation length must be positive')
+    tokens = torch.zeros(
+      (batch_size, sequence_length), dtype=torch.long, device=self.device)
+    if self.prepend_bos:
+      tokens[:, 0] = self.tokenizer.bos_token_id
+      return tokens
+    allowed = self._generation_token_mask.nonzero(as_tuple=False).squeeze(-1)
+    # EOS is a stopping control token, never a valid context-free first base.
+    if self.tokenizer.eos_token_id is not None:
+      allowed = allowed[allowed != self.tokenizer.eos_token_id]
+    if allowed.numel() == 0:
+      raise RuntimeError('No valid non-EOS token is available to seed generation')
+    choices = torch.randint(allowed.numel(), (batch_size,), device=self.device)
+    tokens[:, 0] = allowed[choices]
+    return tokens
+
+  def _initialize_diffusion_tokens(self, batch_size, sequence_length):
+    if sequence_length <= 0:
+      raise ValueError('Generation length must be positive')
+    tokens = self._sample_prior(batch_size, sequence_length).to(self.device)
+    if self.prepend_bos:
+      tokens[:, 0] = self.tokenizer.bos_token_id
+    return tokens
+
   def forward(self, x, sigma, sample_mode=False, store_kv=False,
               coarse_ablate=None):
     """Returns log score."""
     sigma = self._process_sigma(sigma)
+    # Deliberately FP32, overriding Lightning's bf16 AMP for the duration of
+    # the backbone call. Every published Transformer number was produced this
+    # way, and the DiT is not merely imprecise in bf16 here -- it fails to
+    # train: under bf16 both the lr 3e-4/beta2 0.999 recipe (LSF 103274) and
+    # the lr 1e-3/beta2 0.95 recipe (LSF 103182) plateau at val/nll ~1.342,
+    # while the same checkpoints under FP32 reach 1.2464. Scoring an FP32
+    # checkpoint in bf16 likewise shifts it 1.2458 -> 1.3619 (LSF 103283 vs
+    # 103280). The BLOCK-DIFFUSION SSM arms are unaffected: they run through
+    # `_forward_pass_bissm`, which never reaches this wrapper, and re-scoring
+    # them across the change moves BiSSM by 1.2e-4 and uSSM-BD by 2.0e-5.
+    #
+    # WARNING -- this wrapper is NOT symmetric across backbones. `models/dit.py`
+    # re-opens a bf16 autocast around its own block loop and output layer, so
+    # the Transformer only runs its embedding, rotary and logit tail in FP32;
+    # its blocks are bf16 either way. The SSM stack has no such re-entry, so
+    # `algo=ar backbone=ussm` -- the one path that reaches this wrapper without
+    # going through `_forward_pass_bissm` (see `_loss`) -- executes ENTIRELY in
+    # FP32, at the H200's ~67 TFLOP/s FP32 ceiling instead of the bf16 tensor
+    # cores. That is the bulk of uSSM-AR's 3.09x training-time gap against the
+    # Transformer AR arm and is a measurement artifact, not an architecture
+    # result. Fixing it means mirroring dit.py's inner bf16 autocast in the SSM
+    # layer stack, which changes uSSM-AR's training precision and so requires
+    # re-running that arm.
+    #
+    # If this is ever relaxed, it must be an explicit, benchmarked flag --
+    # silently switching it re-baselines every Transformer row.
     with torch.amp.autocast('cuda', dtype=torch.float32):
       if self.config.algo.name == 'bd3lm':
         bb_kwargs = dict(store_kv=store_kv, sample_mode=sample_mode)
@@ -636,6 +764,8 @@ class Diffusion(L.LightningModule):
                           sample_mode=True).to(torch.float64)
         p_x0 = p_x0[:, -self.block_size:]
       p_x0 = p_x0.exp()
+      p_x0 = self._restrict_generation_probs(
+        p_x0, current_tokens=x[:, -self.block_size:])
       p_x0 = self._nucleus_sample(p_x0)
 
     if first_hitting is None:
@@ -666,46 +796,37 @@ class Diffusion(L.LightningModule):
       return p_x0, x_new
 
   @torch.no_grad()
-  def _ar_sampler(self, bsz, context_len=1024):
+  def _ar_sampler(self, bsz, seqlen=None, context_len=1024):
     # reset kvs
     if self.config.sampling.kv_cache:
       self.backbone.reset_kv_cache()
 
-    with torch.amp.autocast('cuda', dtype=torch.float32):
-      # precompute token buffer
-      num_pred_tokens = self.num_tokens - 1
-      x = torch.zeros(
-        (bsz, num_pred_tokens + 1),
-        dtype=torch.long,
-        device=self.device)
-      x[:, 0] = self.tokenizer.bos_token_id
-      stop = False
-      for i in tqdm(range(num_pred_tokens)):
-        # need to sample a gumbel for each token
-        # to save memory in variable-length sampling
-        noise = (torch.distributions.Gumbel(0, 1)
-                .sample((bsz, self.vocab_size))
-                .to(self.device))
-        next_logits = self.forward(
-          x[:, :i + 1][:, -context_len:],
-          None,
-          store_kv=self.config.sampling.kv_cache)[:, -1:].to(torch.float64)
-    
-        next_logits = next_logits.exp()
-        next_logits = self._nucleus_sample(next_logits).log()
-        y = (next_logits[:, -1] + noise).argmax(-1)
-        # check if we need to resample (or stop sampling for variable-length sampling)
-        if (i+1) > 256:
-          stop, x_out = self._check_stop_conds(x[:, :i+1])
-          if stop:
-            x = x_out
-        if (stop and not self.config.sampling.var_length) \
-          or (stop and x.shape[-1] == 1):
-          return None
-        elif stop:
+    if seqlen is None:
+      seqlen = self.num_tokens
+    # The first position is BOS only if training used per-window special
+    # tokens. DNA runs without BOS use an alphabet token as their seed.
+    x = self._initialize_ar_tokens(bsz, seqlen)
+    num_pred_tokens = seqlen - 1
+    for i in tqdm(range(num_pred_tokens)):
+      # Need one Gumbel draw per possible next token. Keeping this per-step
+      # avoids allocating a sequence-length-by-vocabulary noise tensor.
+      noise = (torch.distributions.Gumbel(0, 1)
+               .sample((bsz, self.vocab_size))
+               .to(self.device))
+      next_logits = self.forward(
+        x[:, :i + 1][:, -context_len:],
+        None,
+        store_kv=self.config.sampling.kv_cache)[:, -1:].to(torch.float64)
+
+      next_probs = self._restrict_generation_probs(next_logits.exp())
+      next_logits = self._nucleus_sample(next_probs).log()
+      y = (next_logits[:, -1] + noise).argmax(-1)
+      x[:, i + 1] = y
+      if self.config.sampling.var_length:
+        stop, x = self._check_stop_conds(x)
+        if stop:
           break
-        x[:, i + 1] = y
-      return x
+    return x
   
   @torch.no_grad()
   def _sample(
@@ -715,19 +836,23 @@ class Diffusion(L.LightningModule):
       seqlen = self.config.model.length
     if batch_size_per_gpu is None:
       batch_size_per_gpu = self.config.loader.eval_batch_size
+    if self.sampler == 'semi_ar' and seqlen % self.block_size:
+      raise ValueError(
+        f'seqlen ({seqlen}) must be divisible by block_size '
+        f'({self.block_size}) for semi-AR sampling')
     samples = []
     if self.parameterization == 'ar':
       for _ in range(self.config.sampling.num_sample_batches):
         sample_i, num_tries = None, 0
         while sample_i is None:
           num_tries += 1
-          sample_i = self._ar_sampler(batch_size_per_gpu)
+          sample_i = self._ar_sampler(
+            batch_size_per_gpu, seqlen=seqlen)
           if num_tries > 10:
             raise ValueError('Sampling failed.')
         samples.append(sample_i)
-        self.metrics.gen_nfes.append(self.config.model.length)
-      samples = torch.cat(samples, dim=0) 
-      return self.tokenizer.batch_decode(samples)
+        self.metrics.gen_nfes.append(seqlen)
+      return self._decode_sample_batches(samples)
     if self.sampler == 'semi_ar':
       for _ in range(self.config.sampling.num_sample_batches):
         sample_i, num_tries = None, 0
@@ -759,8 +884,24 @@ class Diffusion(L.LightningModule):
         samples.append(sample_i)
         self.metrics.nfes.update(nfes)
         self.metrics.gen_nfes.append(nfes)
-    samples = torch.cat(samples, dim=0) 
-    return self.tokenizer.batch_decode(samples)
+    return self._decode_sample_batches(samples)
+
+  def _decode_sample_batches(self, sample_batches):
+    # Separate variable-length calls need not share the same truncated tensor
+    # width, so decode each rectangular batch before combining Python strings.
+    if self.config.sampling.var_length:
+      decoded = []
+      for batch in sample_batches:
+        decoded.extend(self._decode_samples(batch))
+      return decoded
+    return self._decode_samples(torch.cat(sample_batches, dim=0))
+
+  def _decode_samples(self, samples):
+    is_dna = hasattr(self.tokenizer, 'generation_token_ids')
+    return self.tokenizer.batch_decode(
+      samples,
+      skip_special_tokens=is_dna,
+      clean_up_tokenization_spaces=False)
 
   def _sigma_from_p(self, p):
     return torch.min(- torch.log(1 - p), self.noise.sigma_max)
@@ -787,9 +928,12 @@ class Diffusion(L.LightningModule):
   def get_score(self, x, sigma):
     model_output = self.forward(x, sigma).to(torch.float64)
     if self.config.sampling.nucleus_p == 1.0:
-      return model_output.exp()
+      return self._restrict_generation_probs(
+        model_output.exp(), current_tokens=x)
     model_output = model_output - model_output.logsumexp(-1, keepdim=True)
-    model_output = self._nucleus_sample(model_output.exp())
+    model_output = self._restrict_generation_probs(
+      model_output.exp(), current_tokens=x)
+    model_output = self._nucleus_sample(model_output)
     return model_output
 
   def _staggered_score(self, score, dsigma):
@@ -903,10 +1047,9 @@ class Diffusion(L.LightningModule):
                    sampling_eps_max=sampling_eps_max)
     if sampling_eps_min is not None and sampling_eps_min > 0.5:
       loss_scale = - torch.ones_like(loss_scale)
-    if self.ignore_bos:
-      xt[:, 0] = x0[:, 0]
+    xt = self._preserve_observed_bos(xt, x0)
 
-    if self.config.algo.backbone == 'bissm':
+    if self.config.algo.backbone in {'bissm', 'ussm'}:
       return self._forward_pass_bissm(
         x0=x0, xt=xt, p=p, loss_scale=loss_scale)
     
@@ -986,21 +1129,24 @@ class Diffusion(L.LightningModule):
     clean_prefix = x0[:, :start]
     noisy_active = xt[:, start:end]
     clean_target = x0[:, start:end]
-    left_cache = self.backbone.prefill_left(clean_prefix)
+    with self._model_autocast_context():
+      left_cache = self.backbone.prefill_left(clean_prefix)
 
     right_cache = None
     use_right = self._bissm_use_right_flank(x0.device)
     if use_right:
       # The target block is excluded by construction. An empty suffix at the
       # last block is legal and reduces to the de-novo reverse initial state.
-      right_cache = self.backbone.prefill_right(x0[:, end:])
+      with self._model_autocast_context():
+        right_cache = self.backbone.prefill_right(x0[:, end:])
 
     sigma_active = self._sigma_from_p(p[:, start:start + 1]).squeeze(-1)
-    logits = self.backbone.forward_active(
-      noisy_active,
-      sigma_active,
-      left_cache=left_cache,
-      right_cache=right_cache)
+    with self._model_autocast_context():
+      logits = self.backbone.forward_active(
+        noisy_active,
+        sigma_active,
+        left_cache=left_cache,
+        right_cache=right_cache)
     log_scores = self._subs_parameterization(logits, noisy_active)
     log_p_theta = torch.gather(
       input=log_scores,
@@ -1024,16 +1170,18 @@ class Diffusion(L.LightningModule):
     batch_size, sequence_length = x0.shape
     block_size = self.block_size
 
-    left_cache = models.bidirectional_ssm.stack_boundary_caches(
-      self.backbone.prefill_left_boundaries(x0, block_size))
+    with self._model_autocast_context():
+      left_cache = self.backbone.prefill_left_boundaries_stacked(
+        x0, block_size)
 
     right_cache = None
     use_right = self._bissm_use_right_flank(x0.device)
     if use_right:
       # Entry i covers only the clean suffix strictly after block i, so no
       # block ever sees its own clean target.
-      right_cache = models.bidirectional_ssm.stack_boundary_caches(
-        self.backbone.prefill_right_boundaries(x0, block_size))
+      with self._model_autocast_context():
+        right_cache = self.backbone.prefill_right_boundaries_stacked(
+          x0, block_size)
 
     folded = (batch_size * num_blocks, block_size)
     noisy_blocks = xt.reshape(*folded)
@@ -1043,11 +1191,12 @@ class Diffusion(L.LightningModule):
     sigma_blocks = self._sigma_from_p(
       p[:, ::block_size]).reshape(batch_size * num_blocks)
 
-    logits = self.backbone.forward_active(
-      noisy_blocks,
-      sigma_blocks,
-      left_cache=left_cache,
-      right_cache=right_cache)
+    with self._model_autocast_context():
+      logits = self.backbone.forward_active(
+        noisy_blocks,
+        sigma_blocks,
+        left_cache=left_cache,
+        right_cache=right_cache)
     log_scores = self._subs_parameterization(logits, noisy_blocks)
     log_p_theta = torch.gather(
       input=log_scores,
@@ -1068,6 +1217,7 @@ class Diffusion(L.LightningModule):
     (input_tokens, output_tokens,
      attention_mask) = self._maybe_sub_sample(
        x0, attention_mask)
+    attention_mask = attention_mask.clone()
     if self.parameterization == 'ar':
       output = self.forward(input_tokens, None)
       loss = - output.gather(
@@ -1078,8 +1228,9 @@ class Diffusion(L.LightningModule):
         sampling_eps_min=sampling_eps_min,
         sampling_eps_max=sampling_eps_max,)
     
-    if self.ignore_bos and not self.training:
-      attention_mask[:, 0] = 0
+    bos_rows = self._bos_rows(input_tokens)
+    if bos_rows.any():
+      attention_mask[bos_rows, 0] = 0
       
     nlls = (loss * attention_mask)
     token_nll = nlls.sum() / attention_mask.sum()
@@ -1151,10 +1302,7 @@ class Diffusion(L.LightningModule):
   @torch.no_grad
   def _analytic_sampler(
     self, n_samples, num_steps, seqlen, eps=1e-5): 
-    x = self._sample_prior(
-      n_samples,
-      seqlen).to(self.device)
-    x[:, 0] = self.tokenizer.bos_token_id
+    x = self._initialize_diffusion_tokens(n_samples, seqlen)
     timesteps = torch.linspace(
       1, eps, num_steps + 1, device=self.device)
     dt = (1 - eps) / num_steps
@@ -1167,9 +1315,7 @@ class Diffusion(L.LightningModule):
                                   device=self.device)
     x = self._denoiser_update(x=x, t=t)
     
-    stop, x = self._check_stop_conds(x)
-    if stop:
-      return None
+    _, x = self._check_stop_conds(x)
     return x
 
   @torch.no_grad
@@ -1195,8 +1341,8 @@ class Diffusion(L.LightningModule):
     for stride_num in tqdm(range(num_strides)):
       # sample next block
       if stride_num == 0:
-        x_accum = self._sample_prior(n_samples, self.block_size).to(self.device)
-        x_accum[:, 0] = self.tokenizer.bos_token_id
+        x_accum = self._initialize_diffusion_tokens(
+          n_samples, self.block_size)
       else:
         if mdlm_semi_ar:
           x = self._sample_prior(n_samples, 512).to(self.device)
@@ -1244,13 +1390,11 @@ class Diffusion(L.LightningModule):
        
         x_accum[:, fwd_idx] = x_next
 
-      # check if we need to resample (or stop sampling for variable-length sampling)
-      if x_accum.shape[1] > 256:
+      # Fixed-length sampling always completes the requested grid. For
+      # variable length, EOS is checked after every completed block.
+      if self.config.sampling.var_length:
         stop, x_accum = self._check_stop_conds(x_accum)
-        if (stop and not self.config.sampling.var_length) \
-          or (stop and x.shape[-1] == 1):
-          return None, None
-        elif stop:
+        if stop:
           break
     return x_accum, sampling_steps
 
@@ -1324,14 +1468,14 @@ class Diffusion(L.LightningModule):
     gap = torch.cat(generated_blocks, dim=1)
     return torch.cat((left_context, gap, right_context), dim=1)
   
-  def _compute_entropy(self, x):
-    _, counts = torch.unique(x, return_counts=True, sorted=False)
-    entropy = torch.special.entr(counts.float() / counts.sum()).sum()
-    return entropy
-  
   def _check_stop_conds(self, x):
-    """Check if sampling should stop based on 1) eos, 2) entropy, or 3) likelihood.
-    Entropy/likelihood evaluated on last 256 token-block.
+    """Stop a variable-length batch once every row has emitted EOS.
+
+    Rows that finish early are padded immediately after their first EOS. This
+    keeps the tensor rectangular while preventing later sampled tokens from
+    leaking into decoded DNA. Fixed-length generation never rejects a sample
+    for low empirical entropy: the old threshold (4 nats) exceeded even the
+    maximum entropy of the complete 13-token DNA vocabulary.
     
     Args:
       x: torch.Tensor, current sample.
@@ -1339,33 +1483,30 @@ class Diffusion(L.LightningModule):
       stop: bool, whether to stop sampling.
       x: torch.Tensor, sample (potentially truncated for variable-length sampling).
     """
-    stop = False # stop sampling?
-    truncate_idx = None # truncate sample? (variable-length sampling only)
+    if not self.config.sampling.var_length:
+      return False, x
+    eos_id = self.tokenizer.eos_token_id
+    if eos_id is None:
+      return False, x
 
-    # CRITERION 2: always stop sampling if entropy is low
-    entropy = self._compute_entropy(x[:, -256:])
-    if entropy < 4:
-      stop = True
+    eos = x.eq(eos_id)
+    has_eos = eos.any(dim=1)
+    if not has_eos.any():
+      return False, x
 
-    # for variable length sampling, check if we should stop
-    # sampling, and where to truncate the sample
-    if self.config.sampling.var_length:
-      # CRITERION 1: stop at sampled EOS token
-      if len(torch.where(x == self.tokenizer.eos_token_id)[0]) > 1:
-        stop = True
-        eos_idx = torch.where(x == self.tokenizer.eos_token_id)
-        if len(eos_idx[0]) > 1:
-          truncate_idx = min(eos_idx[1][1]+1, x.shape[1])
+    first_eos = torch.where(
+      has_eos,
+      eos.to(torch.int64).argmax(dim=1),
+      torch.full((x.shape[0],), x.shape[1] - 1, device=x.device))
+    positions = torch.arange(x.shape[1], device=x.device)[None, :]
+    after_eos = has_eos[:, None] & (positions > first_eos[:, None])
+    x = x.clone()
+    pad_id = self.tokenizer.pad_token_id
+    if pad_id is None:
+      pad_id = eos_id
+    x[after_eos] = pad_id
 
-      # CRITERION 2: stop if entropy/likelihood is low
-      if entropy < 4:
-        stop = True
-        truncate_idx = x.shape[1] - 256
-
-    # truncate sample (variable-length sampling only)
-    if truncate_idx is not None:
-      x = x[:, :truncate_idx]
-      if x.ndim == 1:
-        x = x.unsqueeze(0)
-
+    stop = bool(has_eos.all())
+    if stop:
+      x = x[:, :int(first_eos.max().item()) + 1]
     return stop, x

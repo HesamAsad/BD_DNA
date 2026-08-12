@@ -1,0 +1,33 @@
+# Parameter-matched causal Mamba-2 baseline for the existing 100M BiSSM.
+# The same model supports either algo=bd3lm_ussm (causal block denoising) or
+# algo=ar with algo.backbone=ussm (standard next-nucleotide modeling).
+name: small_ussm
+type: ussm
+hidden_size: 768
+cond_dim: 128
+length: 8192
+n_blocks: 12
+n_heads: 12
+scale_by_sigma: True
+dropout: 0.0
+tie_word_embeddings: True
+adaln: False
+attn_backend: none
+
+ssm_state_size: 64
+ssm_conv_size: 4
+ssm_expand: 2
+ssm_head_dim: 64
+ssm_chunk_size: 128
+ssm_backend: auto
+mlp_ratio: 4.0
+
+active_blocks: all
+right_flank_probability: 0.0
+
+# 'layer_major' (default) scans the clean prefix once per layer and harvests
+# every block's boundary state from it: 24 scan calls per micro-batch at
+# L=8192/block 256 instead of 372, measured 3.80x on model fwd+bwd (LSF 102784).
+# 'block_major' restores the original per-block loop; the two produce the same
+# states and the same gradient, so this is a rollback switch, not a knob.
+boundary_impl: layer_major

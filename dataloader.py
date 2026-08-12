@@ -48,19 +48,24 @@ def _assert_dual_stream_compat(config) -> None:
 
 def _assert_bissm_compat(config) -> None:
   """Validate the leakage-safe recurrent training/sampling contract."""
-  if config.algo.get('backbone', 'dit') != 'bissm':
+  backbone = config.algo.get('backbone', 'dit')
+  if backbone not in {'bissm', 'ussm'}:
     return
   if config.model.length % config.block_size:
     raise ValueError(
-      f"algo.backbone=bissm requires model.length ({config.model.length}) "
+      f"algo.backbone={backbone} requires model.length ({config.model.length}) "
       f"divisible by block_size ({config.block_size}).")
   if config.algo.get('cross_attn', False):
     raise ValueError(
-      "algo.backbone=bissm requires algo.cross_attn=False; recurrent clean "
+      f"algo.backbone={backbone} requires algo.cross_attn=False; recurrent clean "
       "prefixes are passed through explicit boundary caches, not [xt; x0].")
+  if (backbone == 'ussm'
+      and float(config.model.get('right_flank_probability', 0.0)) != 0.0):
+    raise ValueError(
+      "algo.backbone=ussm requires model.right_flank_probability=0.0")
   if config.data.tokenizer_name_or_path != 'dna':
     raise ValueError(
-      "The first BiSSM milestone is scoped to the single-nucleotide DNA "
+      "The recurrent SSM baselines are scoped to the single-nucleotide DNA "
       "tokenizer. Set data.tokenizer_name_or_path='dna'.")
 
 
@@ -262,6 +267,16 @@ class DNATokenizer(transformers.PreTrainedTokenizer):
 
   def get_vocab(self) -> typing.Dict[str, int]:
     return self._vocab_str_to_int
+
+  @property
+  def generation_token_ids(self) -> typing.Tuple[int, ...]:
+    """Token ids that may be emitted as DNA sequence content.
+
+    Special tokens are deliberately excluded. ``[EOS]`` is added by the
+    sampler only for variable-length generation, where it is a control token
+    rather than part of the decoded nucleotide sequence.
+    """
+    return tuple(self._vocab_str_to_int[base] for base in self.characters)
 
 
 def get_lambada_test_dataset():

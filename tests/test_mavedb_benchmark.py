@@ -13,6 +13,7 @@ from scripts.eval.dnahnet.mavedb import (
   summarize_predictions,
 )
 from scripts.eval.dnahnet.aggregate_mavedb import aggregate_runs
+from scripts.eval.dnahnet.score_mavedb import _exact_ar_losses
 
 
 MANIFEST = (
@@ -127,3 +128,23 @@ def test_aggregate_runs_averages_scores_and_measures_agreement():
   agreement = stability["run_agreements"][0]
   assert agreement["prediction_spearman"] == pytest.approx(-1.0)
   assert agreement["mean_absolute_score_delta"] == pytest.approx(4 / 3)
+
+
+def test_exact_ar_losses_align_next_token_nll_and_leave_first_position_zero():
+  import torch
+
+  class FakeAR:
+    def forward(self, x, sigma):
+      assert sigma is None
+      logits = torch.full((*x.shape, 6), -4.0)
+      # Put the expected next token at a distinct, known probability after
+      # log-softmax so the gather/alignment is exercised.
+      logits.scatter_(-1, ((x + 1) % 6).unsqueeze(-1), 2.0)
+      return logits.log_softmax(-1)
+
+  x0 = torch.tensor([[0, 1, 2, 3], [2, 3, 4, 5]])
+  losses = _exact_ar_losses(FakeAR(), x0)
+  assert losses.shape == x0.shape
+  assert torch.equal(losses[:, 0], torch.zeros(2))
+  expected = -torch.log_softmax(torch.tensor([-4.] * 5 + [2.]), 0)[-1]
+  assert torch.allclose(losses[:, 1:], expected.expand(2, 3))
