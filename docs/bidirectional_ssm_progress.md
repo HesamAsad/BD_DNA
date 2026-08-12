@@ -338,22 +338,32 @@ which already enter through a bf16 context.
 Every arm below is now scored on raw (non-EMA) weights from the fixed-budget
 `0-8000` checkpoint, each backbone at its own tuned recipe, 512 x 4 x 8192 nt.
 
-| arm | val NLL | PPL | bits/nt | wall clock | LSF |
-|---|---:|---:|---:|---:|---|
-| uSSM-AR | **1.19305** | 3.2971 | 1.7212 | 6h44m -> **2h33m** | 105320 |
-| Transformer-AR | 1.19864 | 3.3156 | 1.7293 | 2h11m | 20260808-v1 |
-| Transformer-BD | **1.24653** | 3.4782 | 1.7984 | 3h40m | 103661 |
-| BiSSM-BD | 1.24749 | 3.4816 | 1.7997 | 22h35m -> **5h42m** | 103297 |
-| uSSM-BD | 1.28691 | 3.6216 | 1.8566 | 21h23m -> **4h20m** | 103298 |
-| uniform baseline | 1.38629 | 4.0000 | 2.0000 | -- | -- |
+| arm | val NLL | PPL | bits/nt | MaveDB macro abs rho | wall clock | LSF |
+|---|---:|---:|---:|---:|---:|---|
+| uSSM-AR | **1.19305** | 3.2971 | 1.7212 | **0.29781** | 6h44m -> **2h33m** | 105320 |
+| Transformer-AR | 1.19864 | 3.3156 | 1.7293 | 0.22020 | 2h11m | 20260808-v1 |
+| Transformer-BD | **1.24653** | 3.4782 | 1.7984 | **0.14123** | 3h40m | 103661 |
+| BiSSM-BD | 1.24749 | 3.4816 | 1.7997 | 0.13330 | 22h35m -> **5h42m** | 103297 |
+| uSSM-BD | 1.28691 | 3.6216 | 1.8566 | 0.10891 | 21h23m -> **4h20m** | 103298 |
+| uniform baseline | 1.38629 | 4.0000 | 2.0000 | -- | -- | -- |
+
+MaveDB is MC-32, two seeds ensembled per-variant before Spearman, matching the
+recorded protocol. Every retrained checkpoint reproduces its published MaveDB
+number to within 0.003 (BiSSM 0.13330 vs 0.13174, Transformer 0.14123 vs
+0.13907, uSSM-BD 0.10891 vs 0.11145, uSSM-AR 0.29781 vs 0.29870), so none of
+the four confounds touched variant effect -- they were a likelihood-measurement
+problem. Note MC count matters more than the fixes did: at MC-8 uSSM-BD scored
+0.069 against 0.095 at MC-32.
 
 Two results follow. Within block diffusion the Transformer leads BiSSM by
 **0.00096** nats/nt, not the 0.0066 previously reported -- seven times smaller,
 and inside plausible seed variance. Within AR, uSSM-AR leads the Transformer by
 **0.00560** nats/nt; that is a conservative floor, because Transformer-AR's
 number came from `best.ckpt`, an early-stopped selection, while every other row
-uses the fixed-budget endpoint. A re-score from `0-8000.ckpt` is queued and can
-only move the Transformer worse.
+uses the fixed-budget endpoint. Re-scoring from `0-8000.ckpt`
+returned 1.1986446380615234, identical to 16 digits: for that run best
+validation fell on the final step, so the two checkpoints are the same weights
+(`global_step` 8000, matching tensor hash) and no correction applies.
 
 Precision sensitivity turns out to be a property of *which sub-computation* runs
 reduced, not of the model: the SSM tolerates bf16 in its layer stack for 0.00104
