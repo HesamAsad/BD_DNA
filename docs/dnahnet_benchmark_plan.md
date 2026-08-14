@@ -11,7 +11,9 @@ protocol-aligned rather than data- or compute-matched unless explicitly stated.
 1. MaveDB E. coli K-12 variant-effect prediction: absolute Spearman correlation
    from WT-versus-mutant likelihood differences.
 2. DEG gene essentiality: AUROC from WT-versus-15-bp-stop likelihood
-   differences in 8,192-nt gene-centred windows.
+   differences in 8,192-nt gene-centred windows. Protocol, assumptions,
+   baselines and cost are in `docs/deg_benchmark_plan.md`; the harness is
+   `scripts/eval/dnahnet/{prepare_deg,score_deg,deg}.py` + `deg_score.sh`.
 3. Single-GPU BF16 throughput, peak memory and latency from 2^10 through 2^19
    nucleotides.
 

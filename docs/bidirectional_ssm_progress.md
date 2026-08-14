@@ -338,13 +338,51 @@ which already enter through a bf16 context.
 Every arm below is now scored on raw (non-EMA) weights from the fixed-budget
 `0-8000` checkpoint, each backbone at its own tuned recipe, 512 x 4 x 8192 nt.
 
-| arm | val NLL | PPL | bits/nt | MaveDB macro abs rho | wall clock | LSF |
-|---|---:|---:|---:|---:|---:|---|
-| uSSM-AR | **1.19305** | 3.2971 | 1.7212 | **0.29781** | 6h44m -> **2h33m** | 105320 |
-| Transformer-AR | 1.19864 | 3.3156 | 1.7293 | 0.22020 | 2h11m | 20260808-v1 |
-| Transformer-BD | **1.24653** | 3.4782 | 1.7984 | **0.14123** | 3h40m | 103661 |
-| BiSSM-BD | 1.24749 | 3.4816 | 1.7997 | 0.13330 | 22h35m -> **5h42m** | 103297 |
-| uSSM-BD | 1.28691 | 3.6216 | 1.8566 | 0.10891 | 21h23m -> **4h20m** | 103298 |
+| arm | val NLL | PPL | MaveDB signed rho | MaveDB abs rho | neg assays | wall clock (fit / train-only) | LSF |
+|---|---:|---:|---:|---:|---:|---:|---|
+| uSSM-AR | **1.19305** | 3.2971 | **+0.26410** | 0.29781 | 2/12 | 2h33m / 2h17m | 105320 |
+| Transformer-AR | 1.19864 | 3.3156 | +0.18803 | 0.22017 | 2/12 | 2h11m / -- | 20260808-v1 |
+| Transformer-BD | **1.24653** | 3.4782 | **+0.09056** | 0.14123 | 6/12 | 3h37m / 3h26m | 103661 |
+| BiSSM-BD | 1.24749 | 3.4816 | +0.08519 | 0.13330 | 5/12 | 5h41m / 4h53m | 103297 |
+| uSSM-BD | 1.28691 | 3.6216 | +0.07089 | 0.10891 | 3/12 | 4h19m / 3h44m | 103298 |
+| BiSSM, reverse OFF | 1.32824 | -- | +0.04760 | 0.09183 | 4/12 | -- | ablation |
+| *trivial baseline*: variant-event count | -- | -- | *+0.30931* | *0.30931* | 0/12 | -- | zero parameters |
+| dnaHNet (published) | -- | -- | -- | *0.3266* | -- | -- | 6.4e19 FLOPs |
+
+**Signed rho is the honest metric.** `mavedb.py:278` takes `abs()` per assay before
+averaging, which credits anti-correlation as skill. All 12 assays provably share one
+direction (BLOSUM62 exchangeability positive in all 12, z = +3.9 to +10.4), so the sign
+should not be discarded. Absolute inflates the BD arms ~1.5x and the AR arms only 1.13x,
+so the AR-over-BD gap is WIDER than the abs column suggests.
+
+**A zero-parameter feature beats every model we have.** Counting variant events parsed
+from `hgvs_pro` scores 0.30931 -- above uSSM-AR's 0.29781, below dnaHNet's 0.3266. The
+benchmark is substantially measuring how many mutations a variant carries. Any MaveDB
+number must be reported next to this baseline. (An earlier internal figure of 0.3649 was
+a mis-parse: the regex `[A-Z][a-z]{2}\d+` produces only three distinct values across all
+21,250 variants -- a variant-class code, not a count. Retracted.)
+
+**Our compute is 2.53e18 FLOPs (6ND), 0.32x dnaHNet's smallest budget** of 8e18, where
+they report 0.2601. uSSM-AR is the only arm using their exact estimator and so the only
+directly comparable row.
+
+**Pseudo-likelihood scoring does not rescue the BD arms.** Deterministic, exact per term,
+no Monte Carlo (`score_mavedb.py --score-mode pll`): uSSM-BD 0.12801 (+0.019 vs NELBO),
+Transformer-BD 0.13880 (-0.002), BiSSM-BD 0.12915 (-0.007). Two independent estimators
+agree the BD arms sit at 0.13-0.14 while AR sits at 0.30, so the gap is the training
+objective and not the measurement. BiSSM losing under PLL refutes the prediction that
+two-sided conditioning would favour it; the likely cause is distribution shift, since a
+single masked token in an otherwise-clean block is far into the low-noise tail.
+
+**Wall clocks are not validation-matched.** The SSM arms ran 320 validation passes to the
+Transformer's 80 (launcher defaults `VAL_EVERY` 100 vs 200, doubled again because
+Lightning counts micro-batches). Use the train-only column for architecture comparison:
+validation-excluded, uSSM-BD costs 1.09x the Transformer rather than 1.19x.
+
+**`trainer/total_pflop` is architecture-blind and wrong.** It is bit-identical for all
+three SSM arms (4433.47) because the formula reads only n_params, L, n_layers, d and
+cross_attn; true values are 2652 / 5339 / 6566 / 8193 PFLOP for uSSM-AR / uSSM-BD /
+BiSSM-BD / Transformer-BD. `tokens_per_s` and `total_gtokens` are unaffected.
 | uniform baseline | 1.38629 | 4.0000 | 2.0000 | -- | -- | -- |
 
 MaveDB is MC-32, two seeds ensembled per-variant before Spearman, matching the
@@ -402,6 +440,9 @@ The two are consistent: the reverse scan runs inside every block whatever its
 size, so a 216-nt variant always sits within bidirectionally-modelled windows
 and moving the boundaries only relocates them. Block size changes how that
 context is partitioned; reverse-off removes it.
+
+Under signed rho the ablation is larger still: +0.08519 -> +0.04760, a **44%** drop
+rather than 31%.
 
 Caveat on magnitude: reverse-off (0.09333) is *worse* than uSSM-BD (0.10891),
 which was trained unidirectional from the start -- the BiSSM weights expect a

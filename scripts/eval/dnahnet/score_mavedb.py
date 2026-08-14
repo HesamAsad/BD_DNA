@@ -146,6 +146,59 @@ def _loss_from_fixed_corruption(model, x0, t, common_uniform):
   return loss_scale * log_p_theta
 
 
+
+def _pll_totals(model, x0, token_mask, chunk_size=128):
+  """Pseudo-log-likelihood: sum_i -log p(x_i | x_{-i}), one masked position at a time.
+
+  A block-diffusion model has no exact likelihood -- log p(x) factorises into
+  per-block conditionals that the NELBO only bounds. The pseudo-likelihood
+  replaces that bound with a sum of terms each of which the model computes
+  EXACTLY: mask position i, leave every other position clean, read
+  log p(x_i | x_{-i}). This is the standard estimator for masked language
+  models (Salazar et al. 2020) and underlies ESM-1v's protein variant scoring.
+  It is deterministic -- no Monte Carlo, no seed variance.
+
+  Validity here rests on two facts, both asserted below. At
+  `model_length == block_size` there is exactly one block, so `block_diff_mask`
+  admits no x_t -> x_0 attention and the clean stream cannot leak the answer;
+  and `time_conditioning` is False for every BD algo, so the output depends
+  only on the masked input.
+
+  Returns a positive NLL-like total, matching the sign convention of the
+  NELBO path so `predicted_fitness = wt_loss - mut_loss` is unchanged.
+  """
+  if int(model.config.model.length) != int(model.config.block_size):
+    raise ValueError(
+      f"PLL scoring requires one block: model.length "
+      f"({model.config.model.length}) must equal block_size "
+      f"({model.config.block_size}), otherwise x_t can attend to the clean "
+      f"stream and the masked marginal leaks the answer")
+  if model.config.algo.time_conditioning:
+    raise ValueError("PLL scoring assumes time_conditioning=False")
+
+  batch_size, length = x0.shape
+  totals = torch.zeros(batch_size, dtype=torch.float64, device=x0.device)
+  for row in range(batch_size):
+    positions = token_mask[row].nonzero(as_tuple=True)[0]
+    sequence = x0[row]
+    for start in range(0, positions.numel(), chunk_size):
+      index = positions[start:start + chunk_size]
+      count = index.numel()
+      arange = torch.arange(count, device=x0.device)
+      noisy = sequence.unsqueeze(0).repeat(count, 1)
+      noisy[arange, index] = model.mask_index
+      if model.cross_attn:
+        clean = sequence.unsqueeze(0).repeat(count, 1)
+        model_input = torch.cat((noisy, clean), dim=-1)
+      else:
+        model_input = noisy
+      sigma = torch.zeros(count, 1, device=x0.device, dtype=torch.float32)
+      log_scores = model.forward(model_input, sigma=sigma)
+      totals[row] -= log_scores[
+        arange, index, sequence[index]].double().sum()
+  return totals
+
+
 def _exact_ar_losses(model, x0):
   """Per-position exact next-token NLL, aligned to ``x0`` positions.
 
@@ -172,6 +225,7 @@ def score_batch(
     mc_samples: int,
     epsilon: float,
     generator: torch.Generator,
+    score_mode: str = "nelbo",
 ):
   x0_cpu, token_mask_cpu = build_pair_tensors(
     records, tokenizer, model_length)
@@ -183,7 +237,10 @@ def score_batch(
   totals = torch.zeros(x0.shape[0], dtype=torch.float64, device=model.device)
 
   is_ar = str(model.parameterization) == "ar"
-  if is_ar:
+  if score_mode == "pll" and not is_ar:
+    totals = _pll_totals(model, x0, token_mask)
+    objective = "pseudo_log_likelihood"
+  elif is_ar:
     token_mask[:, 0] = False
     token_mask_cpu[:, 0] = False
     losses = _exact_ar_losses(model, x0)
@@ -201,7 +258,8 @@ def score_batch(
     totals /= mc_samples
 
   totals = totals.cpu()
-  objective = "exact_ar_nll" if is_ar else "paired_diffusion_nelbo"
+  if score_mode != "pll" or is_ar:
+    objective = "exact_ar_nll" if is_ar else "paired_diffusion_nelbo"
   scored = []
   for index, record in enumerate(records):
     wt_loss = float(totals[2 * index])
@@ -273,6 +331,12 @@ def main():
   parser.add_argument("--seed", type=int, default=1)
   parser.add_argument("--max-variants", type=int)
   parser.add_argument(
+    "--score-mode", choices=("nelbo", "pll"), default="nelbo",
+    help="nelbo: the training objective's paired Monte Carlo NELBO (a bound). "
+         "pll: deterministic pseudo-log-likelihood, sum_i log p(x_i | x_{-i}), "
+         "exact per term and directly comparable in spirit to an exact "
+         "likelihood. Ignored for AR checkpoints, which already have one.")
+  parser.add_argument(
     "--reverse-off", action="store_true",
     help="Ablate the in-block reverse scan: load a bissm checkpoint into the "
          "unidirectional backbone, holding weights fixed. Mirrors the "
@@ -307,6 +371,7 @@ def main():
         records=batch,
         model_length=args.model_length,
         mc_samples=args.mc_samples,
+        score_mode=args.score_mode,
         epsilon=args.epsilon,
         generator=generator))
       print(
@@ -321,6 +386,7 @@ def main():
     "checkpoint_global_step": global_step,
     "backbone": str(config.algo.backbone),
     "reverse_off": bool(args.reverse_off),
+    "score_mode": str(args.score_mode),
     "model_length": args.model_length,
     "block_size": int(config.block_size),
     "parameterization": str(model.parameterization),

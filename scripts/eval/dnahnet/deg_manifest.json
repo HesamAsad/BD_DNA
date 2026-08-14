@@ -1,0 +1,674 @@
+{
+  "assumptions": [
+    "A1 organism count: DEG's bacteria table currently lists 66 essentiality experiments spanning 61 distinct organism names, 63 distinct nucleotide accessions and 55 distinct accession sets. None of those equals the paper's 62, and the paper does not publish its organism list, so the count is not exactly reproducible. This manifest defines one benchmark organism per distinct DEG accession set and unions the essential-gene labels of every DEG experiment sharing that genome.",
+    "A2 sequence identity: the paper's '>99% sequence identity' was almost certainly a gapped BLAST search. No BLAST binary exists on this cluster, so matching is exact-or-ungapped (identical, or equal-length with <1% mismatching positions) on both strands, unioned with gene-name matching.",
+    "A3 knockout offset: '12 bp downstream of the start codon' is read as a 0-based offset from the first base of the start codon. The competing reading (12 bp after the start codon ends) gives 15. Both keep the cassette in frame; --knockout-offset switches between them.",
+    "A4 strand: windows are emitted in gene orientation (reverse-complemented for minus-strand genes) so the cassette is literally TAATAATAATAGTGA at a fixed offset for every gene. --orientation reference keeps the plus strand and writes the reverse complement instead.",
+    "A5 contig edges: bacterial replicons annotated 'circular' wrap around the origin, which preserves both the 8192 nt length and the centring. Linear contigs clamp the window inward, preserving length but not centring. Contigs shorter than 8192 nt are excluded and counted.",
+    "A6 long genes: a gene longer than the window pushes the knockout site outside the centred window, which would make wild-type and knockout byte-identical. Those genes are excluded and counted.",
+    "A7 gene set: only CDS features with a single-interval location are used. Origin-spanning and programmed-frameshift joins are excluded and counted.",
+    "A8 aggregation: the paper reports one AUROC and does not say whether it is pooled or macro-averaged. Both are reported; the macro mean of per-organism AUROC is the headline because a pooled AUROC over organisms with different base rates can be driven by between-organism differences."
+  ],
+  "benchmark": "dnaHNet DEG bacterial gene-essentiality (zero-shot AUROC)",
+  "num_deg_experiments": 66,
+  "num_organisms": 54,
+  "organism_selection_rule": "One benchmark organism per distinct DEG nucleotide-accession set (version-stripped, sorted). DEG experiments sharing a genome are merged and their essential-gene labels unioned.",
+  "organisms": [
+    {
+      "accessions": [
+        "AE014133"
+      ],
+      "deg_essential_entries": 197,
+      "deg_ids": [
+        "DEG1054"
+      ],
+      "name": "Streptococcus mutans UA159",
+      "organism_id": "AE014133"
+    },
+    {
+      "accessions": [
+        "AJ749949"
+      ],
+      "deg_essential_entries": 453,
+      "deg_ids": [
+        "DEG1052"
+      ],
+      "name": "Francisella tularensis Schu S4",
+      "organism_id": "AJ749949"
+    },
+    {
+      "accessions": [
+        "AM747720",
+        "AM747721",
+        "AM747722",
+        "AM747723"
+      ],
+      "deg_essential_entries": 383,
+      "deg_ids": [
+        "DEG1066"
+      ],
+      "name": "Burkholderia cenocepacia J2315",
+      "organism_id": "AM747720+AM747721+AM747722+AM747723"
+    },
+    {
+      "accessions": [
+        "CP017054"
+      ],
+      "deg_essential_entries": 496,
+      "deg_ids": [
+        "DEG1060"
+      ],
+      "name": "Providencia stuartii strain BE2467",
+      "organism_id": "CP017054"
+    },
+    {
+      "accessions": [
+        "CP029332"
+      ],
+      "deg_essential_entries": 230,
+      "deg_ids": [
+        "DEG1059"
+      ],
+      "name": "Mycobacterium avium subsp. hominissuis strain MAC109",
+      "organism_id": "CP029332"
+    },
+    {
+      "accessions": [
+        "HG941718"
+      ],
+      "deg_essential_entries": 315,
+      "deg_ids": [
+        "DEG1048"
+      ],
+      "name": "Escherichia coli ST131 strain EC958",
+      "organism_id": "HG941718"
+    },
+    {
+      "accessions": [
+        "LAUA00000000"
+      ],
+      "deg_essential_entries": 508,
+      "deg_ids": [
+        "DEG1053"
+      ],
+      "name": "Burkholderia cenocepacia K56-2",
+      "organism_id": "LAUA00000000"
+    },
+    {
+      "accessions": [
+        "NC_000907"
+      ],
+      "deg_essential_entries": 642,
+      "deg_ids": [
+        "DEG1005"
+      ],
+      "name": "Haemophilus influenzae Rd KW20",
+      "organism_id": "NC_000907"
+    },
+    {
+      "accessions": [
+        "NC_000908"
+      ],
+      "deg_essential_entries": 381,
+      "deg_ids": [
+        "DEG1006"
+      ],
+      "name": "Mycoplasma genitalium G37",
+      "organism_id": "NC_000908"
+    },
+    {
+      "accessions": [
+        "NC_000912"
+      ],
+      "deg_essential_entries": 342,
+      "deg_ids": [
+        "DEG1068"
+      ],
+      "name": "Mycoplasma pneumoniae",
+      "organism_id": "NC_000912"
+    },
+    {
+      "accessions": [
+        "NC_000913"
+      ],
+      "deg_essential_entries": 905,
+      "deg_ids": [
+        "DEG1018",
+        "DEG1019"
+      ],
+      "name": "Escherichia coli MG1655 I",
+      "organism_id": "NC_000913"
+    },
+    {
+      "accessions": [
+        "NC_000915"
+      ],
+      "deg_essential_entries": 323,
+      "deg_ids": [
+        "DEG1008"
+      ],
+      "name": "Helicobacter pylori 26695",
+      "organism_id": "NC_000915"
+    },
+    {
+      "accessions": [
+        "NC_000962"
+      ],
+      "deg_essential_entries": 2072,
+      "deg_ids": [
+        "DEG1010",
+        "DEG1025",
+        "DEG1027"
+      ],
+      "name": "Mycobacterium tuberculosis H37Rv",
+      "organism_id": "NC_000962"
+    },
+    {
+      "accessions": [
+        "NC_000964"
+      ],
+      "deg_essential_entries": 271,
+      "deg_ids": [
+        "DEG1001"
+      ],
+      "name": "Bacillus subtilis 168",
+      "organism_id": "NC_000964"
+    },
+    {
+      "accessions": [
+        "NC_002163"
+      ],
+      "deg_essential_entries": 394,
+      "deg_ids": [
+        "DEG1031",
+        "DEG1049"
+      ],
+      "name": "Campylobacter jejuni subsp. jejuni NCTC 11168 = ATCC 700819",
+      "organism_id": "NC_002163"
+    },
+    {
+      "accessions": [
+        "NC_002505",
+        "NC_002506"
+      ],
+      "deg_essential_entries": 1122,
+      "deg_ids": [
+        "DEG1003",
+        "DEG1067"
+      ],
+      "name": "Vibrio cholerae N16961",
+      "organism_id": "NC_002505+NC_002506"
+    },
+    {
+      "accessions": [
+        "NC_002516"
+      ],
+      "deg_essential_entries": 1004,
+      "deg_ids": [
+        "DEG1030",
+        "DEG1036",
+        "DEG1051"
+      ],
+      "name": "Pseudomonas aeruginosa PAO1",
+      "organism_id": "NC_002516"
+    },
+    {
+      "accessions": [
+        "NC_002745"
+      ],
+      "deg_essential_entries": 302,
+      "deg_ids": [
+        "DEG1002"
+      ],
+      "name": "Staphylococcus aureus N315",
+      "organism_id": "NC_002745"
+    },
+    {
+      "accessions": [
+        "NC_002771"
+      ],
+      "deg_essential_entries": 310,
+      "deg_ids": [
+        "DEG1014"
+      ],
+      "name": "Mycoplasma pulmonis UAB CTIP",
+      "organism_id": "NC_002771"
+    },
+    {
+      "accessions": [
+        "NC_002952"
+      ],
+      "deg_essential_entries": 295,
+      "deg_ids": [
+        "DEG1065"
+      ],
+      "name": "Staphylococcus aureus subsp. aureus MRSA252",
+      "organism_id": "NC_002952"
+    },
+    {
+      "accessions": [
+        "NC_002953"
+      ],
+      "deg_essential_entries": 305,
+      "deg_ids": [
+        "DEG1064"
+      ],
+      "name": "Staphylococcus aureus subsp. aureus MSSA476",
+      "organism_id": "NC_002953"
+    },
+    {
+      "accessions": [
+        "NC_003028",
+        "NC_003098"
+      ],
+      "deg_essential_entries": 244,
+      "deg_ids": [
+        "DEG1007"
+      ],
+      "name": "Streptococcus pneumoniae",
+      "organism_id": "NC_003028+NC_003098"
+    },
+    {
+      "accessions": [
+        "NC_003062"
+      ],
+      "deg_essential_entries": 361,
+      "deg_ids": [
+        "DEG1045"
+      ],
+      "name": "Agrobacterium fabrum str. C58",
+      "organism_id": "NC_003062"
+    },
+    {
+      "accessions": [
+        "NC_003197"
+      ],
+      "deg_essential_entries": 230,
+      "deg_ids": [
+        "DEG1011"
+      ],
+      "name": "Salmonella typhimurium LT2",
+      "organism_id": "NC_003197"
+    },
+    {
+      "accessions": [
+        "NC_003295",
+        "NC_003296"
+      ],
+      "deg_essential_entries": 465,
+      "deg_ids": [
+        "DEG1057"
+      ],
+      "name": "Ralstonia solanacearum GMI1000",
+      "organism_id": "NC_003295+NC_003296"
+    },
+    {
+      "accessions": [
+        "NC_003923"
+      ],
+      "deg_essential_entries": 256,
+      "deg_ids": [
+        "DEG1063"
+      ],
+      "name": "Staphylococcus aureus subsp. aureus MW2",
+      "organism_id": "NC_003923"
+    },
+    {
+      "accessions": [
+        "NC_004347"
+      ],
+      "deg_essential_entries": 402,
+      "deg_ids": [
+        "DEG1029"
+      ],
+      "name": "Shewanella oneidensis MR-1",
+      "organism_id": "NC_004347"
+    },
+    {
+      "accessions": [
+        "NC_004631"
+      ],
+      "deg_essential_entries": 711,
+      "deg_ids": [
+        "DEG1016",
+        "DEG1033"
+      ],
+      "name": "Salmonella enterica serovar Typhi",
+      "organism_id": "NC_004631"
+    },
+    {
+      "accessions": [
+        "NC_004663"
+      ],
+      "deg_essential_entries": 325,
+      "deg_ids": [
+        "DEG1023"
+      ],
+      "name": "Bacteroides thetaiotaomicron VPI-5482",
+      "organism_id": "NC_004663"
+    },
+    {
+      "accessions": [
+        "NC_005296"
+      ],
+      "deg_essential_entries": 552,
+      "deg_ids": [
+        "DEG1041"
+      ],
+      "name": "Rhodopseudomonas palustris CGA009",
+      "organism_id": "NC_005296"
+    },
+    {
+      "accessions": [
+        "NC_005966"
+      ],
+      "deg_essential_entries": 499,
+      "deg_ids": [
+        "DEG1013"
+      ],
+      "name": "Acinetobacter baylyi ADP1",
+      "organism_id": "NC_005966"
+    },
+    {
+      "accessions": [
+        "NC_006350",
+        "NC_006351"
+      ],
+      "deg_essential_entries": 505,
+      "deg_ids": [
+        "DEG1035"
+      ],
+      "name": "Burkholderia pseudomallei K96243",
+      "organism_id": "NC_006350+NC_006351"
+    },
+    {
+      "accessions": [
+        "NC_007432"
+      ],
+      "deg_essential_entries": 317,
+      "deg_ids": [
+        "DEG1042"
+      ],
+      "name": "Streptococcus agalactiae A909",
+      "organism_id": "NC_007432"
+    },
+    {
+      "accessions": [
+        "NC_007595",
+        "NC_007604"
+      ],
+      "deg_essential_entries": 682,
+      "deg_ids": [
+        "DEG1040"
+      ],
+      "name": "Synechococcus elongatus PCC 7942",
+      "organism_id": "NC_007595+NC_007604"
+    },
+    {
+      "accessions": [
+        "NC_007650",
+        "NC_007651"
+      ],
+      "deg_essential_entries": 406,
+      "deg_ids": [
+        "DEG1024"
+      ],
+      "name": "Burkholderia thailandensis E264",
+      "organism_id": "NC_007650+NC_007651"
+    },
+    {
+      "accessions": [
+        "NC_007795"
+      ],
+      "deg_essential_entries": 639,
+      "deg_ids": [
+        "DEG1017",
+        "DEG1061"
+      ],
+      "name": "Staphylococcus aureus NCTC 8325",
+      "organism_id": "NC_007795"
+    },
+    {
+      "accessions": [
+        "NC_008463"
+      ],
+      "deg_essential_entries": 335,
+      "deg_ids": [
+        "DEG1015"
+      ],
+      "name": "Pseudomonas aeruginosa UCBPP-PA14",
+      "organism_id": "NC_008463"
+    },
+    {
+      "accessions": [
+        "NC_008601"
+      ],
+      "deg_essential_entries": 392,
+      "deg_ids": [
+        "DEG1012"
+      ],
+      "name": "Francisella novicida U112",
+      "organism_id": "NC_008601"
+    },
+    {
+      "accessions": [
+        "NC_008787"
+      ],
+      "deg_essential_entries": 384,
+      "deg_ids": [
+        "DEG1050"
+      ],
+      "name": "Campylobacter jejuni subsp. jejuni 81-176",
+      "organism_id": "NC_008787"
+    },
+    {
+      "accessions": [
+        "NC_009009"
+      ],
+      "deg_essential_entries": 218,
+      "deg_ids": [
+        "DEG1021"
+      ],
+      "name": "Streptococcus sanguinis",
+      "organism_id": "NC_009009"
+    },
+    {
+      "accessions": [
+        "NC_009085"
+      ],
+      "deg_essential_entries": 614,
+      "deg_ids": [
+        "DEG1043",
+        "DEG1044"
+      ],
+      "name": "Acinetobacter baumannii ATCC 17978",
+      "organism_id": "NC_009085"
+    },
+    {
+      "accessions": [
+        "NC_009511"
+      ],
+      "deg_essential_entries": 535,
+      "deg_ids": [
+        "DEG1028"
+      ],
+      "name": "Sphingomonas wittichii RW1",
+      "organism_id": "NC_009511"
+    },
+    {
+      "accessions": [
+        "NC_010079"
+      ],
+      "deg_essential_entries": 295,
+      "deg_ids": [
+        "DEG1062"
+      ],
+      "name": "Staphylococcus aureus subsp. aureus USA300_TCH1516",
+      "organism_id": "NC_010079"
+    },
+    {
+      "accessions": [
+        "NC_010729"
+      ],
+      "deg_essential_entries": 744,
+      "deg_ids": [
+        "DEG1022",
+        "DEG1039"
+      ],
+      "name": "Porphyromonas gingivalis ATCC 33277",
+      "organism_id": "NC_010729"
+    },
+    {
+      "accessions": [
+        "NC_011375"
+      ],
+      "deg_essential_entries": 241,
+      "deg_ids": [
+        "DEG1038"
+      ],
+      "name": "Streptococcus pyogenes NZ131",
+      "organism_id": "NC_011375"
+    },
+    {
+      "accessions": [
+        "NC_011916"
+      ],
+      "deg_essential_entries": 480,
+      "deg_ids": [
+        "DEG1020"
+      ],
+      "name": "Caulobacter crescentus",
+      "organism_id": "NC_011916"
+    },
+    {
+      "accessions": [
+        "NC_012925"
+      ],
+      "deg_essential_entries": 361,
+      "deg_ids": [
+        "DEG1058"
+      ],
+      "name": "Streptococcus suis",
+      "organism_id": "NC_012925"
+    },
+    {
+      "accessions": [
+        "NC_014171"
+      ],
+      "deg_essential_entries": 516,
+      "deg_ids": [
+        "DEG1047"
+      ],
+      "name": "Bacillus thuringiensis BMB171",
+      "organism_id": "NC_014171"
+    },
+    {
+      "accessions": [
+        "NC_014375"
+      ],
+      "deg_essential_entries": 412,
+      "deg_ids": [
+        "DEG1046"
+      ],
+      "name": "Brevundimonas subvibrioides ATCC 15264",
+      "organism_id": "NC_014375"
+    },
+    {
+      "accessions": [
+        "NC_016776"
+      ],
+      "deg_essential_entries": 547,
+      "deg_ids": [
+        "DEG1034"
+      ],
+      "name": "Bacteroides fragilis 638R",
+      "organism_id": "NC_016776"
+    },
+    {
+      "accessions": [
+        "NC_016810"
+      ],
+      "deg_essential_entries": 353,
+      "deg_ids": [
+        "DEG1032"
+      ],
+      "name": "Salmonella enterica serovar Typhimurium SL1344",
+      "organism_id": "NC_016810"
+    },
+    {
+      "accessions": [
+        "NC_016856"
+      ],
+      "deg_essential_entries": 105,
+      "deg_ids": [
+        "DEG1026"
+      ],
+      "name": "Salmonella enterica subsp. enterica serovar Typhimurium str. 14028S",
+      "organism_id": "NC_016856"
+    },
+    {
+      "accessions": [
+        "NC_022240"
+      ],
+      "deg_essential_entries": 751,
+      "deg_ids": [
+        "DEG1055"
+      ],
+      "name": "Neisseria gonorrhoeae MS11",
+      "organism_id": "NC_022240"
+    },
+    {
+      "accessions": [
+        "NZ_CP008957"
+      ],
+      "deg_essential_entries": 1265,
+      "deg_ids": [
+        "DEG1056"
+      ],
+      "name": "Escherichia coli O157:H7",
+      "organism_id": "NZ_CP008957"
+    }
+  ],
+  "paper": "Ma et al. (2026), dnaHNet, zero-shot gene essentiality prediction",
+  "paper_reported": {
+    "data_points": 185226,
+    "knockout_offset_bp_downstream_of_start_codon": 12,
+    "metric": "AUROC",
+    "organisms": 62,
+    "stop_cassette": "TAATAATAATAGTGA",
+    "window_bp": 8192
+  },
+  "protocol": {
+    "identity_threshold": 0.99,
+    "knockout_offset": 12,
+    "orientation": "gene",
+    "stop_cassette": "TAATAATAATAGTGA",
+    "window_length": 8192
+  },
+  "skipped_deg_experiments": [
+    {
+      "deg_id": "DEG1037",
+      "organism": "Streptococcus pyogenes MGAS5448",
+      "reason": "DEG lists no nucleotide accession"
+    }
+  ],
+  "sources": {
+    "deg_download_base": "http://tubic.org/deg/public/download",
+    "deg_files": {
+      "DEG10.nt.gz": {
+        "bytes": 8261904,
+        "sha256": "7cd4b8f826e9d36b6a5ade578c874a03f7fe36f36489312380944ec138d94030"
+      },
+      "deg_annotation_p.csv.zip": {
+        "bytes": 823232,
+        "sha256": "26897c5e08667e16962f60af995be3732861b1451db568bb2c2670f77606c489"
+      },
+      "deg_bacteria.csv.zip": {
+        "bytes": 7888,
+        "sha256": "98f02bebcfe97ff10fcb820ab6831c47c249a3578790cd4c7da39ca29cdd49b0"
+      }
+    },
+    "ncbi_eutils": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils",
+    "ncbi_rettype": "gbwithparts"
+  }
+}
