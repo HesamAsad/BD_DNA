@@ -41,6 +41,7 @@ def load_checkpoint_model(
     model_length: int,
     eval_batch_size: int,
     device: torch.device,
+    reverse_off: bool = False,
 ):
   raw = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
   hyperparameters = raw.get("hyper_parameters", {})
@@ -57,6 +58,19 @@ def load_checkpoint_model(
   if config.algo.backbone in {"bissm", "ussm"}:
     config.model.active_blocks = "all"
     config.model.right_flank_probability = 0.0
+  if reverse_off:
+    # Same ablation as the `bissm_reverse_off` arm of
+    # scripts/eval/ppl_ssm_baselines.sh: build the UNIdirectional backbone from
+    # the bidirectional checkpoint. UnidirectionalSSM subclasses
+    # BidirectionalSSM and shares every parameter name (the two scan directions
+    # share one SegmentMamba2), so the weights load unchanged and the
+    # in-block reverse scan simply never runs. This isolates what the reverse
+    # scan contributes, holding the weights fixed.
+    if config.algo.backbone != "bissm":
+      raise ValueError(
+        f"--reverse-off applies to a bissm checkpoint, got "
+        f"{config.algo.backbone}")
+    config.algo.backbone = "ussm"
 
   tokenizer = dataloader.get_tokenizer(config)
   model = diffusion.Diffusion.load_from_checkpoint(
@@ -258,6 +272,11 @@ def main():
   parser.add_argument("--epsilon", type=float, default=1e-3)
   parser.add_argument("--seed", type=int, default=1)
   parser.add_argument("--max-variants", type=int)
+  parser.add_argument(
+    "--reverse-off", action="store_true",
+    help="Ablate the in-block reverse scan: load a bissm checkpoint into the "
+         "unidirectional backbone, holding weights fixed. Mirrors the "
+         "bissm_reverse_off arm of scripts/eval/ppl_ssm_baselines.sh.")
   args = parser.parse_args()
 
   if args.batch_size <= 0 or args.mc_samples <= 0:
@@ -274,7 +293,8 @@ def main():
   if not torch.cuda.is_available():
     raise RuntimeError("MaveDB checkpoint scoring requires a CUDA GPU")
   model, tokenizer, config, global_step = load_checkpoint_model(
-    args.checkpoint, args.model_length, args.batch_size * 2, device)
+    args.checkpoint, args.model_length, args.batch_size * 2, device,
+    reverse_off=args.reverse_off)
   generator = torch.Generator(device="cpu").manual_seed(args.seed)
 
   scored = []
@@ -300,6 +320,7 @@ def main():
     "checkpoint": str(args.checkpoint.resolve()),
     "checkpoint_global_step": global_step,
     "backbone": str(config.algo.backbone),
+    "reverse_off": bool(args.reverse_off),
     "model_length": args.model_length,
     "block_size": int(config.block_size),
     "parameterization": str(model.parameterization),

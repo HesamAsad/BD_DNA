@@ -370,6 +370,55 @@ reduced, not of the model: the SSM tolerates bf16 in its layer stack for 0.00104
 nats (1.19201 -> 1.19305), while the DiT fails to train at all without FP32 in
 its embedding and logit tail.
 
+### Block size and the reverse scan
+
+Two ablations on the same BiSSM checkpoint, MC-32 -> MC-128 scoring, two seeds
+each. Block sizes were retrained from scratch (LSF `107083` block 128, `107084`
+block 512; block 256 is `103297`); the reverse-scan arm reuses the block-256
+weights via `score_mavedb.py --reverse-off`, which rebuilds the backbone as
+`ussm` so the in-block reverse scan never runs. `UnidirectionalSSM` subclasses
+`BidirectionalSSM` and the two directions share one `SegmentMamba2`, so every
+parameter name matches and the weights load unchanged.
+
+MaveDB is scored at matched `model_length 512` across block sizes, because
+`score_mavedb.py` requires `model_length % block_size == 0` and block 512 cannot
+be scored at 256. Targets are 132-216 nt, so the remainder is N padding excluded
+from the loss.
+
+| variant | val NLL | MaveDB s1 | s2 | mean | vs block 256 |
+|---|---:|---:|---:|---:|---:|
+| block 128 | **1.24637** | 0.13479 | 0.12702 | 0.13090 | -0.003 |
+| block 256 (baseline) | 1.24749 | 0.13765 | 0.13044 | 0.13404 | -- |
+| block 512 | 1.24881 | 0.13972 | 0.13132 | 0.13552 | +0.002 |
+| reverse scan OFF | 1.32824 | 0.09183 | 0.09483 | **0.09333** | **-0.043** |
+
+**Granularity does nothing; existence does a lot.** Across a 4x range of block
+sizes MaveDB moves 0.0046, smaller than the 0.007-0.008 seed spread within each
+arm -- the sweep cannot distinguish them, so block size is not a lever for this
+benchmark. Disabling the reverse scan on the same weights costs 0.0427, a 31%
+relative drop and roughly 10x both the block-size effect and the seed noise.
+
+The two are consistent: the reverse scan runs inside every block whatever its
+size, so a 216-nt variant always sits within bidirectionally-modelled windows
+and moving the boundaries only relocates them. Block size changes how that
+context is partitioned; reverse-off removes it.
+
+Caveat on magnitude: reverse-off (0.09333) is *worse* than uSSM-BD (0.10891),
+which was trained unidirectional from the start -- the BiSSM weights expect a
+pathway that is then missing. "Removing the reverse scan at inference costs 31%"
+is the safe claim; against a fair unidirectional baseline the architectural gain
+is +25% (0.13600 vs 0.10891).
+
+The NLL ordering across block sizes (128 < 256 < 512) is the block-diffusion
+bound tightening as blocks shrink toward exact AR likelihood, not the model
+improving, and it is bought with proportionally less generation parallelism.
+
+MC count was also swept on the block-256 checkpoint: 0.0966 (MC-8), 0.1242 (32),
+0.1318 (64), 0.1360 (128), i.e. +0.028 / +0.008 / +0.004 per doubling. MC-128 is
+about the point of diminishing returns. The effect is not SSM-specific --
+Transformer-BD moves 0.1341 -> 0.1417 over the same range -- so it is a property
+of the diffusion NELBO estimator and changes no ordering.
+
 ### dnaHNet benchmark alignment
 
 The first downstream benchmark is pinned to twelve historical MaveDB E. coli
