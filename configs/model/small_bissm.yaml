@@ -42,3 +42,15 @@ right_flank_probability: 0.0
 # 'block_major' restores the original per-block loop; the two produce the same
 # states and the same gradient, so this is a rollback switch, not a knob.
 boundary_impl: layer_major
+
+# Recompute the clean boundary prefill during backward instead of storing its
+# activations. The prefill runs with gradients on and covers
+# (num_blocks - 1) * block_size tokens in every layer, which is roughly half
+# the token positions a training step touches, so it dominates peak memory.
+# Memory -- not arithmetic -- is what pins the SSM arms to micro batch 4 while
+# the Transformer trains at 8 (75.1 GiB vs 41.6 GiB at batch 4; batch 8 needs
+# 137.45 of 143.77 GiB before optimizer state and OOMs). Recomputation is
+# mathematically identical, asserted by
+# tests/test_bissm_diffusion_integration.py, and costs about one extra forward
+# over the prefix.
+checkpoint_boundary_prefill: false

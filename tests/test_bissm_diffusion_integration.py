@@ -148,3 +148,63 @@ def test_ca_sampler_keeps_right_cache_fixed_and_advances_left_cache():
   assert model.mask_index not in completed
   assert model.backbone._sampling_left_cache.length == 12
   assert model.backbone._sampling_right_cache.length == 4
+
+
+def _all_block_loss_and_grads(checkpoint_prefill, right_probability=0.0):
+  """Run one all-blocks step and return (loss, {name: grad}).
+
+  Seeds are reset immediately before the step so both arms draw the same
+  diffusion times, the same corruption mask and the same right-flank coin.
+  """
+  torch.manual_seed(11)
+  config = _config(
+    right_probability=right_probability, active_blocks='all')
+  config.model.checkpoint_boundary_prefill = checkpoint_prefill
+  model = Diffusion(config, DNATokenizer())
+  assert (model.backbone.checkpoint_boundary_prefill is checkpoint_prefill)
+
+  torch.manual_seed(23)
+  x0 = torch.randint(8, 12, (2, 8))
+  attention_mask = torch.ones_like(x0)
+
+  torch.manual_seed(101)
+  loss = model._loss(x0, attention_mask)
+  loss.loss.backward()
+  grads = {
+    name: parameter.grad.detach().clone()
+    for name, parameter in model.backbone.named_parameters()
+    if parameter.grad is not None}
+  return loss.loss.detach().clone(), grads
+
+
+def test_checkpointed_boundary_prefill_matches_the_stored_activation_path():
+  """Recomputing the clean prefill in backward must change nothing but memory.
+
+  The prefill runs with gradients on, so it holds activations for every layer
+  over `(num_blocks - 1) * block_size` tokens. Trading those for a second
+  forward is the lever that could let the SSM arms train at the Transformer's
+  micro batch. It is only a legitimate lever if the loss and every gradient
+  come out the same, which is what this asserts.
+  """
+  stored_loss, stored_grads = _all_block_loss_and_grads(False)
+  recomputed_loss, recomputed_grads = _all_block_loss_and_grads(True)
+
+  torch.testing.assert_close(recomputed_loss, stored_loss)
+  assert set(recomputed_grads) == set(stored_grads)
+  assert stored_grads, "no backbone gradients were produced"
+  for name, expected in stored_grads.items():
+    torch.testing.assert_close(
+      recomputed_grads[name], expected, msg=lambda m, n=name: f"{n}: {m}")
+
+
+def test_checkpointed_boundary_prefill_matches_with_the_right_flank_on():
+  """Same equivalence when the C-a right-flank prefill is also active."""
+  stored_loss, stored_grads = _all_block_loss_and_grads(
+    False, right_probability=1.0)
+  recomputed_loss, recomputed_grads = _all_block_loss_and_grads(
+    True, right_probability=1.0)
+
+  torch.testing.assert_close(recomputed_loss, stored_loss)
+  for name, expected in stored_grads.items():
+    torch.testing.assert_close(
+      recomputed_grads[name], expected, msg=lambda m, n=name: f"{n}: {m}")

@@ -21,6 +21,7 @@ import omegaconf
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint
 
 from .mamba2_segment import Mamba2State, SegmentMamba2
 
@@ -232,6 +233,17 @@ class BidirectionalSSM(nn.Module):
         "model.boundary_impl must be 'layer_major' or 'block_major', got "
         f"{self.boundary_impl!r}")
 
+    # The clean boundary prefill runs with gradients on (diffusion.py calls
+    # `prefill_*_boundaries_stacked` outside any `no_grad`, and the cache is
+    # not detached), so it stores activations for `(num_blocks - 1) *
+    # block_size` tokens across every layer -- roughly half of all the token
+    # positions a training step touches. Recomputing that in backward instead
+    # is mathematically identical and costs about one extra forward over the
+    # prefix. It exists because peak memory, not arithmetic, is what pins the
+    # SSM arms to micro batch 4 while the Transformer runs 8.
+    self.checkpoint_boundary_prefill = bool(
+      model.get("checkpoint_boundary_prefill", False))
+
     self.token_embedding = nn.Embedding(vocab_size, self.hidden_size)
     self.time_embedding = (
       TimestepEmbedder(self.hidden_size, int(model.get("cond_dim", 128)))
@@ -408,9 +420,24 @@ class BidirectionalSSM(nn.Module):
     prefix = token_ids[:, :(num_blocks - 1) * block_size]
     x = self.token_embedding(prefix)
     conv_per_layer, ssm_per_layer = [], []
+    # Only worth checkpointing when a backward pass will actually consume the
+    # stored activations; under `no_grad`/`inference_mode` there is nothing to
+    # trade away and `checkpoint` would just add a second forward.
+    recompute = (self.checkpoint_boundary_prefill
+                 and torch.is_grad_enabled()
+                 and x.requires_grad)
     for layer in self.layers:
-      x, conv_states, ssm_states = layer.scan_clean_with_boundaries(
-        x, block_size)
+      if recompute:
+        # `use_reentrant=False` is required here: the reentrant implementation
+        # cannot return the two state tensors alongside `x`, and it mishandles
+        # a layer whose output is consumed by more than one downstream branch,
+        # which is exactly the shape of this loop.
+        x, conv_states, ssm_states = torch.utils.checkpoint.checkpoint(
+          layer.scan_clean_with_boundaries, x, block_size,
+          use_reentrant=False)
+      else:
+        x, conv_states, ssm_states = layer.scan_clean_with_boundaries(
+          x, block_size)
       conv_per_layer.append(conv_states)
       ssm_per_layer.append(ssm_states)
     return conv_per_layer, ssm_per_layer
