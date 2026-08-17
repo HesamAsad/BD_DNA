@@ -95,6 +95,37 @@ def test_future_active_tokens_do_not_change_earlier_logits():
   assert not torch.allclose(original[:, -1], perturbed[:, -1])
 
 
+def test_rewriting_a_suffix_leaves_the_prefix_logits_bit_identical():
+  """The property that makes a PLL score on this backbone an EXACT AR likelihood.
+
+  `score_mavedb.py --score-mode pll` hides one position at a time and reads back
+  that position's log-probability. On a left-to-right backbone every such term is
+  already the autoregressive conditional, because nothing to the right of a
+  position can reach it -- so the "pseudo" likelihood is the real one, with no
+  Monte Carlo, no bound slack, and no dependence on what the mask happened to
+  hide. That equality is what lets us compare uSSM-BD against uSSM-AR on the same
+  estimator and conclude the MaveDB gap is the training objective.
+
+  It holds only if the scan is strictly causal. `test_future_active_tokens...`
+  above perturbs one final token; this rewrites an entire suffix that straddles a
+  chunk boundary (split=10 with ssm_chunk_size=4 cuts chunk 2 in half) and demands
+  the prefix logits be *bit-identical*, not merely close. Exact equality is the
+  right assertion: a causal scan never reads the changed positions at all, so any
+  drift would mean information crossed the boundary.
+  """
+  model = _unit_model()
+  split = 10
+  tokens = torch.randint(0, 13, (2, 16))
+  changed = tokens.clone()
+  changed[:, split:] = (changed[:, split:] + 7) % 13
+
+  original = model.forward_active(tokens, None)
+  perturbed = model.forward_active(changed, None)
+
+  assert torch.equal(original[:, :split], perturbed[:, :split])
+  assert not torch.allclose(original[:, split:], perturbed[:, split:])
+
+
 def test_cached_causal_continuation_matches_one_shot_logits():
   model = _unit_model(parameterization="ar")
   tokens = torch.randint(0, 13, (2, 9))

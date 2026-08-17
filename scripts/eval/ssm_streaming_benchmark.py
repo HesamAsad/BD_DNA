@@ -122,6 +122,41 @@ def generate_ar(model, tokenizer, prompt_length, generate_length, batch_size, se
   }
 
 
+
+def _sampling_cache_bytes(backbone):
+  """Bytes held by the sampling cache, for either backbone family.
+
+  The SSM keeps a fixed-size recurrent state and exposes
+  `sampling_cache_nbytes`; the Transformer keeps a per-block KV cache that
+  grows with the number of committed tokens. Putting both on one axis is the
+  point of this benchmark -- the bounded-memory claim is only meaningful
+  against something that is unbounded.
+  """
+  nbytes = getattr(backbone, "sampling_cache_nbytes", None)
+  if nbytes is not None:
+    return int(nbytes)
+  blocks = getattr(backbone, "blocks", None)
+  if blocks is None:
+    raise TypeError(
+      f"No sampling cache found on {type(backbone).__name__}; this benchmark "
+      f"supports the SSM backbones and the DiT")
+  total = 0
+  for block in blocks:
+    cache = getattr(block, "kv_cache", None)
+    if cache is not None:
+      total += cache.numel() * cache.element_size()
+  return total
+
+
+def _cache_is_populated(backbone):
+  """Did the just-denoised block actually get committed to the cache?"""
+  if hasattr(backbone, "_sampling_left_cache"):
+    return backbone._sampling_left_cache is not None
+  blocks = getattr(backbone, "blocks", None)
+  return bool(blocks) and any(
+    getattr(block, "kv_cache", None) is not None for block in blocks)
+
+
 def generate_diffusion(
     model, tokenizer, generation_length, batch_size, num_steps):
   if generation_length % model.block_size:
@@ -132,6 +167,7 @@ def generate_diffusion(
   started = time.perf_counter()
   blocks = []
   forward_evaluations = 0
+  cache_growth = []
   for block_index in range(generation_length // model.block_size):
     active = model._sample_prior(batch_size, model.block_size).to(model.device)
     if block_index == 0:
@@ -151,9 +187,14 @@ def generate_diffusion(
         forward_evaluations += 1
     if model.mask_index in active:
       raise RuntimeError("Diffusion block retained masks after the fixed grid")
-    if model.backbone._sampling_left_cache is None:
-      raise RuntimeError("Denoised block was not committed to the recurrent cache")
+    if not _cache_is_populated(model.backbone):
+      raise RuntimeError("Denoised block was not committed to the sampling cache")
     blocks.append(active)
+    cache_growth.append({
+      "committed_tokens": (block_index + 1) * model.block_size,
+      "cache_bytes": _sampling_cache_bytes(model.backbone),
+      "peak_gpu_bytes": torch.cuda.max_memory_allocated(),
+    })
   torch.cuda.synchronize()
   elapsed = time.perf_counter() - started
   sequence = torch.cat(blocks, dim=1)
@@ -165,7 +206,8 @@ def generate_diffusion(
     "forward_evaluations": forward_evaluations,
     "seconds": elapsed,
     "tokens_per_second": generation_length * batch_size / elapsed,
-    "cache_bytes": model.backbone.sampling_cache_nbytes,
+    "cache_bytes": _sampling_cache_bytes(model.backbone),
+    "cache_growth": cache_growth,
     "peak_gpu_bytes": torch.cuda.max_memory_allocated(),
   }
 
@@ -200,12 +242,28 @@ def main():
   model, tokenizer, config, global_step = load_checkpoint_model(
     args.checkpoint, model_length, args.generation_batch_size,
     torch.device("cuda"))
-  if str(config.algo.backbone) not in {"ussm", "bissm"}:
-    raise ValueError("Streaming benchmark requires a recurrent SSM checkpoint")
+  recurrent = str(config.algo.backbone) in {"ussm", "bissm"}
+  if not recurrent:
+    # The DiT's sampling path only works with the KV cache enabled. With
+    # sampling.kv_cache False it INDEXES the block mask
+    # (models/dit.py:793-795), which is valid for a dense sdpa tensor but not
+    # for the BlockMask object attn_backend=flex builds -- flex_attention then
+    # raises inside the compiled region. Forcing it on is also what this
+    # benchmark needs: the KV cache is the thing whose growth we are measuring
+    # against the SSM's bounded recurrent state. Read at call time
+    # (`self.config.sampling.kv_cache`), so setting it post-load takes effect.
+    model.config.sampling.kv_cache = True
 
   with torch.inference_mode():
-    prefill = benchmark_prefill(
-      model, tokenizer, args.prefix_lengths, args.chunk_size, args.seed)
+    if recurrent:
+      # Scanning a clean prefix into a bounded recurrent state has no
+      # Transformer analogue -- its "prefill" is just a forward that populates
+      # a KV cache proportional to the prefix. Measured in `cache_growth`
+      # during generation instead, which is the axis the two share.
+      prefill = benchmark_prefill(
+        model, tokenizer, args.prefix_lengths, args.chunk_size, args.seed)
+    else:
+      prefill = None
     if str(model.parameterization) == "ar":
       samples, generation = generate_ar(
         model, tokenizer, args.prompt_length, args.generation_length,

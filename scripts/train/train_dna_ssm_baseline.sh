@@ -43,6 +43,10 @@ VAL_EVERY=${VAL_EVERY:-100}
 VAL_BATCHES=${VAL_BATCHES:-64}
 NUM_WORKERS=${NUM_WORKERS:-16}
 WANDB_MODE=${WANDB_MODE:-online}
+# 0.0 = de-novo only (every arm to date). Intermediate values train ONE model
+# serving both de-novo and C-a infilling via suffix-conditioning dropout; the
+# right-flank cache only receives gradient when this is > 0.
+RIGHT_FLANK_PROBABILITY=${RIGHT_FLANK_PROBABILITY:-0.0}
 
 if [[ "$OBJECTIVE" != "bd3lm" && "$OBJECTIVE" != "ar" ]]; then
   echo "FATAL: OBJECTIVE must be bd3lm or ar"
@@ -83,7 +87,7 @@ EXTRA_ARGS=()
 [[ "$WANDB_MODE" == "off" ]] && EXTRA_ARGS+=(wandb=null)
 
 RUN_TAG=${LSB_JOBID:-$(date +%Y%m%d-%H%M%S)}
-RUN_NAME="dna-${OBJECTIVE}-${DIRECTION}-mamba2-lr${LR}-b2${BETA2}-wd${WEIGHT_DECAY}-L${LENGTH}-${RUN_TAG}"
+RUN_NAME="dna-${OBJECTIVE}-${DIRECTION}-mamba2-lr${LR}-b2${BETA2}-wd${WEIGHT_DECAY}-rf${RIGHT_FLANK_PROBABILITY}-L${LENGTH}-${RUN_TAG}"
 RUN_DIR=${RUN_DIR:-outputs/carbon-prokaryote/$(date +%Y.%m.%d)/${RUN_NAME}}
 
 echo "[$(date)] $RUN_NAME | host=$(hostname) | steps=$MAX_STEPS | global_batch=$GLOBAL_BATCH"
@@ -97,7 +101,7 @@ nvidia-smi --query-gpu=index,name,memory.total --format=csv
   data.dna_max_rows="$DNA_MAX_ROWS" \
   model.length="$LENGTH" \
   model.active_blocks=all \
-  model.right_flank_probability=0.0 \
+  model.right_flank_probability="$RIGHT_FLANK_PROBABILITY" \
   loader.global_batch_size="$GLOBAL_BATCH" \
   loader.eval_global_batch_size="$GLOBAL_BATCH" \
   loader.batch_size="$MICRO_BATCH" \

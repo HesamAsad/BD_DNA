@@ -27,6 +27,7 @@ MODEL_LENGTH=${MODEL_LENGTH:-256}
 SEED=${SEED:-1}
 MAX_VARIANTS=${MAX_VARIANTS:-}
 SCORE_MODE=${SCORE_MODE:-nelbo}   # nelbo | pll
+GENOMIC_PREFIX=${GENOMIC_PREFIX:-}   # path to the urn->prefix JSON
 REVERSE_OFF=${REVERSE_OFF:-0}   # 1 = ablate the in-block reverse scan
 RUN_TAG=${LSB_JOBID:-$(date +%Y%m%d-%H%M%S)}
 OUTPUT_DIR=${OUTPUT_DIR:-$REPO/results/dnahnet/mavedb/${LABEL}-${RUN_TAG}}
@@ -39,6 +40,7 @@ mkdir -p "$OUTPUT_DIR" logs
 EXTRA_ARGS=()
 [[ "$REVERSE_OFF" == "1" ]] && EXTRA_ARGS+=(--reverse-off)
 EXTRA_ARGS+=(--score-mode "$SCORE_MODE")
+[ -n "$GENOMIC_PREFIX" ] && EXTRA_ARGS+=(--genomic-prefix "$GENOMIC_PREFIX")
 [ -n "$MAX_VARIANTS" ] && EXTRA_ARGS+=(--max-variants "$MAX_VARIANTS")
 
 echo "[$(date)] MaveDB | label=$LABEL | checkpoint=$CKPT | pairs=$BATCH_SIZE | MC=$MC_SAMPLES | seed=$SEED | L=$MODEL_LENGTH | output=$OUTPUT_DIR"

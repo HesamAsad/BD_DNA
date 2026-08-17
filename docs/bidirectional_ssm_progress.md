@@ -362,8 +362,14 @@ number must be reported next to this baseline. (An earlier internal figure of 0.
 a mis-parse: the regex `[A-Z][a-z]{2}\d+` produces only three distinct values across all
 21,250 variants -- a variant-class code, not a count. Retracted.)
 
-**Our compute is 2.53e18 FLOPs (6ND), 0.32x dnaHNet's smallest budget** of 8e18, where
-they report 0.2601. uSSM-AR is the only arm using their exact estimator and so the only
+**Compute differs 3.1x across the arms; report it per arm, not as one number.** An
+earlier version of this doc claimed "our compute is 2.53e18 FLOPs (6ND), 0.32x
+dnaHNet's smallest budget". That is the 6ND *reference* value and it is true only of
+uSSM-AR, which actually sits at 2.652e18 (0.33x of dnaHNet's 8e18). The real values run
+from 2.652e18 (uSSM-AR) to 8.194e18 (Transformer-BD), and Transformer-BD therefore
+*exceeds* dnaHNet's smallest budget of 8e18 while scoring 0.14123 against their 0.2601.
+The compute-efficiency claim belongs to uSSM-AR alone: 0.29781 at a third of that
+budget. uSSM-AR is also the only arm using dnaHNet's exact estimator, so it is the only
 directly comparable row.
 
 **Pseudo-likelihood scoring does not rescue the BD arms.** Deterministic, exact per term,
@@ -374,16 +380,32 @@ objective and not the measurement. BiSSM losing under PLL refutes the prediction
 two-sided conditioning would favour it; the likely cause is distribution shift, since a
 single masked token in an otherwise-clean block is far into the low-noise tail.
 
-**Wall clocks are not validation-matched.** The SSM arms ran 320 validation passes to the
-Transformer's 80 (launcher defaults `VAL_EVERY` 100 vs 200, doubled again because
-Lightning counts micro-batches). Use the train-only column for architecture comparison:
+**Wall clocks are not validation-matched.** Counted from the logs: uSSM-AR,
+Transformer-AR, BiSSM-BD and uSSM-BD each ran 320 validation passes, BiSSM-Ca ran 160,
+and Transformer-BD ran only 80. The odd one out is Transformer-BD, not the SSM family
+(launcher defaults `VAL_EVERY` 100 vs 200, doubled again because Lightning counts
+micro-batches). Use the train-only column for architecture comparison:
 validation-excluded, uSSM-BD costs 1.09x the Transformer rather than 1.19x.
 
-**`trainer/total_pflop` is architecture-blind and wrong.** It is bit-identical for all
-three SSM arms (4433.47) because the formula reads only n_params, L, n_layers, d and
-cross_attn; true values are 2652 / 5339 / 6566 / 8193 PFLOP for uSSM-AR / uSSM-BD /
-BiSSM-BD / Transformer-BD. `tokens_per_s` and `total_gtokens` are unaffected.
-| uniform baseline | 1.38629 | 4.0000 | 2.0000 | -- | -- | -- |
+**`trainer/total_pflop` is architecture-blind and wrong, in a different direction per
+arm.** The formula reads only n_params, L, n_layers, d, block_size and cross_attn, so it
+charges a quadratic attention term to backbones that have no attention, and never sees
+the extra traversals block diffusion runs on an SSM. It logged a bit-identical 4433.47
+for all four SSM arms. True values, recomputed from the forward paths by
+`scripts/eval/training_flops.py` (see `results/training_flops.json`):
+
+| arm | true PFLOP | logged | error |
+|---|---:|---:|---:|
+| uSSM-AR | 2652 | 4433.47 | +67% |
+| Transformer-AR | 4567 | 4569.40 | +0.06% |
+| uSSM-BD | 5343 | 4433.47 | -17% |
+| BiSSM-BD | 6571 | 4433.47 | -33% |
+| BiSSM-Ca | 7916 | 4433.47 | -44% |
+| Transformer-BD | 8194 | 8687.00 | +6% |
+
+The earlier four-arm list in this doc (2652 / 5339 / 6566 / 8193) was slightly stale and
+omitted Transformer-AR and BiSSM-Ca entirely. `tokens_per_s` and `total_gtokens` are
+unaffected.
 
 MaveDB is MC-32, two seeds ensembled per-variant before Spearman, matching the
 recorded protocol. Every retrained checkpoint reproduces its published MaveDB

@@ -185,8 +185,12 @@ essentiality_score = loss(knockout) - loss(wild type)
 ## 5. Model-free baselines are mandatory
 
 On MaveDB a zero-parameter feature (count of amino-acid substitutions) scored
-0.3649 macro `|rho|`, beating every model *and* the published dnaHNet number.
-The benchmark was substantially measuring mutation count. For DEG the knockout
+0.30931 macro `|rho|`, beating every model we trained, though *not* the
+published dnaHNet number of 0.3266. It also points the right way on all 12
+assays, which no model does. The benchmark was substantially measuring mutation
+count. (An earlier figure of 0.3649 in this doc was wrong and is retracted: it
+came from a regex that returned only three distinct values across all 21,250
+variants, so it read a variant-class code rather than a substitution count.) For DEG the knockout
 cassette is byte-identical for every gene, so that specific confound is absent
 **by construction** — but others are not, and `summary.json` reports all of
 these next to the model number, on every run:

@@ -101,12 +101,30 @@ def encode_dna(tokenizer, sequence: str, model_length: int):
   return ids, token_mask
 
 
-def build_pair_tensors(records, tokenizer, model_length: int):
+def build_pair_tensors(records, tokenizer, model_length: int, prefixes=None):
+  """Encode WT/mutant pairs, optionally behind a real genomic prefix.
+
+  With `prefixes`, each variant is placed in BLOCK 1 of a two-block window and
+  block 0 is filled with 256 nt of native E. coli sequence immediately 5' of
+  that assay's gene. That gives every scored token a fully populated recurrent
+  prefix cache and, for the DiT, satisfies block_q > block_kv so the
+  offset-block-causal cross-attention path actually fires -- neither of which
+  happens in the default single-block geometry. The prefix is upstream of the
+  target, identical for WT and mutant, so it cannot leak which is which.
+  """
   rows, masks = [], []
   for record in records:
+    prefix = None if prefixes is None else prefixes.get(record["score_set_urn"])
     for key in ("wt_sequence", "mut_sequence"):
-      ids, token_mask = encode_dna(
-        tokenizer, record[key], model_length)
+      if prefix is None:
+        ids, token_mask = encode_dna(tokenizer, record[key], model_length)
+      else:
+        block = len(prefix)
+        pre_ids, _ = encode_dna(tokenizer, prefix, block)
+        var_ids, var_mask = encode_dna(
+          tokenizer, record[key], model_length - block)
+        ids = pre_ids + var_ids
+        token_mask = [False] * block + var_mask
       rows.append(ids)
       masks.append(token_mask)
   return torch.tensor(rows, dtype=torch.long), torch.tensor(masks, dtype=torch.bool)
@@ -226,9 +244,10 @@ def score_batch(
     epsilon: float,
     generator: torch.Generator,
     score_mode: str = "nelbo",
+    prefixes=None,
 ):
   x0_cpu, token_mask_cpu = build_pair_tensors(
-    records, tokenizer, model_length)
+    records, tokenizer, model_length, prefixes)
   bos_rows = model._bos_rows(x0_cpu)
   if bos_rows.any():
     token_mask_cpu[bos_rows, 0] = False
@@ -331,6 +350,12 @@ def main():
   parser.add_argument("--seed", type=int, default=1)
   parser.add_argument("--max-variants", type=int)
   parser.add_argument(
+    "--genomic-prefix", type=Path,
+    help="JSON mapping score_set_urn -> a real 256-nt upstream genomic prefix. "
+         "Places each variant in block 1 so the recurrent cache is populated "
+         "and the DiT cross-block mask is live. Requires --model-length to be "
+         "prefix length + one block.")
+  parser.add_argument(
     "--score-mode", choices=("nelbo", "pll"), default="nelbo",
     help="nelbo: the training objective's paired Monte Carlo NELBO (a bound). "
          "pll: deterministic pseudo-log-likelihood, sum_i log p(x_i | x_{-i}), "
@@ -359,6 +384,9 @@ def main():
   model, tokenizer, config, global_step = load_checkpoint_model(
     args.checkpoint, args.model_length, args.batch_size * 2, device,
     reverse_off=args.reverse_off)
+  prefixes = (
+    json.loads(args.genomic_prefix.read_text())
+    if args.genomic_prefix else None)
   generator = torch.Generator(device="cpu").manual_seed(args.seed)
 
   scored = []
@@ -372,6 +400,7 @@ def main():
         model_length=args.model_length,
         mc_samples=args.mc_samples,
         score_mode=args.score_mode,
+        prefixes=prefixes,
         epsilon=args.epsilon,
         generator=generator))
       print(
@@ -387,6 +416,7 @@ def main():
     "backbone": str(config.algo.backbone),
     "reverse_off": bool(args.reverse_off),
     "score_mode": str(args.score_mode),
+    "genomic_prefix": bool(args.genomic_prefix),
     "model_length": args.model_length,
     "block_size": int(config.block_size),
     "parameterization": str(model.parameterization),
