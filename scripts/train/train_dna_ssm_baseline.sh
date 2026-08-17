@@ -47,6 +47,13 @@ WANDB_MODE=${WANDB_MODE:-online}
 # serving both de-novo and C-a infilling via suffix-conditioning dropout; the
 # right-flank cache only receives gradient when this is > 0.
 RIGHT_FLANK_PROBABILITY=${RIGHT_FLANK_PROBABILITY:-0.0}
+# Recompute the clean boundary prefill in backward instead of storing it.
+# Costs ~10% throughput and saves ~36% of peak memory (70.14 -> 45.07 GiB at
+# L=8192 micro batch 4), with loss and gradients unchanged. Leave it off at
+# 8192, where it is a pure loss. It is REQUIRED past ~L=16384: at L=32768 micro
+# batch 2 the stored path needs about 138 of the H200's 139.72 GiB, which will
+# not survive DDP buffers.
+CHECKPOINT_PREFILL=${CHECKPOINT_PREFILL:-false}
 
 if [[ "$OBJECTIVE" != "bd3lm" && "$OBJECTIVE" != "ar" ]]; then
   echo "FATAL: OBJECTIVE must be bd3lm or ar"
@@ -85,6 +92,12 @@ mkdir -p "$HF_HOME" "$TORCH_HOME" "$XDG_CACHE_HOME" outputs watch_folder logs sa
 
 EXTRA_ARGS=()
 [[ "$WANDB_MODE" == "off" ]] && EXTRA_ARGS+=(wandb=null)
+# Only the SSM backbones read this; the AR transformer config has no such key.
+# '++' sets-or-appends. A plain override needs the key to already exist in the
+# composed struct, which failed once on a compute node that had a stale copy of
+# configs/model/small_bissm.yaml (LSF 112644, died in 35 s). '++' is immune to
+# that and to running against a checkout predating the key.
+EXTRA_ARGS+=(++model.checkpoint_boundary_prefill="$CHECKPOINT_PREFILL")
 
 RUN_TAG=${LSB_JOBID:-$(date +%Y%m%d-%H%M%S)}
 RUN_NAME="dna-${OBJECTIVE}-${DIRECTION}-mamba2-lr${LR}-b2${BETA2}-wd${WEIGHT_DECAY}-rf${RIGHT_FLANK_PROBABILITY}-L${LENGTH}-${RUN_TAG}"
