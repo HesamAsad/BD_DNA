@@ -574,3 +574,82 @@ Machine-readable profiles and the inspected triptych are under the ignored
   requires a bounded boundary cache.
 - C-a is an infilling mode. A clean right-flank cache is never used for de-novo
   perplexity or generation.
+
+## Long context: the crossover, measured then trained (2026-08-18)
+
+The SSM arms do 65% of Transformer-BD's FLOPs and take 109% of its wall clock,
+and they train at micro batch 4 where the Transformer runs 8. The natural
+reading is that we underfill the GPU. That reading is wrong, and the real
+answer is length, not batch.
+
+### Batch size is not the lever, for either architecture
+
+`scripts/smoke/sizing_sweep.py`, one H200, real fwd+bwd+AdamW steps, L=8192:
+
+| arm | micro batch | clean prefill | peak GiB | nt/s |
+|---|---:|---|---:|---:|
+| BiSSM | 4 | stored | 70.14 | **68,459** |
+| BiSSM | 4 | recomputed | 45.07 | 61,346 |
+| BiSSM | 8 | stored | OOM | -- |
+| BiSSM | 8 | recomputed | 88.67 | 64,350 |
+| Transformer | 4 | n/a | 37.47 | **86,870** |
+| Transformer | 8 | n/a | 73.52 | 78,299 |
+
+Both are SLOWER per nucleotide at batch 8, and the Transformer loses 10% while
+using half the card, so this is not a memory ceiling. A kernel that responds
+this weakly to doubled parallelism is limited by arithmetic intensity, not
+occupancy -- which is what the SSD scan's [128,64]x[64,64] tiles predict.
+
+**Actionable:** Transformer-BD trains at micro batch 8. Micro batch 4 with
+accum 4 is identical math and about 11% faster. The sweep runs an optimizer
+step per micro batch, which charges batch 4 *more* optimizer cost per token,
+so the real gain is at least that.
+
+`model.checkpoint_boundary_prefill` recomputes the clean prefill in backward:
+-36% peak memory (70.14 -> 45.07 GiB), ~10% throughput cost, loss and every
+gradient unchanged (tests in `tests/test_bissm_diffusion_integration.py`). It
+does not pay for itself at 8192 and is off by default. It is REQUIRED past
+~16384: at 32768 micro batch 2 the stored path needs ~138 of 139.72 GiB.
+
+### The crossover is at L ~= 18,600 nt
+
+Micro batch 2, one H200:
+
+| L | BiSSM nt/s | Transformer nt/s | ratio |
+|---:|---:|---:|---|
+| 8,192 | 52,859 | 82,510 | Transformer 1.56x |
+| 16,384 | 60,423 | 66,245 | Transformer 1.10x |
+| 32,768 | **62,917** | 45,293 | **BiSSM 1.39x** |
+
+The Transformer's advantage shrinks 0.68x per doubling. BiSSM gets *faster*
+per nucleotide as context grows; the Transformer gets slower. Memory does NOT
+cross over (88.72 vs 73.98 GiB at 32768, both ~linear, since flex attention is
+already memory-linear) -- the SSM memory win is only for the generation cache.
+
+### Trained at 32,768: speed confirmed, quality not
+
+Same source shard and row cap as the 8192 caches, rechunked, so both lengths
+see identical nucleotides. Global batch 64 (each arm keeps its tuned LR),
+2000 steps = 4.1943e9 nt, matching the 8192 budget. 4xH200 exclusive.
+
+| arm | val NLL | wall clock | last improvement | LSF |
+|---|---:|---:|---:|---|
+| Transformer-BD | **1.25180** | 6.94 h | step 1950 | 112645 |
+| BiSSM-BD | 1.25672 | **5.03 h** | step 1750 | 112870 |
+
+**Speed: predicted 1.39x, measured 1.38x.** A single-GPU microbenchmark held to
+within 1% on a seven-hour 4-GPU DDP job. The crossover survives DDP.
+
+**Quality: no.** BiSSM is 0.00492 nats behind, and the gap GREW with context --
+it was 0.00096 at 8192, so ~5x worse at 32768. Longer context does not make
+recurrence the better DNA model on this data.
+
+A mid-run report of a "steady 0.007 lead" for BiSSM was a log-reading error
+(misaligned step numbers). Corrected: BiSSM converges faster over the first
+~200 steps, then matches, then slowly falls behind.
+
+**Do not compare these NLLs to the 8192 rows** -- 2000 steps against 8000.
+Both arms took that hit equally, so arm-vs-arm is sound; level-vs-level is not.
+
+**Net:** past ~18,600 nt the SSM trains 1.38x faster for 0.005 nats. That is a
+speed and memory claim with a measured price, not a modelling claim.
