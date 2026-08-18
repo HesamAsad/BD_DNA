@@ -24,6 +24,9 @@ export BD3LM_COMPILE_MASK=1 BD3LM_FLEX_COMPILE_MODE=${FLEX_MODE:-default} BD3LM_
 export HF_HOME=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/huggingface
 export TORCH_HOME=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/torch
 export XDG_CACHE_HOME=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/xdg
+# Triton ignores XDG_CACHE_HOME and defaults under $HOME, which is on the
+# full /nfs/team361 volume. Keep compiled kernels on scratch.
+export TRITON_CACHE_DIR=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/triton
 export NCCL_NVLS_ENABLE=0 TOKENIZERS_PARALLELISM=false USE_TF=0 TF_CPP_MIN_LOG_LEVEL=3
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 mkdir -p logs logs/eval

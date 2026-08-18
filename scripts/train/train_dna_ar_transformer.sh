@@ -38,6 +38,9 @@ WANDB_MODE=${WANDB_MODE:-online}
 export HF_HOME=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/huggingface
 export TORCH_HOME=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/torch
 export XDG_CACHE_HOME=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/xdg
+# Triton ignores XDG_CACHE_HOME and defaults under $HOME, which is on the
+# full /nfs/team361 volume. Keep compiled kernels on scratch.
+export TRITON_CACHE_DIR=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/triton
 export NCCL_NVLS_ENABLE=0
 export TOKENIZERS_PARALLELISM=false USE_TF=0 TF_CPP_MIN_LOG_LEVEL=3
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True

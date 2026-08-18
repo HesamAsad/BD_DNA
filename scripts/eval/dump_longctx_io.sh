@@ -37,6 +37,9 @@ export IO_DUMP_BINS=${IO_DUMP_BINS:-20}
 export HF_HOME=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/huggingface
 export TORCH_HOME=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/torch
 export XDG_CACHE_HOME=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/xdg
+# Triton ignores XDG_CACHE_HOME and defaults under $HOME, which is on the
+# full /nfs/team361 volume. Keep compiled kernels on scratch.
+export TRITON_CACHE_DIR=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/triton
 export NCCL_NVLS_ENABLE=0
 export TOKENIZERS_PARALLELISM=false
 export USE_TF=0

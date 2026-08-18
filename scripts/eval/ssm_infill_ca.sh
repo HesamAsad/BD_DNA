@@ -21,12 +21,19 @@ LABEL=${LABEL:?set LABEL}
 NUM_BATCHES=${NUM_BATCHES:-32}
 BATCH_SIZE=${BATCH_SIZE:-4}
 MC_SAMPLES=${MC_SAMPLES:-16}
+# `bsub -env` splits its own argument on commas, so pass lists with '+'
+# (e.g. RIGHT_BLOCKS=1+2+4+all). Commas still work when run directly.
+RIGHT_NT=${RIGHT_NT:-all}
+RIGHT_NT=${RIGHT_NT//+/,}
 SEED=${SEED:-1}
 RUN_TAG=${LSB_JOBID:-$(date +%Y%m%d-%H%M%S)}
 OUTPUT_DIR=${OUTPUT_DIR:-$REPO/results/infill_ca/${LABEL}-${RUN_TAG}}
 export HF_HOME=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/huggingface
 export TORCH_HOME=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/torch
 export XDG_CACHE_HOME=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/xdg
+# Triton ignores XDG_CACHE_HOME and defaults under $HOME, which is on the
+# full /nfs/team361 volume. Keep compiled kernels on scratch.
+export TRITON_CACHE_DIR=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/triton
 export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 export NCCL_NVLS_ENABLE=0 TOKENIZERS_PARALLELISM=false USE_TF=0 TF_CPP_MIN_LOG_LEVEL=3
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -34,4 +41,5 @@ mkdir -p logs "$OUTPUT_DIR"
 "$PYTHON" -u scripts/eval/ssm_infill_ca.py \
   --checkpoint "$CKPT" --output-dir "$OUTPUT_DIR" --label "$LABEL" \
   --num-batches "$NUM_BATCHES" --batch-size "$BATCH_SIZE" \
-  --mc-samples "$MC_SAMPLES" --seed "$SEED"
+  --mc-samples "$MC_SAMPLES" --seed "$SEED" \
+  --right-nt "$RIGHT_NT" ${MISMATCH:+--mismatch-control}

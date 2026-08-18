@@ -60,12 +60,34 @@ def _atomic_json(path: Path, value):
   os.replace(temporary, path)
 
 
-def score_block(model, x0, xt, loss_scale, p, start, end, use_right):
-  """NELBO of x0[:, start:end] under a shared corruption, with/without suffix."""
+def score_block(model, x0, xt, loss_scale, p, start, end, left_cache,
+                use_right, right_nt=None, mismatch=False):
+  """Per-position NELBO of x0[:, start:end] under a shared corruption.
+
+  `left_cache` is passed in because it does not depend on the arm and is the
+  dominant O(L) cost -- rebuilding it per arm made a 12-arm sweep 12x too slow.
+
+  `right_nt` truncates the cache to that many NUCLEOTIDES after the block
+  (None = whole suffix). Nucleotide granularity matters: the per-head decay
+  half-lives in this checkpoint are a few tokens, so a block-granular sweep
+  saturates at its very first point and shows nothing.
+
+  `mismatch` builds the cache from a DIFFERENT sequence's suffix. If the gain
+  survives that, it is not real information transfer but a generic effect of
+  having any non-zero state, which would invalidate the whole C-a claim.
+
+  Returns [block] summed over the batch, so the caller keeps the position axis.
+  """
   with model._model_autocast_context():
-    left_cache = model.backbone.prefill_left(x0[:, :start])
-    right_cache = (
-      model.backbone.prefill_right(x0[:, end:]) if use_right else None)
+    if not use_right:
+      right_cache = None
+    else:
+      suffix = x0[:, end:]
+      if right_nt is not None:
+        suffix = suffix[:, :right_nt]
+      if mismatch:
+        suffix = torch.roll(suffix, shifts=1, dims=0)
+      right_cache = model.backbone.prefill_right(suffix)
     sigma = model._sigma_from_p(p[:, start:start + 1]).squeeze(-1)
     logits = model.backbone.forward_active(
       xt[:, start:end], sigma,
@@ -75,7 +97,7 @@ def score_block(model, x0, xt, loss_scale, p, start, end, use_right):
     input=log_scores, dim=-1,
     index=x0[:, start:end, None]).squeeze(-1)
   # loss_scale is negative; the NELBO contribution is loss_scale * log p.
-  return (loss_scale[:, start:end] * log_p_theta).double()
+  return (loss_scale[:, start:end] * log_p_theta).double().sum(dim=0)
 
 
 def main():
@@ -88,6 +110,18 @@ def main():
   parser.add_argument("--mc-samples", type=int, default=16,
                       help="diffusion times per batch; the two arms share them")
   parser.add_argument("--seed", type=int, default=1)
+  parser.add_argument(
+    "--right-nt", default="all",
+    help="comma-separated NUCLEOTIDE widths for the right cache, e.g. "
+         "'4,16,64,256,all'. 'all' uses the whole clean suffix (the headline "
+         "setting). Every width is scored on the SAME corruption, so the curve "
+         "is paired. Nucleotide granularity is required: the decay half-lives "
+         "in these checkpoints are a few tokens, so a block-granular sweep "
+         "saturates at its first point.")
+  parser.add_argument(
+    "--mismatch-control", action="store_true",
+    help="add an arm whose cache is built from a DIFFERENT sequence's suffix. "
+         "If the gain survives, it is not information transfer.")
   args = parser.parse_args()
 
   if not torch.cuda.is_available():
@@ -123,8 +157,23 @@ def main():
     config, tokenizer, skip_train=True, valid_seed=args.seed)
   generator = torch.Generator(device="cpu").manual_seed(args.seed)
 
-  totals = {"de_novo": 0.0, "ca": 0.0}
-  tokens = 0
+  sweep = []
+  for token in str(args.right_nt).split(","):
+    token = token.strip()
+    if not token:
+      continue
+    sweep.append(None if token == "all" else int(token))
+  if not sweep:
+    raise ValueError("--right-nt produced no values")
+
+  # (name, use_right, right_nt, mismatch)
+  arms = [("de_novo", False, None, False)]
+  arms += [(f"ca_{'all' if k is None else k}", True, k, False) for k in sweep]
+  if args.mismatch_control:
+    arms.append(("ca_mismatch", True, None, True))
+  totals = {name: torch.zeros(block, dtype=torch.float64, device=device)
+            for name, _, _, _ in arms}
+  rows = 0
   batches = 0
   with torch.inference_mode():
     for batch in valid_loader:
@@ -145,27 +194,50 @@ def main():
         xt = model._preserve_observed_bos(xt, x0)
         for index in targets:
           start, end = index * block, (index + 1) * block
-          for arm, use_right in (("de_novo", False), ("ca", True)):
-            totals[arm] += float(
-              score_block(model, x0, xt, loss_scale, p, start, end,
-                          use_right).sum())
-          tokens += x0.shape[0] * block
+          with model._model_autocast_context():
+            left_cache = model.backbone.prefill_left(x0[:, :start])
+          for arm, use_right, k, mismatch in arms:
+            totals[arm] += score_block(
+              model, x0, xt, loss_scale, p, start, end, left_cache,
+              use_right, right_nt=k, mismatch=mismatch)
+          rows += x0.shape[0]
       batches += 1
 
   # `loss_scale` is negative and `log_p_theta` is negative, so their product is
   # already the positive NELBO contribution -- exactly `diffusion.py`'s
   # `loss = loss_scale * log_p_theta`. Do NOT negate again.
-  nelbo = {k: v / tokens for k, v in totals.items()}
-  delta = nelbo["de_novo"] - nelbo["ca"]
+  # Per-position NELBO, then the block mean.
+  per_position = {k: (v / rows).tolist() for k, v in totals.items()}
+  nelbo = {k: float(sum(v) / len(v)) for k, v in per_position.items()}
+  headline = "ca_all" if "ca_all" in nelbo else f"ca_{sweep[-1]}"
+  delta = nelbo["de_novo"] - nelbo[headline]
+
+  base = per_position["de_novo"]
+
+  def gain_vector(name):
+    return [base[j] - per_position[name][j] for j in range(block)]
+
+  # CURVE 1 -- the DATA's value function, with transmission removed. Position
+  # block-1 sits one step from the cache, so the model's own decay barely
+  # attenuates it; how this grows with width is the data's correlation scale.
+  value_curve = [
+    {"right_nt": ("all" if k is None else k),
+     "gain_at_nearest_position": gain_vector(f"ca_{'all' if k is None else k}")[-1],
+     "block_mean_gain": nelbo["de_novo"] - nelbo[f"ca_{'all' if k is None else k}"]}
+    for k in sweep]
+
+  # CURVE 2 -- the REALIZED profile: how the full-suffix gain decays with
+  # distance from the block's right edge. Compared with curve 1 this says
+  # whether we are limited by the data or by the model's ability to carry it.
+  profile = [
+    {"distance_from_right_edge": block - 1 - j, "gain": gain_vector(headline)[j]}
+    for j in range(block)]
+
   summary = {
     "label": args.label,
     "checkpoint": str(args.checkpoint),
     "checkpoint_global_step": global_step,
     "backbone": str(config.algo.backbone),
-    # Read from the checkpoint's OWN config: `load_checkpoint_model` force-sets
-    # `config.model.right_flank_probability = 0.0` (it is a training-time
-    # sampling knob and this evaluation passes the right cache explicitly), so
-    # `config` would report the override rather than how the model was trained.
     "right_flank_probability_trained": float(
       trained.model.get("right_flank_probability", 0.0)),
     "length": length,
@@ -173,17 +245,40 @@ def main():
     "target_blocks": targets,
     "batches": batches,
     "mc_samples": args.mc_samples,
-    "scored_nucleotides": tokens,
+    "scored_rows": rows,
+    "scored_nucleotides": rows * block,
     "nelbo_de_novo": nelbo["de_novo"],
-    "nelbo_ca": nelbo["ca"],
+    "nelbo_ca": nelbo[headline],
     "delta_nats_per_nt": delta,
-    "note": ("delta > 0 means the clean right flank lowers NELBO, i.e. the C-a "
-             "cache helps. Both arms share weights, diffusion times and masks."),
+    "information_per_block_nats": delta * block,
+    "value_curve": value_curve,
+    "realized_profile": profile,
+    "per_position_nelbo": per_position,
+    "mismatch_control": (
+      {"nelbo": nelbo["ca_mismatch"],
+       "delta_vs_de_novo": nelbo["de_novo"] - nelbo["ca_mismatch"]}
+      if "ca_mismatch" in nelbo else None),
+    "note": ("delta > 0 means the clean right flank lowers NELBO. All arms share "
+             "weights, diffusion times and masks; the target block is in neither "
+             "cache. value_curve isolates the data's correlation scale, "
+             "realized_profile the model's transmission range."),
   }
   _atomic_json(args.output_dir / "summary.json", summary)
-  print(json.dumps(summary, indent=2, sort_keys=True))
-  print(f"\nde-novo {nelbo['de_novo']:.5f}  C-a {nelbo['ca']:.5f}  "
-        f"delta {delta:+.5f} nats/nt")
+
+  print(f"\nde-novo {nelbo['de_novo']:.5f}   full-suffix {nelbo[headline]:.5f}"
+        f"   delta {delta:+.5f} nats/nt  ({delta*block:.3f} nats/block)")
+  print("\ncache width -> gain (nearest position | block mean)")
+  for row in value_curve:
+    print(f"  {str(row['right_nt']):>5} nt   {row['gain_at_nearest_position']:+.5f}"
+          f"   {row['block_mean_gain']:+.5f}")
+  print("\ngain vs distance from the block's right edge")
+  for d in (0, 1, 2, 4, 8, 16, 32, 64, 128, block - 1):
+    if d < block:
+      print(f"  d={d:>4}   {profile[block - 1 - d]['gain']:+.5f}")
+  if summary["mismatch_control"] is not None:
+    m = summary["mismatch_control"]
+    print(f"\nmismatched-suffix control: delta {m['delta_vs_de_novo']:+.5f} "
+          f"(should be ~0; a large value would invalidate the result)")
 
 
 if __name__ == "__main__":
