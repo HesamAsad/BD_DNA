@@ -54,6 +54,20 @@ RIGHT_FLANK_PROBABILITY=${RIGHT_FLANK_PROBABILITY:-0.0}
 # batch 2 the stored path needs about 138 of the H200's 139.72 GiB, which will
 # not survive DDP buffers.
 CHECKPOINT_PREFILL=${CHECKPOINT_PREFILL:-false}
+# State-retention knobs. Per-step retention is exp(A*dt) with A drawn from
+# (1, SSM_A_INIT_MAX) and dt from (1e-3, SSM_DT_MAX); SSM_STATE_SIZE bounds how
+# much can be held. Defaults reproduce the original behaviour. Measured on the
+# trained C-a checkpoint: median per-head half-life 4.66 nt, while the data
+# carries right-context value out to ~1 kb -- so the model is the bottleneck.
+SSM_A_INIT_MAX=${SSM_A_INIT_MAX:-16.0}
+SSM_DT_MAX=${SSM_DT_MAX:-0.1}
+SSM_STATE_SIZE=${SSM_STATE_SIZE:-64}
+# Point at a pre-built cache instead of the carbon corpus (e.g. human-lr8192v2,
+# whose validation is chromosome-held-out to chr8/chr9). Leave unset for the
+# prokaryote default. dna_num_files/dna_max_rows are meaningless for a
+# pre-built cache and are nulled so the cache filename resolves.
+DATA_TRAIN=${DATA_TRAIN:-}
+DATA_VALID=${DATA_VALID:-}
 
 if [[ "$OBJECTIVE" != "bd3lm" && "$OBJECTIVE" != "ar" ]]; then
   echo "FATAL: OBJECTIVE must be bd3lm or ar"
@@ -101,9 +115,17 @@ EXTRA_ARGS=()
 # configs/model/small_bissm.yaml (LSF 112644, died in 35 s). '++' is immune to
 # that and to running against a checkout predating the key.
 EXTRA_ARGS+=(++model.checkpoint_boundary_prefill="$CHECKPOINT_PREFILL")
+EXTRA_ARGS+=(++model.ssm_a_init_max="$SSM_A_INIT_MAX")
+EXTRA_ARGS+=(++model.ssm_dt_max="$SSM_DT_MAX")
+EXTRA_ARGS+=(++model.ssm_state_size="$SSM_STATE_SIZE")
+if [ -n "$DATA_TRAIN" ]; then
+  EXTRA_ARGS+=(data.train="$DATA_TRAIN")
+  EXTRA_ARGS+=(data.valid="${DATA_VALID:-$DATA_TRAIN}")
+  EXTRA_ARGS+=(data.dna_num_files=null data.dna_max_rows=null)
+fi
 
 RUN_TAG=${LSB_JOBID:-$(date +%Y%m%d-%H%M%S)}
-RUN_NAME="dna-${OBJECTIVE}-${DIRECTION}-mamba2-lr${LR}-b2${BETA2}-wd${WEIGHT_DECAY}-rf${RIGHT_FLANK_PROBABILITY}-L${LENGTH}-${RUN_TAG}"
+RUN_NAME="dna-${OBJECTIVE}-${DIRECTION}-mamba2-lr${LR}-b2${BETA2}-wd${WEIGHT_DECAY}-rf${RIGHT_FLANK_PROBABILITY}-a${SSM_A_INIT_MAX}-dt${SSM_DT_MAX}-N${SSM_STATE_SIZE}-L${LENGTH}${DATA_TRAIN:+-${DATA_TRAIN}}-${RUN_TAG}"
 RUN_DIR=${RUN_DIR:-outputs/carbon-prokaryote/$(date +%Y.%m.%d)/${RUN_NAME}}
 
 echo "[$(date)] $RUN_NAME | host=$(hostname) | steps=$MAX_STEPS | global_batch=$GLOBAL_BATCH"

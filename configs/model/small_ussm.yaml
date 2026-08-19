@@ -43,3 +43,12 @@ boundary_impl: layer_major
 # tests/test_bissm_diffusion_integration.py, and costs about one extra forward
 # over the prefix.
 checkpoint_boundary_prefill: false
+
+# Ceilings on the SSM's initial state retention. Per-step retention is
+# exp(A*dt) with A drawn from (1, ssm_a_init_max) and dt from
+# (1e-3, ssm_dt_max), so lowering either initialises slower-decaying heads.
+# Defaults reproduce the original hardcoded behaviour: at 16.0/0.1 the measured
+# per-head half-life is 4.66 nt and no head reaches 256, while the C-a range
+# measurement shows the data carries right-context value out to about 1 kb.
+ssm_a_init_max: 16.0
+ssm_dt_max: 0.1

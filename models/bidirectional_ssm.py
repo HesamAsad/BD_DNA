@@ -145,6 +145,8 @@ class BiMambaLayer(nn.Module):
       mlp_ratio: float,
       dropout: float,
       backend: str,
+      a_init_max: float = 16.0,
+      dt_max: float = 1e-1,
   ):
     super().__init__()
     self.mixer_norm = RMSNorm(dim)
@@ -157,7 +159,15 @@ class BiMambaLayer(nn.Module):
       expand=expand,
       headdim=headdim,
       chunk_size=chunk_size,
-      backend=backend)
+      backend=backend,
+      # Per-step state retention is exp(A*dt) with A = -exp(A_log) and
+      # dt = softplus(.+dt_bias), so these two ceilings set how long suffix
+      # information survives. At the defaults the measured per-head half-life
+      # is 4.66 nucleotides and no head exceeds 256, while the C-a range
+      # measurement shows the DATA carries right-context value out to ~1 kb.
+      # Lowering either ceiling initialises slower-decaying heads.
+      A_init_range=(1.0, float(a_init_max)),
+      dt_max=float(dt_max))
     self.mlp_norm = RMSNorm(dim)
     self.mlp = FeedForward(dim, mlp_ratio, dropout)
     self.dropout = nn.Dropout(dropout)
@@ -258,7 +268,9 @@ class BidirectionalSSM(nn.Module):
         chunk_size=int(model.get("ssm_chunk_size", 128)),
         mlp_ratio=float(model.get("mlp_ratio", 4.0)),
         dropout=float(model.dropout),
-        backend=str(model.get("ssm_backend", "auto")))
+        backend=str(model.get("ssm_backend", "auto")),
+        a_init_max=float(model.get("ssm_a_init_max", 16.0)),
+        dt_max=float(model.get("ssm_dt_max", 1e-1)))
       for _ in range(int(model.n_blocks))
     ])
     self.final_norm = RMSNorm(self.hidden_size)
