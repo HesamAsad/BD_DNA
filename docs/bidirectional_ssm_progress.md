@@ -611,7 +611,7 @@ gradient unchanged (tests in `tests/test_bissm_diffusion_integration.py`). It
 does not pay for itself at 8192 and is off by default. It is REQUIRED past
 ~16384: at 32768 micro batch 2 the stored path needs ~138 of 139.72 GiB.
 
-### The crossover is at L ~= 18,600 nt
+### The crossover is at L ~= 14,900 nt (superseded value: 18,600)
 
 Micro batch 2, one H200:
 
@@ -651,5 +651,33 @@ A mid-run report of a "steady 0.007 lead" for BiSSM was a log-reading error
 **Do not compare these NLLs to the 8192 rows** -- 2000 steps against 8000.
 Both arms took that hit equally, so arm-vs-arm is sound; level-vs-level is not.
 
-**Net:** past ~18,600 nt the SSM trains 1.38x faster for 0.005 nats. That is a
-speed and memory claim with a measured price, not a modelling claim.
+**Net:** past ~14,900 nt the SSM trains faster, for 0.005 nats. That is a speed
+claim with a measured price, not a modelling claim.
+
+**The crossover moved twice as the implementation improved, so quote the last
+value.** 18,557 was measured before any of the memory work; 13,137 came from
+three points on a partially-fixed tree; **14,896** is the current figure, from
+five points spanning 2k-32k on the tree at commit 5dad03c
+(scripts/eval/scaling_curves.py, results/figures/). Measured ratios,
+Transformer-BD over BiSSM at micro batch 2:
+
+| L | ratio | ahead |
+|---:|---:|---|
+| 2,048 | 5.27x | Transformer |
+| 4,096 | 2.76x | Transformer |
+| 8,192 | 1.34x | Transformer |
+| 16,384 | 0.90x | **BiSSM** |
+| 32,768 | 0.60x | **BiSSM** |
+
+The 1.38x figure from the 32k training run stands as a *training* measurement at
+that one length; the scaling sweep above is the microbenchmark it was predicted
+from, re-run on the current code.
+
+**The three scalings tell different stories and must not be conflated.** FLOPs:
+attention 3.5x per doubling, the scan 2.0x -- a 10x gap by 131k. Throughput: the
+crossover sits at ~14,900, far from where FLOPs alone predict, because a Mamba-2
+scan feeds tensor cores far worse than a flash-attention matmul; at 8,192 the SSM
+does 21% FEWER FLOPs yet runs 1.34x slower. Memory: BOTH families are linear
+(~2x per doubling), because flash attention never materialises the L x L score
+matrix -- the SSM sits above the Transformer at every length and no length
+reverses it.
