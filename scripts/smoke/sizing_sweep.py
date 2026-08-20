@@ -59,17 +59,25 @@ ARMS = {
   "bissm": ("small_bissm", "bd3lm_bissm", True),
   "ussm": ("small_ussm", "bd3lm_ussm", True),
   "dit": ("small", "bd3lm", False),
+  # The AR arms are the honest apples-to-apples memory comparison: neither does
+  # a boundary prefill (diffusion.py routes only bd3lm through
+  # _forward_pass_bissm) and neither doubles the mixer, so what is left is the
+  # per-token cost of a Mamba-2 layer against a causal attention layer.
+  "ussm-ar": ("small_ussm", "ar", False),
+  "dit-ar": ("small_ar_transformer", "ar", False),
 }
+AR_ARMS = {"ussm-ar", "dit-ar"}
 
 
 def build(arm, length, block_size, batch_size, checkpoint_prefill):
   model_cfg, algo_cfg, supports_checkpoint = ARMS[arm]
+  is_ar = arm in AR_ARMS
   overrides = [
     f"model={model_cfg}",
     f"algo={algo_cfg}",
     "data=carbon-prokaryote",
     f"model.length={length}",
-    f"block_size={block_size}",
+    f"block_size={1 if is_ar else block_size}",
     f"loader.batch_size={batch_size}",
     f"loader.eval_batch_size={batch_size}",
     "loader.global_batch_size=64",
@@ -80,12 +88,14 @@ def build(arm, length, block_size, batch_size, checkpoint_prefill):
     overrides.append("model.active_blocks=all")
     overrides.append(
       f"model.checkpoint_boundary_prefill={str(bool(checkpoint_prefill)).lower()}")
-  else:
+  elif arm == "dit":
     # `configs/model/small.yaml` ships `attn_backend: flash_attn`, which
     # `DIT.gen_mask` does not accept -- the production launcher overrides it to
     # `flex` (scripts/train/train_dna_bd3lm_prok_tuned.sh:50). Match that, or
     # the arm dies before it measures anything.
     overrides.append("model.attn_backend=flex")
+  if arm == "ussm-ar":
+    overrides.append("algo.backbone=ussm")
   with hydra.initialize_config_dir(
       version_base=None, config_dir=str(REPO / "configs")):
     config = hydra.compose(config_name="config", overrides=overrides)
