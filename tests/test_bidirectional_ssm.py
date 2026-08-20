@@ -51,6 +51,49 @@ def test_sequential_commits_match_one_shot_clean_prefix():
   _assert_cache_close(actual, expected)
 
 
+@pytest.mark.parametrize("block_size,conv_size", [(8, 4), (3, 4), (8, 1)])
+def test_fused_bidirectional_matches_two_call_spelling(block_size, conv_size):
+  """`bidirectional_impl` is a rollback switch, not a behaviour knob.
+
+  The fused path shares one `in_proj` and one `out_proj` across the two
+  directions and reads the reverse convolution off the unflipped projection
+  with a reversed kernel. In float64 that reproduces the two-call spelling to
+  machine precision, gradients included -- `block_size < conv_size` exercises
+  the short-segment fallback and `conv_size=1` the degenerate kernel.
+  """
+  def build(impl):
+    torch.manual_seed(11)
+    cfg = _config()
+    cfg.block_size = block_size
+    cfg.model.ssm_conv_size = conv_size
+    cfg.model.bidirectional_impl = impl
+    return BidirectionalSSM(cfg, vocab_size=13).eval().double()
+
+  split, fused = build("split"), build("fused")
+  fused.load_state_dict(split.state_dict())
+  left_ids = torch.randint(0, 13, (2, 12))
+  right_ids = torch.randint(0, 13, (2, 9))
+  noisy = torch.randint(0, 13, (2, block_size))
+
+  outputs, gradients = [], []
+  for model in (split, fused):
+    logits = model.forward_active(
+      noisy, None,
+      model.prefill_left(left_ids),
+      model.prefill_right(right_ids))
+    model.zero_grad(set_to_none=True)
+    logits.square().sum().backward()
+    outputs.append(logits.detach())
+    gradients.append(
+      {name: p.grad.clone() for name, p in model.named_parameters()})
+
+  torch.testing.assert_close(outputs[0], outputs[1], atol=1e-12, rtol=1e-12)
+  for name, expected in gradients[0].items():
+    torch.testing.assert_close(
+      gradients[1][name], expected, atol=1e-10, rtol=1e-9,
+      msg=lambda m, name=name: f"gradient mismatch for {name}\n{m}")
+
+
 def test_active_denoising_does_not_mutate_clean_caches():
   model = _model()
   left = model.prefill_left(torch.randint(0, 13, (2, 6)))
@@ -318,3 +361,95 @@ def test_sampler_commits_only_when_store_flag_is_set():
   model(block, None, sample_mode=True, store_kv=False)
   _assert_cache_close(model._sampling_left_cache, first_cache)
 
+
+
+@pytest.mark.parametrize("seqlen", [2, 3, 4, 5, 16])
+def test_padded_causal_conv_matches_the_concatenated_spelling(seqlen):
+  """The zero-padded convolution must equal `conv1d(cat(state, raw))` exactly.
+
+  `_causal_conv` no longer concatenates the boundary state onto the projected
+  stream, because that concatenation was a fresh full-width copy that
+  `ConvolutionBackward0` retained -- 104 MiB per layer at batch 4 / L=8192. It
+  now convolves a view of the projection with zero padding and repairs only the
+  first `d_conv - 1` outputs, which are the only ones the boundary state can
+  reach.
+
+  That repair is the part worth pinning: it is an in-place write-back over a
+  narrow slice, and an off-by-one in it would corrupt exactly the tokens at a
+  block boundary -- the positions the whole cache mechanism exists to get
+  right, and the ones a loss curve would hide. `seqlen` is swept across the
+  short-segment branch (`seqlen < d_conv`), the boundary case, and a normal
+  block.
+
+  fp64 on CPU so the comparison is exact rather than tolerance-limited.
+  """
+  from models.mamba2_segment import SegmentMamba2
+
+  torch.manual_seed(0)
+  mixer = SegmentMamba2(
+    d_model=8, d_state=3, d_conv=4, expand=2, headdim=4, chunk_size=4,
+    backend="torch").double()
+  batch = 2
+  xBC = torch.randn(batch, seqlen, mixer.conv_dim, dtype=torch.float64,
+                    requires_grad=True)
+  state = torch.randn(batch, mixer.conv_dim, mixer.d_conv,
+                      dtype=torch.float64, requires_grad=True)
+
+  actual, actual_state = mixer._causal_conv(xBC, state)
+
+  # The spelling this replaced, computed independently here.
+  raw = xBC.transpose(1, 2)
+  history = torch.cat((state, raw), dim=-1)
+  convolved = torch.nn.functional.conv1d(
+    history, mixer.conv1d.weight, mixer.conv1d.bias, groups=mixer.conv_dim)
+  expected = torch.nn.functional.silu(
+    convolved.narrow(-1, 1, seqlen).transpose(1, 2))
+  expected_state = history.narrow(-1, history.shape[-1] - mixer.d_conv,
+                                  mixer.d_conv)
+
+  torch.testing.assert_close(actual, expected, atol=0.0, rtol=0.0)
+  torch.testing.assert_close(actual_state, expected_state, atol=0.0, rtol=0.0)
+
+  # Gradients too: the in-place repair writes into a tensor autograd tracks.
+  grads = torch.autograd.grad(actual.square().sum(), [xBC, state],
+                              retain_graph=True)
+  expected_grads = torch.autograd.grad(expected.square().sum(), [xBC, state])
+  for got, want in zip(grads, expected_grads):
+    torch.testing.assert_close(got, want, atol=1e-12, rtol=1e-12)
+
+
+def test_reverse_causal_conv_matches_convolving_the_flipped_stream():
+  """`_reverse_causal_conv` must equal flipping, convolving, flipping back.
+
+  The fused bidirectional path reads the SHARED forward projection with a
+  reversed kernel rather than materialising a flipped copy. That is only valid
+  if it reproduces the naive spelling exactly, including at the segment edge
+  where the right-hand boundary state enters.
+  """
+  from models.mamba2_segment import SegmentMamba2
+
+  torch.manual_seed(1)
+  mixer = SegmentMamba2(
+    d_model=8, d_state=3, d_conv=4, expand=2, headdim=4, chunk_size=4,
+    backend="torch").double()
+  batch, seqlen = 2, 12
+  xBC = torch.randn(batch, seqlen, mixer.conv_dim, dtype=torch.float64,
+                    requires_grad=True)
+  state = torch.randn(batch, mixer.conv_dim, mixer.d_conv,
+                      dtype=torch.float64, requires_grad=True)
+
+  # Both return the convolved stream in FLIPPED order, which is the order the
+  # reverse scan consumes -- `_reverse_causal_conv` flips at the end precisely
+  # so the caller does not have to. Comparing in original order would be the
+  # wrong reference and fails by an off-by-a-reversal, not by a real defect.
+  actual = mixer._reverse_causal_conv(xBC, state)
+  expected, _ = mixer._causal_conv(
+    torch.flip(xBC, dims=(1,)), state, return_state=False)
+
+  torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
+
+  grads = torch.autograd.grad(actual.square().sum(), [xBC, state],
+                              retain_graph=True)
+  expected_grads = torch.autograd.grad(expected.square().sum(), [xBC, state])
+  for got, want in zip(grads, expected_grads):
+    torch.testing.assert_close(got, want, atol=1e-12, rtol=1e-12)

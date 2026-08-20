@@ -163,26 +163,120 @@ class SegmentMamba2(nn.Module):
       self,
       xBC: torch.Tensor,
       initial_state: torch.Tensor,
-  ) -> tuple[torch.Tensor, torch.Tensor]:
+      return_state: bool = True,
+  ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Depthwise causal convolution continued from an immutable state.
 
     The cache stores the last ``d_conv`` raw projected inputs, matching the
-    state layout in official Mamba-2. The first convolution result belongs to
-    the old cache boundary and is dropped; the remaining results correspond
-    one-for-one with the new segment.
+    state layout in official Mamba-2.
+
+    The obvious spelling, ``conv1d(cat(initial_state, raw))``, costs a whole
+    extra activation: the concatenation is a fresh contiguous copy of the
+    projected stream, and ``ConvolutionBackward0`` retains it. Measured at
+    batch 4 / L=8192 that is 104.1 MiB per layer on top of the 201.5 MiB
+    ``in_proj`` output the graph already holds -- the fused gated RMSNorm keeps
+    ``z``, and ``z``, ``xBC`` and ``dt`` are views of one storage, so a
+    convolution reading a *view* of that storage retains nothing new.
+
+    So the body is a zero-padded convolution straight off the view. Only the
+    first ``d_conv - 1`` outputs are then wrong (they are missing the boundary
+    state), and those are recomputed by a second convolution over a
+    ``2 * d_conv - 1`` column slice and written back in place. Verified
+    bit-identical to the concatenated form in fp64 on CPU and fp32 on CUDA,
+    gradients included, and measured at -104 MiB per layer: -1.22 GiB for
+    uSSM-AR and -3.56 GiB for BiSSM-BD at batch 4 / L=8192.
     """
     raw = xBC.transpose(1, 2)
-    history = torch.cat((initial_state.to(dtype=raw.dtype), raw), dim=-1)
-    convolved = F.conv1d(
-      history,
-      self.conv1d.weight,
-      self.conv1d.bias,
-      groups=self.conv_dim)
-    # `narrow` rather than fancy slicing: same values, but its backward is a
-    # view-scatter instead of a full-tensor zeros+copy.
-    convolved = convolved.narrow(-1, 1, raw.shape[-1]).transpose(1, 2)
-    return F.silu(convolved), history.narrow(
-      -1, history.shape[-1] - self.d_conv, self.d_conv)
+    seqlen = raw.shape[-1]
+    weight, bias = self.conv1d.weight, self.conv1d.bias
+    state = initial_state.to(dtype=raw.dtype)
+    if seqlen < self.d_conv:
+      # Too short to hold a whole window: the boundary state and the segment
+      # both feed the returned cache, so keep the concatenated form.
+      history = torch.cat((state, raw), dim=-1)
+      convolved = F.conv1d(history, weight, bias, groups=self.conv_dim)
+      # `narrow` rather than fancy slicing: same values, but its backward is a
+      # view-scatter instead of a full-tensor zeros+copy.
+      convolved = convolved.narrow(-1, 1, seqlen).transpose(1, 2)
+      if not return_state:
+        return F.silu(convolved), None
+      return F.silu(convolved), history.narrow(
+        -1, history.shape[-1] - self.d_conv, self.d_conv).contiguous()
+
+    pad = self.d_conv - 1
+    # Output j spans raw[j - pad .. j], zero-filled where the boundary state
+    # belongs, so every output from `pad` on is already final.
+    full = F.conv1d(raw, weight, bias, groups=self.conv_dim, padding=pad)
+    head = F.conv1d(
+      torch.cat((state, raw.narrow(-1, 0, pad)), dim=-1),
+      weight, bias, groups=self.conv_dim).narrow(-1, 1, pad)
+    # A convolution's backward never reads its own output, so overwriting the
+    # `pad` columns the zero padding got wrong only inserts a CopySlices node.
+    # Writing in place rather than re-concatenating avoids a second full-width
+    # copy that measured 0.26 ms per layer at batch 4 / L=8192.
+    full.narrow(-1, 0, pad).copy_(head)
+    convolved = F.silu(full.narrow(-1, 0, seqlen).transpose(1, 2))
+    if not return_state:
+      return convolved, None
+    # `.contiguous()`: the returned state must not be a view of a full-length
+    # tensor, or holding the cache pins the whole segment's projections --
+    # 104 MiB per layer that a no-grad prefill would otherwise free.
+    return (convolved,
+            raw.narrow(-1, seqlen - self.d_conv, self.d_conv).contiguous())
+
+  def _reverse_causal_conv(
+      self,
+      xBC: torch.Tensor,
+      initial_state: torch.Tensor,
+  ) -> torch.Tensor:
+    """The reverse direction's causal conv, read off the *unflipped* stream.
+
+    The reverse scan consumes ``flip(u)``, and ``in_proj`` is per-position, so
+    its projection is exactly ``flip(in_proj(u))``. The convolution, however,
+    is genuinely direction-dependent: forward output ``j`` spans
+    ``raw[j-3 .. j]`` while the reverse direction's output at the same original
+    position spans ``raw[j .. j+3]``. What makes them shareable anyway is that
+    an anti-causal convolution is a causal convolution with a reversed kernel,
+
+        conv(flip(raw), w)[t] = conv(raw, flip(w))[L - 1 - t]
+
+    for a depthwise kernel. So this reads the same ``raw`` view the forward
+    direction reads -- no flipped copy of the 3224-wide projection -- runs
+    ``flip(weight)`` over it, and flips only the 1664-wide convolution output,
+    which the caller has to materialise in reverse order for the scan anyway.
+
+    The boundary is the mirror image of ``_causal_conv``'s: zero padding gets
+    the last ``d_conv - 1`` outputs wrong instead of the first, and the right
+    cache supplies the missing columns. That cache stores the flipped stream's
+    trailing window, i.e. ``[raw[L+3], raw[L+2], raw[L+1], raw[L]]``, so
+    ``flip(state)`` is literally the continuation of ``raw`` past the block.
+    """
+    raw = xBC.transpose(1, 2)
+    seqlen = raw.shape[-1]
+    weight = self.conv1d.weight.flip(-1)
+    bias = self.conv1d.bias
+    state = initial_state.to(dtype=raw.dtype)
+    pad = self.d_conv - 1
+    if seqlen < self.d_conv:
+      # Too short for the padded form to have any already-final column; fall
+      # back to the explicit flipped concatenation.
+      history = torch.cat((state, torch.flip(raw, dims=(-1,))), dim=-1)
+      convolved = F.conv1d(
+        history, self.conv1d.weight, bias, groups=self.conv_dim)
+      return F.silu(convolved.narrow(-1, 1, seqlen).transpose(1, 2))
+
+    # Column `s + pad` of `full` is the reverse-direction output at original
+    # position `s`; the last `pad` of them are missing the boundary state.
+    full = F.conv1d(raw, weight, bias, groups=self.conv_dim, padding=pad)
+    tail = F.conv1d(
+      torch.cat((raw.narrow(-1, seqlen - pad, pad), state.flip(-1)), dim=-1),
+      weight, bias, groups=self.conv_dim).narrow(-1, 0, pad)
+    full.narrow(-1, seqlen, pad).copy_(tail)
+    # Flip *before* the SiLU: `SiluBackward` saves its input, so whichever
+    # tensor it reads stays resident. Feeding it the flipped copy lets the
+    # (equally sized) convolution output be freed instead of both being held.
+    return F.silu(
+      torch.flip(full.narrow(-1, pad, seqlen).transpose(1, 2), dims=(1,)))
 
   def _reference_scan(
       self,
@@ -219,7 +313,8 @@ class SegmentMamba2(nn.Module):
       B: torch.Tensor,
       C: torch.Tensor,
       initial_state: torch.Tensor,
-  ) -> tuple[torch.Tensor, torch.Tensor]:
+      return_final_state: bool = True,
+  ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     result = mamba_chunk_scan_combined(
       x,
       dt,
@@ -231,8 +326,8 @@ class SegmentMamba2(nn.Module):
       dt_bias=self.dt_bias,
       initial_states=initial_state,
       dt_softplus=True,
-      return_final_states=True)
-    return result
+      return_final_states=return_final_state)
+    return result if return_final_state else (result, None)
 
   def _zero_ssm(
       self,
@@ -252,10 +347,12 @@ class SegmentMamba2(nn.Module):
       C: torch.Tensor,
       initial_ssm: Optional[torch.Tensor],
       backend: str,
-  ) -> tuple[torch.Tensor, torch.Tensor]:
+      return_final_state: bool = True,
+  ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Dispatch one selective scan, treating ``None`` as the zero state."""
     if backend == "fused":
-      return self._fused_scan(x, dt, B, C, initial_ssm)
+      return self._fused_scan(
+        x, dt, B, C, initial_ssm, return_final_state=return_final_state)
     if initial_ssm is None:
       initial_ssm = self._zero_ssm(x.shape[0], x.device, x.dtype)
     return self._reference_scan(x, dt, B, C, initial_ssm)
@@ -285,16 +382,29 @@ class SegmentMamba2(nn.Module):
     trade to weigh. The eager path is kept for CPU and for the `torch` backend
     used by the unit tests, where the fused kernel is unavailable.
     """
+    return self.out_proj(self._gated_norm(y, z))
+
+  def _gated_norm(
+      self,
+      y: torch.Tensor,
+      z: torch.Tensor,
+  ) -> torch.Tensor:
+    """``_gated_output`` without the output projection.
+
+    Split out so a bidirectional layer can sum the two directions *before*
+    projecting: ``out_proj`` is linear, so ``out_proj(a) + out_proj(b)`` and
+    ``out_proj(a + b)`` compute the same function, but the second retains one
+    ``[batch, length, d_inner]`` input for backward instead of two and runs one
+    GEMM instead of two.
+    """
     y = rearrange(y, "b l h p -> b l (h p)")
     if rmsnorm_fn is not None and y.is_cuda:
-      return self.out_proj(
-        rmsnorm_fn(y, self.norm_weight, None, z=z, eps=1e-5,
-                   norm_before_gate=False))
+      return rmsnorm_fn(y, self.norm_weight, None, z=z, eps=1e-5,
+                        norm_before_gate=False)
     y = y * F.silu(z)
     variance = y.float().pow(2).mean(dim=-1, keepdim=True)
     y = y * torch.rsqrt(variance.to(dtype=y.dtype) + 1e-5)
-    y = y * self.norm_weight.to(dtype=y.dtype)
-    return self.out_proj(y)
+    return y * self.norm_weight.to(dtype=y.dtype)
 
   def _block_state_passing(
       self,
@@ -374,25 +484,34 @@ class SegmentMamba2(nn.Module):
       [self.d_inner, self.conv_dim, self.nheads],
       dim=-1)
 
-    # One full-length causal convolution from a zero state.  `history` retains
-    # every raw projected input, so a block's convolution boundary state is a
-    # strided window of it rather than a separate per-block convolution.
+    # One full-length causal convolution from a zero state.  The boundary here
+    # *is* zero, so a zero-padded convolution over a view of the `in_proj`
+    # output is already exact -- no concatenated copy for the graph to retain
+    # (see `_causal_conv`; same 104 MiB per layer).
     raw = xBC.transpose(1, 2)
-    history = torch.cat(
-      (torch.zeros(
-        batch_size, self.conv_dim, self.d_conv,
-        device=raw.device, dtype=raw.dtype), raw), dim=-1)
     convolved = F.conv1d(
-      history,
+      raw,
       self.conv1d.weight,
       self.conv1d.bias,
-      groups=self.conv_dim)
-    xBC = F.silu(convolved.narrow(-1, 1, seqlen).transpose(1, 2))
-    # Window i spans history[..., i * block : i * block + d_conv], i.e. exactly
-    # the d_conv raw inputs preceding token i * block; window 0 is the zero
-    # state and window num_seg is the final state.
-    conv_states = history.unfold(-1, self.d_conv, block_size).permute(
-      0, 2, 1, 3).contiguous()
+      groups=self.conv_dim,
+      padding=self.d_conv - 1)
+    xBC = F.silu(convolved.narrow(-1, 0, seqlen).transpose(1, 2))
+    # Window i holds the d_conv raw inputs preceding token i * block, so
+    # window 0 is the zero state and window num_seg is the final state.  For
+    # i >= 1 that is raw[..., i * block - d_conv : i * block]; block 0's window
+    # is the only one that needs the zeros spelled out.
+    zero_window = raw.new_zeros(batch_size, 1, self.conv_dim, self.d_conv)
+    if block_size >= self.d_conv:
+      windows = raw.narrow(
+        -1, block_size - self.d_conv, seqlen - block_size + self.d_conv
+      ).unfold(-1, self.d_conv, block_size).permute(0, 2, 1, 3)
+      conv_states = torch.cat((zero_window, windows), dim=1)
+    else:
+      # Blocks shorter than the kernel make consecutive windows overlap into
+      # the zero prefix; materialize it rather than special-case the strides.
+      history = torch.cat((zero_window.squeeze(1), raw), dim=-1)
+      conv_states = history.unfold(-1, self.d_conv, block_size).permute(
+        0, 2, 1, 3).contiguous()
 
     x, B, C = torch.split(
       xBC, [self.d_inner, self.d_state, self.d_state], dim=-1)
@@ -452,6 +571,100 @@ class SegmentMamba2(nn.Module):
     y, final_ssm = self._scan(
       x, dt, B, C, initial_state.ssm, self._select_backend(u))
     return self._gated_output(y, z), Mamba2State(final_conv, final_ssm)
+
+  def scan_bidirectional(
+      self,
+      u: torch.Tensor,
+      left_state: Mamba2State,
+      right_state: Mamba2State,
+  ) -> torch.Tensor:
+    """Forward + reverse scan of ``u`` sharing one ``in_proj`` and ``out_proj``.
+
+    Equivalent to
+
+        scan_segment(u, left)[0]
+        + flip(scan_segment(flip(u), right)[0], 1)
+
+    which is what ``BiMambaLayer.scan_active`` used to spell out. That form
+    runs the whole mixer twice, and three of its four stages do not need to be:
+
+    * ``in_proj`` is per-position, so the reverse direction's projection is a
+      flip of the forward direction's. Computing it twice costs a second
+      ``d_model x (2*d_inner + 2*d_state + nheads)`` GEMM *and* retains a
+      second full-width projection for backward.
+    * the flip of the layer input is itself an extra retained tensor, because
+      ``in_proj`` saves whatever tensor it was handed.
+    * ``out_proj`` is linear, so the two directions can be summed before it
+      rather than after.
+
+    Only the convolution and the scan are genuinely direction-dependent, and
+    ``_reverse_causal_conv`` shows the convolution can still read the shared
+    projection. The scan cannot: the SSD kernel is causal in memory order, so
+    the reverse direction's operands must be materialised reversed.
+
+    The final boundary states are deliberately not computed. Nothing consumes
+    them -- an active block never continues a scan -- and asking the kernel for
+    them also makes backward carry a ``dfinal_states`` term.
+    """
+    if self.out_proj.bias is not None:
+      # This routine sums the two directions BEFORE `out_proj`, where the
+      # two-call spelling sums after. Those agree only for a linear map: with a
+      # bias the split form adds it twice and this form once, so the two would
+      # silently disagree by exactly one bias term. `bias=False` is the
+      # constructor default and every equivalence test uses it, so nothing in
+      # the suite would catch that; fail loudly instead.
+      raise NotImplementedError(
+        "scan_bidirectional requires out_proj without bias; use "
+        "model.bidirectional_impl='split' if a bias is needed")
+    if u.ndim != 3 or u.shape[-1] != self.d_model:
+      raise ValueError(
+        f"Expected [batch, length, {self.d_model}], received {tuple(u.shape)}")
+    batch_size, seqlen, _ = u.shape
+    expected_conv = (batch_size, self.conv_dim, self.d_conv)
+    expected_ssm = (batch_size, self.nheads, self.headdim, self.d_state)
+    for name, state in (("left", left_state), ("right", right_state)):
+      if tuple(state.conv.shape) != expected_conv:
+        raise ValueError(
+          f"Invalid {name} convolution state shape: {tuple(state.conv.shape)}")
+      if tuple(state.ssm.shape) != expected_ssm:
+        raise ValueError(
+          f"Invalid {name} SSM state shape: {tuple(state.ssm.shape)}")
+    if seqlen == 0:
+      return u
+
+    zxbcdt = self.in_proj(u)
+    z, xBC, dt = torch.split(
+      zxbcdt,
+      [self.d_inner, self.conv_dim, self.nheads],
+      dim=-1)
+    backend = self._select_backend(u)
+
+    def heads(convolved):
+      x, B, C = torch.split(
+        convolved, [self.d_inner, self.d_state, self.d_state], dim=-1)
+      return (rearrange(x, "b l (h p) -> b l h p", p=self.headdim),
+              rearrange(B, "b l n -> b l 1 n"),
+              rearrange(C, "b l n -> b l 1 n"))
+
+    forward_xBC, _ = self._causal_conv(
+      xBC, left_state.conv, return_state=False)
+    x, B, C = heads(forward_xBC)
+    forward_y, _ = self._scan(
+      x, dt, B, C, left_state.ssm, backend, return_final_state=False)
+
+    reverse_xBC = self._reverse_causal_conv(xBC, right_state.conv)
+    x, B, C = heads(reverse_xBC)
+    reverse_y, _ = self._scan(
+      x, torch.flip(dt, dims=(1,)), B, C, right_state.ssm, backend,
+      return_final_state=False)
+    # Flip the scan output rather than `z`: both are one
+    # ``[batch, length, d_inner]`` copy that the gated norm then retains, but
+    # restoring the original order here is what lets the two directions share
+    # `out_proj`, and it removes the flip of the projected output.
+    reverse_y = torch.flip(reverse_y, dims=(1,))
+
+    return self.out_proj(
+      self._gated_norm(forward_y, z) + self._gated_norm(reverse_y, z))
 
   def forward(self, u: torch.Tensor) -> torch.Tensor:
     output, _ = self.scan_segment(u)

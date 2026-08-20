@@ -69,7 +69,8 @@ ARMS = {
 AR_ARMS = {"ussm-ar", "dit-ar"}
 
 
-def build(arm, length, block_size, batch_size, checkpoint_prefill):
+def build(arm, length, block_size, batch_size, checkpoint_prefill,
+          extra=()):
   model_cfg, algo_cfg, supports_checkpoint = ARMS[arm]
   is_ar = arm in AR_ARMS
   overrides = [
@@ -96,6 +97,7 @@ def build(arm, length, block_size, batch_size, checkpoint_prefill):
     overrides.append("model.attn_backend=flex")
   if arm == "ussm-ar":
     overrides.append("algo.backbone=ussm")
+  overrides.extend(extra)
   with hydra.initialize_config_dir(
       version_base=None, config_dir=str(REPO / "configs")):
     config = hydra.compose(config_name="config", overrides=overrides)
@@ -103,14 +105,16 @@ def build(arm, length, block_size, batch_size, checkpoint_prefill):
 
 
 def run_case(arm, length, block_size, batch_size, checkpoint_prefill,
-             warmup, iters, device):
+             warmup, iters, device, extra=()):
   row = {
     "arm": arm, "length": length, "block_size": block_size,
     "batch_size": batch_size,
     "checkpoint_boundary_prefill": bool(checkpoint_prefill),
+    "overrides": list(extra),
   }
   try:
-    config = build(arm, length, block_size, batch_size, checkpoint_prefill)
+    config = build(
+      arm, length, block_size, batch_size, checkpoint_prefill, extra)
     torch.manual_seed(0)
     model = Diffusion(config, DNATokenizer()).to(device)
     model.train()
@@ -160,6 +164,9 @@ def main_cli():
   parser.add_argument("--warmup", type=int, default=2)
   parser.add_argument("--iters", type=int, default=5)
   parser.add_argument("--output", type=Path, default=None)
+  parser.add_argument(
+      "--overrides", default="",
+      help="comma-separated extra hydra overrides applied to every case")
   args = parser.parse_args()
 
   if not torch.cuda.is_available():
@@ -169,6 +176,9 @@ def main_cli():
   print(f"device: {torch.cuda.get_device_name(device)}  "
         f"total {total:.2f} GiB\n")
 
+  extra = tuple(o.strip() for o in args.overrides.split(",") if o.strip())
+  if extra:
+    print(f"extra overrides: {list(extra)}\n")
   modes = [m.strip() for m in args.checkpoint_modes.split(",") if m.strip()]
   rows = []
   header = (f"{'arm':<7}{'L':>7}{'batch':>6}{'ckpt':>6}"
@@ -181,7 +191,8 @@ def main_cli():
         arm_modes = modes if ARMS[arm][2] else ["off"]
         for mode in arm_modes:
           row = run_case(arm, length, args.block_size, batch_size,
-                         mode == "on", args.warmup, args.iters, device)
+                         mode == "on", args.warmup, args.iters, device,
+                         extra)
           rows.append(row)
           # `run_case`'s model, optimizer and activations are freed when it
           # returns; release the caching allocator's blocks too, so the next

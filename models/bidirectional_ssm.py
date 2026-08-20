@@ -147,8 +147,14 @@ class BiMambaLayer(nn.Module):
       backend: str,
       a_init_max: float = 16.0,
       dt_max: float = 1e-1,
+      bidirectional_impl: str = "fused",
   ):
     super().__init__()
+    if bidirectional_impl not in {"fused", "split"}:
+      raise ValueError(
+        "model.bidirectional_impl must be 'fused' or 'split', got "
+        f"{bidirectional_impl!r}")
+    self.bidirectional_impl = bidirectional_impl
     self.mixer_norm = RMSNorm(dim)
     # Direction weights are deliberately shared, matching common BiMamba
     # practice and avoiding a needless 2x parameter increase.
@@ -207,13 +213,18 @@ class BiMambaLayer(nn.Module):
       right_state: Mamba2State,
   ) -> torch.Tensor:
     normalized = self.mixer_norm(x)
-    forward, _ = self.mixer.scan_segment(normalized, left_state)
-    reverse, _ = self.mixer.scan_segment(
-      torch.flip(normalized, dims=(1,)), right_state)
-    reverse = torch.flip(reverse, dims=(1,))
     # The paper uses a direct sum: no zero-initialized route gate that can
     # silently disable either context direction.
-    x = x + self.dropout(forward + reverse)
+    if self.bidirectional_impl == "fused":
+      # Same sum, but the input projection and the output projection are run
+      # once instead of once per direction; see `scan_bidirectional`.
+      mixed = self.mixer.scan_bidirectional(normalized, left_state, right_state)
+    else:
+      forward, _ = self.mixer.scan_segment(normalized, left_state)
+      reverse, _ = self.mixer.scan_segment(
+        torch.flip(normalized, dims=(1,)), right_state)
+      mixed = forward + torch.flip(reverse, dims=(1,))
+    x = x + self.dropout(mixed)
     x = x + self.dropout(self.mlp(self.mlp_norm(x)))
     return x
 
@@ -270,7 +281,9 @@ class BidirectionalSSM(nn.Module):
         dropout=float(model.dropout),
         backend=str(model.get("ssm_backend", "auto")),
         a_init_max=float(model.get("ssm_a_init_max", 16.0)),
-        dt_max=float(model.get("ssm_dt_max", 1e-1)))
+        dt_max=float(model.get("ssm_dt_max", 1e-1)),
+        bidirectional_impl=str(
+          model.get("bidirectional_impl", "fused")))
       for _ in range(int(model.n_blocks))
     ])
     self.final_norm = RMSNorm(self.hidden_size)
