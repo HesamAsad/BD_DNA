@@ -232,9 +232,21 @@ class LayerNorm(nn.Module):
     self.weight = nn.Parameter(torch.ones([dim]))
     self.dim = dim
   def forward(self, x):
+    # Hand the weight to `layer_norm` rather than multiplying afterwards. The
+    # split form retains the normalized tensor for that multiply -- a full-width
+    # fp32 activation per call, and the DiT has two per block. Folding the scale
+    # into the fused op saves only the input.
+    #
+    # This is the SAME defect the SSM's RMSNorm had, and both are fixed
+    # together on purpose: every memory ratio in this project is SSM-vs-DiT, so
+    # fixing one side alone would have flattered that side by roughly 0.1x.
+    #
+    # Precision is deliberately unchanged. `diffusion.py` runs this tail in
+    # FP32 because the DiT does not merely lose accuracy in bf16, it fails to
+    # train; the multiply was already fp32 (both operands are), so moving it
+    # inside the autocast-disabled block keeps the arithmetic identical.
     with torch.amp.autocast('cuda', enabled=False):
-      x = F.layer_norm(x.float(), [self.dim])
-    return x * self.weight[None, None, :]
+      return F.layer_norm(x.float(), [self.dim], weight=self.weight.float())
 
 
 def residual_linear(x, W, x_skip, residual_scale):

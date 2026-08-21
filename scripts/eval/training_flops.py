@@ -37,6 +37,33 @@ multiplies by a decay mask -- it does not skip the masked triangle, unlike
 flash/flex attention, which do skip fully-masked tiles and are therefore
 charged only the permitted pairs.
 
+**THESE NUMBERS ARE A MODULE-LEVEL LOWER BOUND FOR THE SSM ARMS.** Validated
+against `torch.utils.flop_counter.FlopCounterMode` on an H200 (LSF 116338,
+116373; results/sizing/measured_flops.json, flop_breakdown.json):
+
+  Transformer arms  EXACT. The counter is blind to flash attention, and its
+                    shortfall equals this file's attention term to the decimal
+                    at every length: 1.48 / 8.92 / 83.92 TFLOP per sequence at
+                    L = 2048 / 8192 / 32768. The formula is correct.
+
+  SSM arms          UNDERCOUNT by a constant 1.35x (bissm) to 1.37x (ussm-ar),
+                    identical at every length from 2k to 32k. Every PER-MODULE
+                    term here is nonetheless exactly right: summed over leaves,
+                    in_proj + conv1d + out_proj + mlp + scan + head = 1294.60
+                    GFLOP against 1294.61 predicted. The gap is 486 GFLOP --
+                    27% of the dispatched total, 19.8M FLOP per token per layer
+                    -- that the counter attributes to NO module, i.e. work
+                    outside nn.Module boundaries which a module-by-module
+                    derivation cannot see by construction. It has not been
+                    traced to a specific operation.
+
+So: quote these figures for the Transformer arms, and quote MEASURED FLOPs for
+the SSM arms (scripts/eval/measured_flops_sweep.py). The direction of the error
+is against us -- the SSM arms cost MORE than this file reports, which weakens
+rather than strengthens any efficiency claim built on them. In particular the
+"our compute is 0.33x dnaHNet's smallest budget" line for uSSM-AR is optimistic
+by roughly 37%.
+
 Run:  python scripts/eval/training_flops.py
 """
 

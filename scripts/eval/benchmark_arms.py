@@ -56,11 +56,36 @@ sys.path.insert(0, str(REPO))
 import dataloader  # noqa: E402
 from diffusion import Diffusion  # noqa: E402
 
+try:
+  from torch.utils.flop_counter import FlopCounterMode
+except ImportError:
+  FlopCounterMode = None
+
 for _name, _resolver in (("cwd", os.getcwd),
                          ("device_count", torch.cuda.device_count),
                          ("eval", eval),
                          ("div_up", lambda x, y: (x + y - 1) // y)):
   OmegaConf.register_new_resolver(_name, _resolver, replace=True)
+
+
+def _analytic_step_tflop(label, length, batch):
+  """The analytic per-sequence FLOPs, scaled to one step of `batch`.
+
+  training_flops.py reports a whole-run total; scaling_curves exposes the
+  per-sequence formula. Both are fwd+bwd, so this is directly comparable to
+  what FlopCounterMode counts for one step.
+  """
+  try:
+    from scripts.eval.scaling_curves import flops_per_sequence
+    key = {"uSSM-AR": "ussm-ar", "Transformer-AR": "dit-ar",
+           "Transformer-BD": "dit", "BiSSM-BD": "bissm", "BiSSM-Ca": "bissm",
+           "BiSSM-human8k": "bissm", "BiSSM-human32k": "bissm",
+           "uSSM-BD": None}.get(label)
+    if key is None:
+      return None
+    return flops_per_sequence(key, length) * batch / 1e12
+  except Exception:  # noqa: BLE001
+    return None
 
 
 def load(checkpoint, batch_size, device):
@@ -108,11 +133,62 @@ def measure_step(model, length, batch_size, device, warmup=2, iters=5):
   return peak, median, batch_size * length / median
 
 
-def measure_nll(model, config, tokenizer, batches, seed, device):
-  """Val NLL on a fixed held-out slice, recomputed rather than scraped."""
+def measure_flops(model, length, batch_size, device):
+  """FLOPs actually dispatched in one fwd+bwd step, counted at runtime.
+
+  This exists because `train_pflop` is ANALYTIC -- hand-derived from the
+  forward paths in training_flops.py -- and an unvalidated formula is a
+  liability. Counting the real dispatch validates the parts it can see.
+
+  It cannot see everything, and the gap is the point rather than a defect:
+  `FlopCounterMode` hooks aten dispatch, so it counts the dense matmuls and
+  convolutions but is blind to flash/flex attention and to mamba-ssm's Triton
+  SSD kernel, both of which run as opaque extensions. So expect
+  measured < analytic, with the shortfall concentrated exactly in the
+  attention or scan term. If the shortfall is instead spread across the linear
+  layers, the analytic formula is wrong and that is worth knowing.
+
+  Returns (measured_tflop_per_step, None) or (None, reason).
+  """
+  if FlopCounterMode is None:
+    return None, "torch.utils.flop_counter unavailable"
+  model.train()
+  x0 = torch.randint(8, 12, (batch_size, length), device=device)
+  attention_mask = torch.ones_like(x0)
+  try:
+    counter = FlopCounterMode(display=False)
+    with counter:
+      loss = model._loss(x0, attention_mask)
+      loss.loss.backward()
+    total = counter.get_total_flops()
+    model.zero_grad(set_to_none=True)
+    del x0, attention_mask, loss
+    return total / 1e12, None
+  except Exception as exc:  # noqa: BLE001
+    return None, f"{type(exc).__name__}: {exc}"
+
+
+def measure_nll(model, config, tokenizer, batches, seed, device,
+                mc_samples=1):
+  """Val NLL on a fixed held-out slice, recomputed rather than scraped.
+
+  Two things this has to get right, both of which bit an earlier version:
+
+  * For a block-diffusion arm `_loss` draws ONE random diffusion time per call,
+    so a single pass is a one-sample Monte Carlo NELBO per batch. That is the
+    same noise source that moved MaveDB scores between MC-8 and MC-128 earlier
+    in this project. `mc_samples` averages repeated passes over the same
+    batches. The AR arms are deterministic, so it is forced to 1 for them and
+    costs nothing.
+  * The sum must be weighted by counted tokens, not averaged over batches, or a
+    short final batch gets equal weight.
+  """
   _, valid_loader = dataloader.get_dataloaders(
     config, tokenizer, skip_train=True, valid_seed=seed)
   model.eval()
+  is_ar = str(config.algo.name) == "ar"
+  draws = 1 if is_ar else max(int(mc_samples), 1)
+  torch.manual_seed(seed)
   total, tokens = 0.0, 0
   with torch.inference_mode():
     for index, batch in enumerate(valid_loader):
@@ -121,13 +197,14 @@ def measure_nll(model, config, tokenizer, batches, seed, device):
       x0 = batch["input_ids"].to(device)
       mask = batch.get("attention_mask")
       mask = torch.ones_like(x0) if mask is None else mask.to(device)
-      out = model._loss(x0, mask)
+      for _ in range(draws):
+        out = model._loss(x0, mask)
       # `_loss` returns a summed NLL and its token count; use them rather than
       # the mean, so short final batches do not get equal weight.
-      total += float(out.nlls.sum())
-      tokens += int(out.token_mask.sum()) if hasattr(out, "token_mask") \
-          else int(out.nlls.numel())
-  return total / max(tokens, 1), tokens
+        total += float(out.nlls.sum())
+        tokens += int(out.token_mask.sum()) if hasattr(out, "token_mask") \
+            else int(out.nlls.numel())
+  return total / max(tokens, 1), tokens, draws
 
 
 def main():
@@ -137,6 +214,9 @@ def main():
   parser.add_argument("--output", type=Path, required=True)
   parser.add_argument("--batch-size", type=int, default=4)
   parser.add_argument("--val-batches", type=int, default=32)
+  parser.add_argument("--mc-samples", type=int, default=8,
+                      help="diffusion times averaged per batch for the "
+                           "block-diffusion arms; ignored for AR")
   parser.add_argument("--warmup", type=int, default=2)
   parser.add_argument("--iters", type=int, default=5)
   parser.add_argument("--seed", type=int, default=1)
@@ -158,7 +238,8 @@ def main():
   print(f"device {torch.cuda.get_device_name(device)}  "
         f"{torch.cuda.get_device_properties(device).total_memory/1024**3:.1f} GiB\n")
   header = (f"{'arm':<16}{'L':>7}{'bs':>4}{'peak GiB':>10}{'tok/s':>10}"
-            f"{'PFLOP':>9}{'val NLL':>10}{'val PPL':>9}")
+            f"{'TF calc':>10}{'TF meas':>10}{'m/c':>7}"
+            f"{'val NLL':>10}{'val PPL':>9}")
   print(header)
   print("-" * len(header))
 
@@ -173,22 +254,37 @@ def main():
       length = int(config.model.length)
       peak, seconds, tps = measure_step(
         model, length, batch, device, args.warmup, args.iters)
+      counted_tflop, flop_note = measure_flops(model, length, batch, device)
       row.update({
         "length": length, "backbone": str(config.algo.backbone),
         "objective": str(config.algo.name), "checkpoint_global_step": step,
         "peak_gib": peak, "step_seconds": seconds, "tokens_per_s": tps,
-        "train_pflop": flops.get(spec.get("flops_key", label)),
+        "train_pflop_analytic": flops.get(spec.get("flops_key", label)),
+        # Per-step, per-batch: comparable to the analytic per-sequence figure
+        # only after dividing by batch size -- reported raw here.
+        "measured_tflop_per_step": counted_tflop,
+        "measured_flop_note": flop_note,
+        "analytic_tflop_per_step": (
+          _analytic_step_tflop(label, length, batch)),
         "pretraining_data": str(OmegaConf.select(config, "data.train")),
       })
       if not args.skip_nll:
-        nll, counted = measure_nll(
-          model, config, tokenizer, args.val_batches, args.seed, device)
+        nll, counted, draws = measure_nll(
+          model, config, tokenizer, args.val_batches, args.seed, device,
+          args.mc_samples)
         row.update({
           "val_nll": nll, "val_ppl": math.exp(nll), "val_tokens": counted,
+          "mc_samples": draws,
           "nll_is_upper_bound": str(config.algo.name) != "ar",
+          "nll_note": ("final-step checkpoint on a fixed slice; NOT the "
+                       "best-during-training value the launcher logs report"),
         })
+      an = row["analytic_tflop_per_step"]
+      me = row["measured_tflop_per_step"]
+      ratio = (me / an) if (an and me) else float("nan")
       print(f"{label:<16}{length:>7}{batch:>4}{peak:>10.2f}{tps:>10.0f}"
-            f"{(row['train_pflop'] or float('nan')):>9.0f}"
+            f"{(an or float('nan')):>10.1f}{(me or float('nan')):>10.1f}"
+            f"{ratio:>7.2f}"
             f"{row.get('val_nll', float('nan')):>10.5f}"
             f"{row.get('val_ppl', float('nan')):>9.4f}")
     except torch.cuda.OutOfMemoryError:

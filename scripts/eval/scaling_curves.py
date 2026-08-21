@@ -141,6 +141,40 @@ def main():
   flop_lengths = [int(v) for v in args.flop_lengths.split(",")]
   flops = {arm: {L: flops_per_sequence(arm, L) / 1e12 for L in flop_lengths}
            for arm in ORDER}
+
+  # Prefer MEASURED FLOPs where the analytic formula is known wrong.
+  #
+  # Running torch's FlopCounterMode against these formulas settled which to
+  # trust, per arm:
+  #   dit-ar  analytic VALIDATED exactly -- counted dense plus the analytic
+  #           attention term reproduces the analytic total to the decimal at
+  #           every length (1.48/8.92/83.92). Keep analytic.
+  #   dit     cannot be counted: flex is compiled and the counter cannot enter
+  #           it, and substituting sdpa measures a DIFFERENT algorithm, since
+  #           sdpa evaluates the full (2L)^2 attention while flex evaluates only
+  #           the mask-permitted pairs. Keep analytic, which the dit-ar result
+  #           validates the machinery of.
+  #   ussm-ar analytic UNDERCOUNTS by a constant 1.37x at every length.
+  #   bissm   analytic UNDERCOUNTS by a constant 1.35x at every length.
+  # For the two SSM arms the measured count is the better number even though it
+  # excludes the Triton scan, so it is a LOWER bound on the truth -- and it is
+  # already above the analytic figure.
+  measured_path = REPO / "results" / "sizing" / "measured_flops.json"
+  measured_arms = {"ussm-ar", "bissm"}
+  flop_source = {arm: "analytic" for arm in ORDER}
+  if measured_path.exists():
+    payload = json.loads(measured_path.read_text())
+    batch = payload.get("batch", 1)
+    for row in payload.get("rows", []):
+      if row.get("arm") in measured_arms and "counted_tflop" in row:
+        flops[row["arm"]][row["length"]] = row["counted_tflop"] / batch
+        flop_source[row["arm"]] = "measured (lower bound; scan uncounted)"
+    # Measured points exist only at the swept lengths; drop analytic points
+    # beyond them so a single curve never mixes the two sources.
+    swept = {r["length"] for r in payload.get("rows", []) if "counted_tflop" in r}
+    for arm in measured_arms:
+      if flop_source[arm] != "analytic":
+        flops[arm] = {L: v for L, v in flops[arm].items() if L in swept}
   mem = {arm: {L: r["peak_gib"] for L, r in d.items()}
          for arm, d in measured.items()}
   tput = {arm: {L: r["nt_per_second"] for L, r in d.items()}
@@ -148,8 +182,9 @@ def main():
 
   args.outdir.mkdir(parents=True, exist_ok=True)
   specs = [
-    ("flops", flops, flop_lengths, "TFLOPs per sequence (fwd+bwd)",
-     "Arithmetic: attention is quadratic, the scan is linear", True),
+    ("flops", flops, sorted({L for d in flops.values() for L in d}),
+     "TFLOPs per sequence (fwd+bwd)",
+     "Arithmetic: attention quadratic, scan linear (SSM = measured)", True),
     ("throughput", tput, sorted({L for d in tput.values() for L in d}),
      "Nucleotides / second", "Throughput: where the crossover really is", False),
     ("memory", mem, sorted({L for d in mem.values() for L in d}),
@@ -192,8 +227,8 @@ def main():
 
   summary = args.outdir / "scaling_data.json"
   summary.write_text(json.dumps(
-    {"flops_tflop_per_sequence": flops, "peak_gib": mem,
-     "nt_per_second": tput,
+    {"flops_tflop_per_sequence": flops, "flop_source": flop_source,
+     "peak_gib": mem, "nt_per_second": tput,
      "note": "FLOPs analytic from training_flops.py; memory and throughput "
              "measured with a real fwd+bwd+AdamW step at micro batch 2, "
              "SSM arms with checkpoint_boundary_prefill=on."},

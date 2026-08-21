@@ -23,7 +23,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
-from .mamba2_segment import Mamba2State, SegmentMamba2
+from .mamba2_segment import Mamba2State, SegmentMamba2, rmsnorm_fn
 
 
 class RMSNorm(nn.Module):
@@ -33,6 +33,21 @@ class RMSNorm(nn.Module):
     self.eps = eps
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
+    """RMS normalisation, fused on CUDA.
+
+    The eager body below retains `normalized` for the weight multiply that
+    follows it -- a full-width activation per call, and there are 25 of these
+    per stack (two per layer plus `final_norm`). Measured at batch 4 / L=8192
+    that is 25 x 96 MiB = 2.34 GiB the fused kernel does not need, because it
+    saves its input and recomputes the rest in backward.
+
+    Same kernel already accepted in production by `SegmentMamba2._gated_output`,
+    with z=None here since there is no gate. Guarded on CUDA: the fused path is
+    unavailable on CPU, and every equivalence test in the suite is CPU-only, so
+    the strict fp64 comparisons keep exercising the eager body below.
+    """
+    if rmsnorm_fn is not None and x.is_cuda:
+      return rmsnorm_fn(x, self.weight, None, eps=self.eps)
     variance = x.float().pow(2).mean(dim=-1, keepdim=True)
     normalized = x * torch.rsqrt(variance.to(dtype=x.dtype) + self.eps)
     return normalized * self.weight.to(dtype=x.dtype)
