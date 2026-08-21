@@ -37,32 +37,60 @@ multiplies by a decay mask -- it does not skip the masked triangle, unlike
 flash/flex attention, which do skip fully-masked tiles and are therefore
 charged only the permitted pairs.
 
-**THESE NUMBERS ARE A MODULE-LEVEL LOWER BOUND FOR THE SSM ARMS.** Validated
-against `torch.utils.flop_counter.FlopCounterMode` on an H200 (LSF 116338,
-116373; results/sizing/measured_flops.json, flop_breakdown.json):
+**THESE NUMBERS ARE CORRECT. QUOTE THEM FOR EVERY ARM.** Validated against
+`torch.utils.flop_counter.FlopCounterMode` on an H200 (LSF 116338, 116373,
+116638, 116639; results/sizing/measured_flops*.json, flop_breakdown.json):
 
   Transformer arms  EXACT. The counter is blind to flash attention, and its
                     shortfall equals this file's attention term to the decimal
                     at every length: 1.48 / 8.92 / 83.92 TFLOP per sequence at
-                    L = 2048 / 8192 / 32768. The formula is correct.
+                    L = 2048 / 8192 / 32768.
 
-  SSM arms          UNDERCOUNT by a constant 1.35x (bissm) to 1.37x (ussm-ar),
-                    identical at every length from 2k to 32k. Every PER-MODULE
-                    term here is nonetheless exactly right: summed over leaves,
-                    in_proj + conv1d + out_proj + mlp + scan + head = 1294.60
-                    GFLOP against 1294.61 predicted. The gap is 486 GFLOP --
-                    27% of the dispatched total, 19.8M FLOP per token per layer
-                    -- that the counter attributes to NO module, i.e. work
-                    outside nn.Module boundaries which a module-by-module
-                    derivation cannot see by construction. It has not been
-                    traced to a specific operation.
+  SSM arms          EXACT for every aten-visible term. The counter reads
+                    1.35x (bissm) to 1.37x (ussm-ar) ABOVE this file, flat at
+                    every length from 2k to 128k. That is the COUNTER
+                    overcounting, not this file undercounting.
 
-So: quote these figures for the Transformer arms, and quote MEASURED FLOPs for
-the SSM arms (scripts/eval/measured_flops_sweep.py). The direction of the error
-is against us -- the SSM arms cost MORE than this file reports, which weakens
-rather than strengthens any efficiency claim built on them. In particular the
-"our compute is 0.33x dnaHNet's smallest budget" line for uSSM-AR is optimistic
-by roughly 37%.
+RESOLVED -- what the 1.35-1.37x actually was. Two independent facts compound:
+
+  1. ATTRIBUTION. mamba2_segment.py never calls self.conv1d(...). It reads
+     self.conv1d.weight / .bias (:191) and calls functional F.conv1d (:197,
+     :209, :210, :264, :270, :271, :492). nn.Conv1d.__call__ therefore never
+     fires, ModuleTracker never opens a bucket, and every conv FLOP is billed
+     to "Global" and to no module -- which is why flop_breakdown.json has no
+     conv1d row while this file has a conv term.
+
+  2. MAGNITUDE. torch.utils.flop_counter.conv_backward_flop takes `_groups` and
+     never uses it; its docstring (flop_counter.py:83) admits "there are also
+     some details involving transpose of the batch/channel dimensions and
+     groups, but I skip those for the sake of brevity". The grad_weight branch
+     transposes dims 0 and 1, after which batch_size becomes the channel count
+     and c_out*c_in becomes conv_dim*1 -- so a DEPTHWISE conv is billed at the
+     DENSE price. Here that is conv_dim = 1664x on grad_weight, 555x on the
+     conv as a whole (verified standalone on CPU: 181,724,827,648 counted
+     against 327,235,584 true, for this model's exact conv geometry).
+
+The accounting closes exactly. uSSM-AR, L=8192, one sequence, fwd+bwd, TFLOP:
+
+    analytic (this file)                    5.180
+  + phantom depthwise-conv grad_weight      2.177
+  - Triton SSD scan, invisible to counter   0.237
+  = predicted                               7.120
+    measured                                7.120     residual 0.0%
+
+The flatness of the ratio across a 64x span in length (1.376 -> 1.374 for
+ussm-ar, 1.341 -> 1.349 for bissm; results/figures/scaling_data.json,
+flop_counter_ratio) is independent confirmation: a constant ratio is what a
+strictly per-token phantom produces, and the conv is per-token.
+
+ONE HONEST LIMIT. The above confirms every term this file derives EXCEPT the
+scan. `scan` (4.6% of the uSSM-AR total) runs in a Triton kernel outside aten
+and is invisible to the counter, so it remains a derivation that no measurement
+has checked. Everything else is now measured-confirmed.
+
+So the "our compute is 0.33x dnaHNet's smallest budget" line for uSSM-AR STANDS.
+An earlier revision of this docstring told you to inflate it by 37%; that was
+wrong and is retracted.
 
 Run:  python scripts/eval/training_flops.py
 """

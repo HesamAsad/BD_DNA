@@ -21,6 +21,15 @@ Two things the counter cannot do, both handled explicitly rather than silently:
   falls back to `attn_backend=sdpa` for that arm, which computes the same
   attention with an aten op the counter can see. Different kernel, same
   arithmetic.
+
+The output file ACCUMULATES across runs. One sweep cannot cover every point:
+the long lengths only fit at micro batch 1, and one length per job is the only
+way to avoid allocating a second model against a fragmented pool. So a run
+merges its rows into whatever is already on disk, replacing by (arm, length)
+and leaving every other row alone. Because of that a single file can mix
+batches, each row records the `batch` and `block_size` it was measured at, and
+the top-level copies describe only the most recent run. Consumers must divide
+by the ROW's batch. `--no-merge` restores the old clobber-everything write.
 """
 
 from __future__ import annotations
@@ -51,6 +60,62 @@ ARMS = {
   "dit":     ("small", "bd3lm", True),
   "dit-ar":  ("small_ar_transformer", "ar", False),
 }
+
+NOTE = (
+  "counted_tflop is what FlopCounterMode dispatched (blind to flash/flex "
+  "attention and the Triton SSD scan). analytic_attention_tflop adds back the "
+  "attention term for the Transformer arms only; it is zero for the SSM arms, "
+  "whose scan remains uncounted, so their total is a LOWER bound. Rows "
+  "accumulate across runs, keyed by (arm, length), so the file can mix sweeps "
+  "taken at different micro batches: divide counted_tflop by the ROW's batch, "
+  "not by the top-level one, which describes only the most recent run."
+)
+
+
+def row_key(row):
+  """Identity of a measurement: one point of one curve."""
+  return (row.get("arm"), row.get("length"))
+
+
+def merge_rows(existing, fresh):
+  """`fresh` overrides `existing` per (arm, length); everything else survives.
+
+  A replaced row keeps its original position, so re-measuring one point does
+  not reshuffle the file; genuinely new points append in the order measured.
+  """
+  merged, order = {}, []
+  for row in list(existing) + list(fresh):
+    key = row_key(row)
+    if key not in merged:
+      order.append(key)
+    merged[key] = row
+  return [merged[key] for key in order]
+
+
+def write_payload(output, rows, batch, block_size, merge=True):
+  """Atomically write `rows`, folded into any payload already at `output`."""
+  output.parent.mkdir(parents=True, exist_ok=True)
+  if merge and output.exists():
+    try:
+      previous = json.loads(output.read_text()).get("rows", [])
+    except (OSError, ValueError) as exc:
+      # Never clobber a file we failed to read, and never throw away GPU hours:
+      # park the fresh rows next to it and let a human reconcile them.
+      rescue = output.with_name(output.stem + ".unmerged.json")
+      rescue.write_text(json.dumps({"rows": rows}, indent=2, sort_keys=True))
+      raise RuntimeError(f"cannot parse {output} to merge into ({exc}); "
+                         f"fresh rows written to {rescue}") from exc
+    rows = merge_rows(previous, rows)
+  batches = sorted({r["batch"] for r in rows if isinstance(r.get("batch"), int)})
+  payload = {"batch": batch, "batches": batches, "block_size": block_size,
+             "note": NOTE, "rows": rows}
+  with tempfile.NamedTemporaryFile("w", dir=output.parent,
+                                   delete=False) as handle:
+    json.dump(payload, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+    temporary = Path(handle.name)
+  os.replace(temporary, output)
+  return payload
 
 
 def build(arm, length, block_size, batch):
@@ -115,6 +180,11 @@ def main_cli():
   parser.add_argument("--block-size", type=int, default=256)
   parser.add_argument("--output", type=Path,
                       default=REPO / "results" / "sizing" / "measured_flops.json")
+  parser.add_argument("--merge", action=argparse.BooleanOptionalAction,
+                      default=True,
+                      help="fold these rows into an existing output file, "
+                           "replacing by (arm, length); --no-merge overwrites "
+                           "the file wholesale, as this script used to")
   args = parser.parse_args()
 
   if not torch.cuda.is_available():
@@ -129,33 +199,26 @@ def main_cli():
         counted = run(arm, length, args.block_size, args.batch, device)
         attn = analytic_attention_tflop(arm, length, args.batch)
         rows.append({"arm": arm, "length": length, "batch": args.batch,
+                     "block_size": args.block_size,
                      "counted_tflop": counted,
                      "analytic_attention_tflop": attn,
                      "total_tflop": counted + attn})
         print(f"{arm:<9}{length:>8}{counted:>12.2f}{attn:>10.2f}"
               f"{counted + attn:>10.2f}")
       except Exception as exc:  # noqa: BLE001
-        rows.append({"arm": arm, "length": length,
+        rows.append({"arm": arm, "length": length, "batch": args.batch,
+                     "block_size": args.block_size,
                      "error": f"{type(exc).__name__}: {exc}"})
         print(f"{arm:<9}{length:>8}   FAILED {type(exc).__name__}: "
               f"{str(exc)[:44]}")
         torch.cuda.empty_cache()
 
-  args.output.parent.mkdir(parents=True, exist_ok=True)
-  with tempfile.NamedTemporaryFile("w", dir=args.output.parent,
-                                   delete=False) as handle:
-    json.dump({"batch": args.batch, "block_size": args.block_size,
-               "note": ("counted_tflop is what FlopCounterMode dispatched "
-                        "(blind to flash/flex attention and the Triton SSD "
-                        "scan). analytic_attention_tflop adds back the "
-                        "attention term for the Transformer arms only; it is "
-                        "zero for the SSM arms, whose scan remains uncounted, "
-                        "so their total is a LOWER bound."),
-               "rows": rows}, handle, indent=2, sort_keys=True)
-    handle.write("\n")
-    temporary = Path(handle.name)
-  os.replace(temporary, args.output)
-  print(f"\nwrote {args.output}")
+  payload = write_payload(args.output, rows, args.batch, args.block_size,
+                          merge=args.merge)
+  verb = "merged into" if args.merge else "overwrote"
+  print(f"\n{verb} {args.output} "
+        f"({len(rows)} new, {len(payload['rows'])} total, "
+        f"batches {payload['batches']})")
 
 
 if __name__ == "__main__":

@@ -142,39 +142,59 @@ def main():
   flops = {arm: {L: flops_per_sequence(arm, L) / 1e12 for L in flop_lengths}
            for arm in ORDER}
 
-  # Prefer MEASURED FLOPs where the analytic formula is known wrong.
+  # ANALYTIC for every arm. This reverses an earlier decision, and the reason is
+  # a bug in torch, not in this repo.
   #
-  # Running torch's FlopCounterMode against these formulas settled which to
-  # trust, per arm:
-  #   dit-ar  analytic VALIDATED exactly -- counted dense plus the analytic
-  #           attention term reproduces the analytic total to the decimal at
-  #           every length (1.48/8.92/83.92). Keep analytic.
-  #   dit     cannot be counted: flex is compiled and the counter cannot enter
-  #           it, and substituting sdpa measures a DIFFERENT algorithm, since
-  #           sdpa evaluates the full (2L)^2 attention while flex evaluates only
-  #           the mask-permitted pairs. Keep analytic, which the dit-ar result
-  #           validates the machinery of.
-  #   ussm-ar analytic UNDERCOUNTS by a constant 1.37x at every length.
-  #   bissm   analytic UNDERCOUNTS by a constant 1.35x at every length.
-  # For the two SSM arms the measured count is the better number even though it
-  # excludes the Triton scan, so it is a LOWER bound on the truth -- and it is
-  # already above the analytic figure.
-  measured_path = REPO / "results" / "sizing" / "measured_flops.json"
-  measured_arms = {"ussm-ar", "bissm"}
+  # We used to prefer the runtime FlopCounterMode count for the two SSM arms,
+  # because it exceeded the analytic formula by a constant 1.35-1.37x and we read
+  # that as the formula undercounting. It is the counter overcounting.
+  #
+  #   torch.utils.flop_counter.conv_backward_flop takes `_groups` and never uses
+  #   it -- its own docstring (flop_counter.py:83) says "there are also some
+  #   details involving transpose of the batch/channel dimensions and groups, but
+  #   I skip those for the sake of brevity". The grad_weight branch transposes
+  #   dims 0 and 1, after which batch_size becomes the channel count and
+  #   c_out*c_in becomes conv_dim*1, so a DEPTHWISE conv is billed at the DENSE
+  #   price. For this model that is a factor of conv_dim = 1664 on the
+  #   grad_weight term, 555x on the conv as a whole.
+  #
+  #   It lands in no module because mamba2_segment.py never calls self.conv1d(...)
+  #   -- it reads self.conv1d.weight/.bias (:191) and calls functional F.conv1d
+  #   (:197, :209, :210, :264, :270, :271, :492), so nn.Conv1d.__call__ never
+  #   fires and no bucket is created.
+  #
+  # The accounting closes exactly (uSSM-AR, L=8192, one sequence, fwd+bwd, TFLOP):
+  #   analytic 5.180 + phantom conv 2.177 - invisible Triton scan 0.237 = 7.120
+  #   = measured, to three decimals, i.e. a residual of 0.0% of the gap.
+  #
+  # So the analytic formula is CONFIRMED for every aten-visible term. The scan
+  # term (4.6% of the total) is Triton and stays invisible to the counter, so it
+  # remains a derivation rather than a measurement -- state that, do not hide it.
+  #
+  # Analytic also evaluates at any length, so the SSM curves now reach 2^17
+  # alongside the Transformer ones instead of stopping at the swept set.
   flop_source = {arm: "analytic" for arm in ORDER}
-  if measured_path.exists():
-    payload = json.loads(measured_path.read_text())
-    batch = payload.get("batch", 1)
+
+  # The measured file is still loaded, as a DIAGNOSTIC of the torch bug rather
+  # than as curve data. Keeping the ratio in the output is what stops anyone
+  # (including us, again) from re-reading the discrepancy as a modelling error.
+  measured_path = REPO / "results" / "sizing" / "measured_flops.json"
+  counter_ratio = {}
+  for path in sorted(glob.glob(str(measured_path.parent / "measured_flops*.json"))):
+    payload = json.loads(Path(path).read_text())
     for row in payload.get("rows", []):
-      if row.get("arm") in measured_arms and "counted_tflop" in row:
-        flops[row["arm"]][row["length"]] = row["counted_tflop"] / batch
-        flop_source[row["arm"]] = "measured (lower bound; scan uncounted)"
-    # Measured points exist only at the swept lengths; drop analytic points
-    # beyond them so a single curve never mixes the two sources.
-    swept = {r["length"] for r in payload.get("rows", []) if "counted_tflop" in r}
-    for arm in measured_arms:
-      if flop_source[arm] != "analytic":
-        flops[arm] = {L: v for L, v in flops[arm].items() if L in swept}
+      if "counted_tflop" not in row or row["arm"] not in flops:
+        continue
+      # Per ROW batch. These files accumulate across sweeps that do not share
+      # one: everything past 32768 had to be counted at micro batch 1 because
+      # batch 2 OOMs. Dividing a mixed file by one top-level number would halve
+      # or double whichever half of the curve it did not describe.
+      batch = row.get("batch") or payload.get("batch") or 1
+      per_seq = row["counted_tflop"] / batch
+      predicted = flops[row["arm"]].get(row["length"])
+      if predicted:
+        counter_ratio.setdefault(row["arm"], {})[row["length"]] = per_seq / predicted
+
   mem = {arm: {L: r["peak_gib"] for L, r in d.items()}
          for arm, d in measured.items()}
   tput = {arm: {L: r["nt_per_second"] for L, r in d.items()}
@@ -184,7 +204,7 @@ def main():
   specs = [
     ("flops", flops, sorted({L for d in flops.values() for L in d}),
      "TFLOPs per sequence (fwd+bwd)",
-     "Arithmetic: attention quadratic, scan linear (SSM = measured)", True),
+     "Arithmetic: attention quadratic, scan linear", True),
     ("throughput", tput, sorted({L for d in tput.values() for L in d}),
      "Nucleotides / second", "Throughput: where the crossover really is", False),
     ("memory", mem, sorted({L for d in mem.values() for L in d}),
@@ -229,9 +249,23 @@ def main():
   summary.write_text(json.dumps(
     {"flops_tflop_per_sequence": flops, "flop_source": flop_source,
      "peak_gib": mem, "nt_per_second": tput,
-     "note": "FLOPs analytic from training_flops.py; memory and throughput "
-             "measured with a real fwd+bwd+AdamW step at micro batch 2, "
-             "SSM arms with checkpoint_boundary_prefill=on."},
+     "flop_counter_ratio": counter_ratio,
+     "note": "FLOPs per SEQUENCE: analytic from training_flops.py for EVERY "
+             "arm. An earlier version preferred the FlopCounterMode count for "
+             "the SSM arms, believing the formulas undercut by 1.35-1.37x. That "
+             "was the counter overcounting, not the formula undercounting: "
+             "torch's conv_backward_flop ignores `groups` and bills this "
+             "model's depthwise conv at the dense price (conv_dim = 1664x on "
+             "the grad_weight term). Accounting closes exactly -- uSSM-AR at "
+             "L=8192, per sequence fwd+bwd: analytic 5.180 + phantom conv 2.177 "
+             "- invisible Triton scan 0.237 = 7.120 = measured. Every "
+             "aten-visible term of the formula is thereby confirmed; the scan "
+             "term (4.6% of total) is Triton and remains a derivation, not a "
+             "measurement. flop_counter_ratio keeps the measured/analytic ratio "
+             "as evidence of the torch bug, NOT as curve data. Memory and "
+             "throughput measured with a real fwd+bwd+AdamW step at micro batch "
+             "2 and are NOT per sequence, SSM arms with "
+             "checkpoint_boundary_prefill=on."},
     indent=2, sort_keys=True) + "\n")
   print(f"wrote {summary}")
 
