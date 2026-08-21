@@ -28,6 +28,20 @@ structural claim below was verified against the code:
   * the bidirectional active pass runs the mixer twice (forward + flipped
     reverse scan), bidirectional_ssm.py:199-201. Hence `2 * MIXER`.
 
+    THIS FILE COSTS THE TRAINED RUNS, AND `2 * MIXER` IS RIGHT FOR THEM. The
+    BiSSM checkpoints are from 2026-08-10, when scan_active called
+    mixer.scan_segment twice -- forward and flipped -- each a complete mixer
+    including in_proj and out_proj. Commit 5dad03c (2026-08-20) replaced that
+    with a shared-projection scan_bidirectional: mamba2_segment.py:635 calls
+    in_proj once and :666 calls out_proj once, so only conv and scan are now
+    doubled. Do NOT "correct" this term -- it would misstate what the runs in
+    the results table actually cost.
+
+    Anything projecting the cost of the CURRENT code must instead charge
+    `MIXER + CONV + SCAN`. scaling_curves.py:flops_per_sequence does exactly
+    that, and the two files disagree by design: in_proj + out_proj = 7,311,360
+    FLOP per token per layer, 28.5% of the active term, 16.8% of the arm.
+
 Conventions: an (m x k) @ (k x n) matmul costs 2*m*k*n. Backward costs 2x
 forward, so training = 3x forward. Elementwise ops, norms and softmax are
 ignored (each below 2% of total). The SSD selective scan is LINEAR in sequence

@@ -69,7 +69,20 @@ def flops_per_sequence(arm, length, block=256, n_layers=12):
     + (2 * num_blocks * (num_blocks - 1) * tf.NHEADS * tf.HEADDIM
        * tf.D_STATE) // max(prefix, 1))
   act_uni = n_layers * length * (t["mixer"] + t["mlp"]) + length * t["head"]
-  act_bi = n_layers * length * (2 * t["mixer"] + t["mlp"]) + length * t["head"]
+  # NOT 2 * mixer. training_flops.py charges the full mixer twice because that
+  # is what the TRAINED runs paid: before 5dad03c (2026-08-20) scan_active
+  # called mixer.scan_segment twice, forward and flipped, each a complete mixer
+  # including both projections. The BiSSM-BD checkpoint is from 2026-08-10 and
+  # is correctly costed that way.
+  #
+  # This file projects the CURRENT code, where scan_bidirectional shares the
+  # projections: mamba2_segment.py:635 calls in_proj once and :666 calls
+  # out_proj once, and only _causal_conv/_reverse_causal_conv and the two _scan
+  # calls are doubled. So the doubled part is conv + scan, not the whole mixer.
+  # Charging 2 * mixer here overstates BiSSM by in_proj + out_proj per token per
+  # layer = 7,311,360, which is 28.5% of the active term and 16.8% of the arm.
+  act_bi = (n_layers * length * (t["mixer"] + t["conv"] + t["scan"] + t["mlp"])
+            + length * t["head"])
   ar = (n_layers * (length - 1) * (t["mixer"] + t["mlp"])
         + (length - 1) * t["head"])
 
