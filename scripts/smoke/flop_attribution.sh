@@ -53,6 +53,11 @@ BATCH=${BATCH:-1}
 BLOCK_SIZE=${BLOCK_SIZE:-256}
 MAX_TRACES=${MAX_TRACES:-3}
 LABEL=${LABEL:-flop_attribution}
+# bissm only; off by default so the comparison against
+# training_flops.py is not contaminated by the recompute pass.
+CKPT_PREFILL=${CKPT_PREFILL:-0}
+CKPT_FLAG=""
+[ "$CKPT_PREFILL" = "1" ] && CKPT_FLAG="--checkpoint-prefill"
 OUTPUT=${OUTPUT:-$REPO/results/sizing/$LABEL.json}
 
 echo "[$(date)] flop attribution | arms=$ARMS lengths=$LENGTHS batch=$BATCH block=$BLOCK_SIZE"
@@ -64,6 +69,7 @@ nvidia-smi --query-gpu=index,name,memory.total --format=csv
   --batch "$BATCH" \
   --block-size "$BLOCK_SIZE" \
   --max-traces "$MAX_TRACES" \
+  $CKPT_FLAG \
   --output "$OUTPUT"
 
 echo "[$(date)] flop_attribution done -> $OUTPUT"

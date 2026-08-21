@@ -316,8 +316,10 @@ def leaf_table(model, owner_keys):
   return is_leaf, rule
 
 
-def run_one(arm, length, block_size, batch, device, max_traces):
-  config = build(arm, length, block_size, batch)
+def run_one(arm, length, block_size, batch, device, max_traces,
+            checkpoint_prefill=False):
+  config = build(arm, length, block_size, batch,
+                 checkpoint_prefill=checkpoint_prefill)
   torch.manual_seed(0)
   model = Diffusion(config, DNATokenizer()).to(device)
   model.train()
@@ -415,7 +417,8 @@ def run_one(arm, length, block_size, batch, device, max_traces):
   # ---- R1: counted minus the module-level analytic prediction -------------
   mismatch = geometry_mismatch(config)
   analytic = None if mismatch else analytic_prediction(
-    arm, length, block_size, batch, n_layers)
+    arm, length, block_size, batch, n_layers,
+    checkpoint_prefill=checkpoint_prefill)
   residual_analytic = None
   if analytic is not None:
     gap = global_total - analytic["total"]
@@ -588,7 +591,8 @@ def geometry_mismatch(config):
           for name, (live, frozen) in observed.items() if live != frozen}
 
 
-def analytic_prediction(arm, length, block_size, batch, n_layers):
+def analytic_prediction(arm, length, block_size, batch, n_layers,
+                        checkpoint_prefill=False):
   """What a per-module derivation predicts for this arm, and per aten op.
 
   For `ussm-ar` the per-term dict is exactly the construction in
@@ -636,11 +640,21 @@ def analytic_prediction(arm, length, block_size, batch, n_layers):
                   "conv1d_within": conv, "scan_within": scan}
       gemm = total - conv - scan
       caveats = [
-        "checkpoint_boundary_prefill=true recomputes the clean prefill during "
-        "backward; training_flops.py does not model that extra forward, so "
-        "the analytic total is low by about one prefill forward pass",
         "the conv/scan split of the composite total is this script's reading "
-        "of tf.ssm_passes(), not a term tf itself exposes"]
+        "of tf.ssm_passes(), not a term tf itself exposes",
+        "tf.ssm_passes()['act_bi'] charges 2 * MIXER, which is what the "
+        "TRAINED runs paid (pre-5dad03c scan_active ran a full mixer twice). "
+        "This probe runs the CURRENT shared-projection code, where in_proj "
+        "and out_proj run once (mamba2_segment.py:635,:666) and only conv and "
+        "scan are doubled. So R1 for bissm overstates by in_proj + out_proj "
+        "= 7,311,360 FLOP/token/layer; compare against MIXER + CONV + SCAN "
+        "instead, as scaling_curves.py:flops_per_sequence does."]
+      if checkpoint_prefill:
+        caveats.insert(0,
+          "checkpoint_boundary_prefill=true recomputes the clean prefill "
+          "during backward; training_flops.py does not model that extra "
+          "forward, so the analytic total is low by about one prefill "
+          "forward pass")
     else:
       return None
   return {"total": total, "terms": per_term, "gemm": gemm, "conv": conv,
@@ -788,6 +802,11 @@ def main_cli():
   parser.add_argument("--batch", type=int, default=1)
   parser.add_argument("--block-size", type=int, default=256)
   parser.add_argument("--max-traces", type=int, default=3)
+  # bissm only. Defaults FALSE, opposite to measured_flops_sweep, because
+  # this probe is compared against training_flops.py and that file does not
+  # model the recompute pass; leaving it on would measure the checkpointing
+  # (~13%) instead of the discrepancy under investigation.
+  parser.add_argument("--checkpoint-prefill", action="store_true")
   parser.add_argument("--output", type=Path,
                       default=REPO / "results" / "sizing"
                       / "flop_attribution.json")
@@ -802,7 +821,8 @@ def main_cli():
     for length in [int(v) for v in args.lengths.split(",")]:
       try:
         record = run_one(arm, length, args.block_size, args.batch, device,
-                         args.max_traces)
+                         args.max_traces,
+                         checkpoint_prefill=args.checkpoint_prefill)
         rows.append(record)
         print_record(record)
       except Exception as exc:  # noqa: BLE001

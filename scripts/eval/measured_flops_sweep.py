@@ -118,7 +118,17 @@ def write_payload(output, rows, batch, block_size, merge=True):
   return payload
 
 
-def build(arm, length, block_size, batch):
+def build(arm, length, block_size, batch, checkpoint_prefill=True):
+  """Compose one arm's config.
+
+  `checkpoint_prefill` applies to bissm only. It defaults True, which is what
+  the memory/throughput sweeps use and what every already-published measured
+  number was taken under -- do not change the default without re-running them.
+  Set it False to match what training_flops.py models: recomputing the boundary
+  prefill dispatches its forward an extra time, so a checkpointed run counts
+  ~13% more FLOPs than the analytic file predicts, and comparing the two under
+  checkpointing measures the recompute rather than the discrepancy of interest.
+  """
   model_cfg, algo_cfg, needs_sdpa = ARMS[arm]
   is_ar = algo_cfg == "ar"
   overrides = [
@@ -132,7 +142,8 @@ def build(arm, length, block_size, batch):
     overrides.append("algo.backbone=ussm")
   if arm == "bissm":
     overrides.append("model.active_blocks=all")
-    overrides.append("model.checkpoint_boundary_prefill=true")
+    overrides.append("model.checkpoint_boundary_prefill="
+                     f"{str(bool(checkpoint_prefill)).lower()}")
   if needs_sdpa:
     # flex is compiled and the counter cannot enter it; sdpa is the same
     # attention through an aten op it can see.
