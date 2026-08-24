@@ -192,3 +192,5 @@ ssd-lm/logging/
 
 # Vendored presentation libraries (re-fetch with docs/slides/README.md)
 docs/slides/vendor/
+cache/
+mi_rows.npy

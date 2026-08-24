@@ -402,7 +402,10 @@ class SegmentMamba2(nn.Module):
       return rmsnorm_fn(y, self.norm_weight, None, z=z, eps=1e-5,
                         norm_before_gate=False)
     y = y * F.silu(z)
-    variance = y.float().pow(2).mean(dim=-1, keepdim=True)
+    # See `bidirectional_ssm.RMSNorm.forward`: promote, do not hard-cast, so a
+    # float64 CPU check is not floored at fp32 noise. No-op for fp32/bf16/fp16.
+    accum_dtype = torch.promote_types(y.dtype, torch.float32)
+    variance = y.to(accum_dtype).pow(2).mean(dim=-1, keepdim=True)
     y = y * torch.rsqrt(variance.to(dtype=y.dtype) + 1e-5)
     return y * self.norm_weight.to(dtype=y.dtype)
 

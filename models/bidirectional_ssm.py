@@ -48,7 +48,13 @@ class RMSNorm(nn.Module):
     """
     if rmsnorm_fn is not None and x.is_cuda:
       return rmsnorm_fn(x, self.weight, None, eps=self.eps)
-    variance = x.float().pow(2).mean(dim=-1, keepdim=True)
+    # Promote rather than hard-cast: `.float()` upcasts bf16/fp16 as intended
+    # but silently *downcasts* fp64, which caps the channel-sum accuracy at
+    # ~1e-7. The channel sum is the one reduction whose association order
+    # changes under the RC channel involution, so an fp64 equivariance check
+    # cannot get below fp32 noise without this. Identical for fp32/bf16/fp16.
+    accum_dtype = torch.promote_types(x.dtype, torch.float32)
+    variance = x.to(accum_dtype).pow(2).mean(dim=-1, keepdim=True)
     normalized = x * torch.rsqrt(variance.to(dtype=x.dtype) + self.eps)
     return normalized * self.weight.to(dtype=x.dtype)
 
@@ -71,7 +77,11 @@ class TimestepEmbedder(nn.Module):
         half, device=sigma.device, dtype=torch.float32) / half)
     angles = sigma.float()[:, None] * frequencies[None]
     embedding = torch.cat((torch.cos(angles), torch.sin(angles)), dim=-1)
-    return self.mlp(embedding)
+    # The sinusoid is always built in fp32; hand it to the MLP in the MLP's own
+    # dtype. No-op for an fp32 model (and autocast still owns the cast under
+    # bf16), but it is what lets a `.double()` model run at all -- otherwise
+    # `mat1 and mat2 must have the same dtype`.
+    return self.mlp(embedding.to(dtype=self.mlp[0].weight.dtype))
 
 
 class FeedForward(nn.Module):
@@ -309,6 +319,23 @@ class BidirectionalSSM(nn.Module):
     self._sampling_left_cache: Optional[DirectionalCache] = None
     self._sampling_right_cache: Optional[DirectionalCache] = None
     self._initialize_weights()
+
+    # Reverse-complement equivariance (models/rc_equivariance.py). Off unless
+    # `model.rc_equivariant` is set, and the whole block is skipped when it is:
+    # no parametrization is registered, no state-dict key changes, and every
+    # existing checkpoint keeps loading and producing identical numbers.
+    self.rc_equivariant = bool(model.get("rc_equivariant", False))
+    if self.rc_equivariant:
+      from . import rc_equivariance
+      self.register_buffer(
+        "complement_ids",
+        rc_equivariance.complement_permutation(vocab_size),
+        persistent=False)
+      self.rc_free_parameters = rc_equivariance.apply_rc_equivariance(
+        self,
+        self.complement_ids,
+        a_init_max=float(model.get("ssm_a_init_max", 16.0)),
+        dt_max=float(model.get("ssm_dt_max", 1e-1)))
 
   def _initialize_weights(self):
     nn.init.normal_(self.token_embedding.weight, mean=0.0, std=0.02)

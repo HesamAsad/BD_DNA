@@ -82,6 +82,27 @@ class Diffusion(L.LightningModule):
         generation_mask[self.tokenizer.eos_token_id] = True
     self.register_buffer(
       '_generation_token_mask', generation_mask, persistent=False)
+
+    # Reverse-complement data augmentation. Independent of the architectural
+    # `model.rc_equivariant` path: this one only relabels training data, needs
+    # no checkpoint change and costs one flip plus one gather per step. Absent
+    # or 0.0 (the default) short-circuits before any RNG is drawn, so existing
+    # configs keep their exact random stream.
+    self.rc_augment_probability = float(
+      self.config.data.get('rc_augment_probability', 0.0)
+      if hasattr(self.config, 'data') else 0.0)
+    if self.rc_augment_probability > 0:
+      import models.rc_equivariance as rc_equivariance
+      if not 0.0 < self.rc_augment_probability <= 1.0:
+        raise ValueError(
+          'data.rc_augment_probability must lie in (0, 1], got '
+          f'{self.rc_augment_probability}')
+      rc_equivariance.assert_rc_safe_special_tokens(self.config)
+      self.register_buffer(
+        '_complement_token_ids',
+        rc_equivariance.complement_permutation(
+          self.vocab_size, tokenizer=self.tokenizer),
+        persistent=False)
     if hasattr(self.config, 'algo'):
       self.parameterization = self.config.algo.parameterization
     else:
@@ -1023,6 +1044,33 @@ class Diffusion(L.LightningModule):
     
     return input_tokens, output_tokens, new_attention_mask
 
+  def _maybe_rc_augment(self, x0, attention_mask):
+    """Per-row reverse-complement augmentation of a training batch.
+
+    Applied to the *whole contiguous window* before ``_maybe_sub_sample``: for
+    ``parameterization == 'ar'`` that method builds ``x0[:, :-1]`` /
+    ``x0[:, 1:]``, so augmenting afterwards would misalign the AR targets by
+    one position.  Training only -- validation NLL stays un-augmented so the
+    numbers remain comparable across runs.
+
+    The complement map fixes ``[MASK]``, so this commutes with the absorbing
+    corruption in ``q_xt``; it also fixes ``[EOS]``, which the DNA corpora do
+    emit at record boundaries (``configs/data/carbon-prokaryote.yaml:9``
+    ``insert_train_eos: True``), so under ``rc`` an ``[EOS]`` stops being a
+    terminator and becomes an initiator for the next contig.  That affects
+    roughly one token per source record and is documented rather than fixed;
+    swapping BOS/EOS would be the honest complement map for those two ids.
+    """
+    if not self.training or self.rc_augment_probability <= 0:
+      return x0, attention_mask
+    coin = torch.rand(
+      x0.shape[0], device=x0.device) < self.rc_augment_probability
+    flipped = self._complement_token_ids[torch.flip(x0, dims=(1,))]
+    x0 = torch.where(coin[:, None], flipped, x0)
+    attention_mask = torch.where(
+      coin[:, None], torch.flip(attention_mask, dims=(1,)), attention_mask)
+    return x0, attention_mask
+
   def _forward_pass_diffusion(self, x0, t=None, sampling_eps_min=None, sampling_eps_max=None):
     if t is None:
       t = self._sample_t(x0.shape,
@@ -1214,6 +1262,7 @@ class Diffusion(L.LightningModule):
     elif not hasattr(self, 'sampling_eps_min'):
       sampling_eps_min = 1e-3
       sampling_eps_max = 1.0
+    x0, attention_mask = self._maybe_rc_augment(x0, attention_mask)
     (input_tokens, output_tokens,
      attention_mask) = self._maybe_sub_sample(
        x0, attention_mask)
