@@ -65,20 +65,85 @@ TASKS = [
 ]
 PUBLISHED = dict(TASKS)
 
+# The full Table 1 of arXiv:2403.03234, every column. Kept here so a run can
+# print itself against the strongest published variant rather than the softest.
+#
+# Caduceus-PS, not Caduceus-Ph, is the higher 8-task mean (0.8690 vs 0.8660), so
+# PS is the bar to quote. The `no_equiv` column is the same RC-augmented BiMamba
+# checkpoint evaluated WITHOUT reverse-complement conjoining -- i.e. our own
+# architecture class -- and it already scores 0.8618. That bounds everything RC
+# can buy on this suite at +0.0042 (Ph) / +0.0073 (PS).
+#
+# Every column here is 470K parameters at 1k context (paper App. D.1 and the
+# released `wrapper_run_genomics.sh`, which loads
+# `caduceus-ph_seqlen-1k_d_model-118_n_layer-4_lr-8e-3`). Any claim that we are
+# handicapped by context length or scale against this table is backwards.
+REFERENCE_COLUMNS = ("cnn", "hyenadna", "mamba", "no_equiv", "ph", "ps")
+REFERENCE = {
+  # task:                             cnn    hyena  mamba  noeq   ph     ps
+  "dummy_mouse_enhancers_ensembl":   (0.715, 0.780, 0.743, 0.770, 0.754, 0.793),
+  "demo_coding_vs_intergenomic_seqs": (0.892, 0.904, 0.904, 0.908, 0.915, 0.910),
+  "demo_human_or_worm":              (0.942, 0.964, 0.967, 0.970, 0.973, 0.968),
+  "human_enhancers_cohn":            (0.702, 0.729, 0.732, 0.741, 0.747, 0.745),
+  "human_enhancers_ensembl":         (0.744, 0.849, 0.862, 0.883, 0.893, 0.900),
+  "human_ensembl_regulatory":        (0.872, 0.869, 0.814, 0.871, 0.872, 0.873),
+  "human_nontata_promoters":         (0.861, 0.944, 0.933, 0.933, 0.946, 0.945),
+  "human_ocr_ensembl":               (0.698, 0.783, 0.815, 0.818, 0.828, 0.818),
+}
 
-def load_task(name, max_train=None, max_test=None, seed=0):
+
+def reference(name, column):
+  """Published accuracy for `name` under one Table 1 column, or None."""
+  row = REFERENCE.get(name)
+  return None if row is None else row[REFERENCE_COLUMNS.index(column)]
+
+
+def _open_task(name):
   from datasets import load_dataset
   data = load_dataset(HF_PREFIX + name)
   splits = set(data.keys())
-  train_key = "train"
   test_key = "test" if "test" in splits else sorted(splits - {"train"})[0]
+  return data, "train", test_key
+
+
+def _sequence_column(rows):
+  return "seq" if "seq" in rows.column_names else "sequence"
+
+
+def task_stats(name):
+  """Shape of the FULL official splits, before any --max-train/--max-test cap.
+
+  Two uses. (1) The fine-tune harness sizes its window from the full data, so
+  the window stops silently depending on the cap. (2) `num_classes` comes from
+  the TRAIN labels only -- the old code read `yte.max()` to size the head, which
+  is harmless but means the test split is touched before training, and the point
+  of the rewrite is that the test split is touchable exactly once.
+  """
+  data, train_key, test_key = _open_task(name)
+  train, test = data[train_key], data[test_key]
+  train_lengths = np.asarray([len(s) for s in train[_sequence_column(train)]])
+  test_lengths = np.asarray([len(s) for s in test[_sequence_column(test)]])
+  labels = np.asarray(train["label"])
+  return {
+    "n_train_full": len(train), "n_test_full": len(test),
+    # The window has to cover the test split too or encoding raises, so this is
+    # the one number that reads the test side -- a shape constraint, not a
+    # measurement. Everything a model could be selected on comes from train.
+    "max_length": int(max(train_lengths.max(), test_lengths.max())),
+    "median_length": float(np.median(train_lengths)),
+    "mean_length": float(train_lengths.mean()),
+    "num_classes": int(labels.max()) + 1,
+  }
+
+
+def load_task(name, max_train=None, max_test=None, seed=0):
+  data, train_key, test_key = _open_task(name)
 
   def take(split, cap):
     rows = data[split]
     if cap and len(rows) > cap:
       rows = rows.shuffle(seed=seed).select(range(cap))
-    seq_col = "seq" if "seq" in rows.column_names else "sequence"
-    return list(rows[seq_col]), np.asarray(rows["label"])
+    return list(rows[_sequence_column(rows)]), np.asarray(rows["label"])
 
   xtr, ytr = take(train_key, max_train)
   xte, yte = take(test_key, max_test)

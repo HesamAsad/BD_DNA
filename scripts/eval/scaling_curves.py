@@ -94,13 +94,13 @@ def flops_per_sequence(arm, length, block=256, n_layers=12):
     tokens = length - 1
     pairs = tokens * (tokens + 1) // 2
     fwd = (2 * tf.transformer_ar_params() * tokens
-           + 4 * n_layers * pairs * tf.D_AR)
+           + tf.ATTN_SCALE * 4 * n_layers * pairs * tf.D_AR)
   elif arm == "dit":
     # cross_attn concatenates [x_t; x_0] to 2L; the block-diffusion mask
     # permits block^2 * nb * (nb + 1) pairs, not (2L)^2.
     pairs = block * block * num_blocks * (num_blocks + 1)
     fwd = (2 * tf.transformer_bd_params() * (2 * length)
-           + 4 * n_layers * pairs * tf.D_BD)
+           + tf.ATTN_SCALE * 4 * n_layers * pairs * tf.D_BD)
   else:
     raise KeyError(arm)
   return tf.GRAD_MULT * fwd

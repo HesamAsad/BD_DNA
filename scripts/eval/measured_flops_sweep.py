@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """FLOPs actually dispatched, per arm, across sequence lengths.
 
-`training_flops.py` derives FLOPs from hand-written formulas. Running the
-counter against it showed those formulas are right for the Transformer -- the
-shortfall equals the attention term to three significant figures -- and WRONG
-for every SSM arm, understating by 26% at L=8192 and 35% at L=32768. So the
-FLOPs panel of the scaling figure cannot be built from arithmetic.
+`training_flops.py` derives FLOPs from hand-written formulas. An earlier
+revision of this docstring claimed the counter showed those formulas WRONG for
+every SSM arm and that "the FLOPs panel cannot be built from arithmetic".
+BOTH CLAIMS ARE RETRACTED. The 1.35-1.37x excess was torch's flop_counter
+overcounting depthwise convolutions by `groups` (= 1664), not the formulas
+undercounting; see training_flops.py's docstring for the closed accounting.
+scaling_curves.py now builds every curve from arithmetic, correctly.
 
 This measures instead. One forward+backward per point under
 `torch.utils.flop_counter.FlopCounterMode`, no timing loop, so it is cheap.
@@ -160,9 +162,18 @@ def analytic_attention_tflop(arm, length, batch, n_layers=12):
     pairs = tokens * (tokens + 1) // 2
     return tf.GRAD_MULT * 4 * n_layers * pairs * tf.D_AR * batch / 1e12
   if arm == "dit":
-    nb = max(length // 256, 1)
-    pairs = 256 * 256 * nb * (nb + 1)
-    return tf.GRAD_MULT * 4 * n_layers * pairs * tf.D_BD * batch / 1e12
+    # ZERO, deliberately. `dit` is forced onto attn_backend=sdpa here because
+    # flex is compiled and the counter cannot enter it. But sdpa dispatches
+    # aten ops the counter CAN see, so dit's attention is ALREADY inside
+    # counted_tflop -- adding it back double-counts. Earlier revisions did add
+    # it, inflating every dit total_tflop by up to 3.96x at L=16384.
+    #
+    # Note the counted value is also not comparable to the analytic formula:
+    # sdpa evaluates the full (2L)^2 attention, while flex (and the formula)
+    # evaluate only the mask-permitted block^2*nb*(nb+1) pairs, ~3.6-3.9x fewer.
+    # So dit's counted number measures a DIFFERENT algorithm and validates only
+    # the dense/param term.
+    return 0.0
   return 0.0
 
 

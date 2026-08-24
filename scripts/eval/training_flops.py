@@ -124,7 +124,15 @@ NUM_BLOCKS = LENGTH // BLOCK          # 32
 PREFIX = (NUM_BLOCKS - 1) * BLOCK     # 7936 tokens carry a boundary prefill
 N_LAYERS = 12
 VOCAB = 13
-GRAD_MULT = 3              # fwd + bwd
+GRAD_MULT = 3              # fwd + bwd, for matmul-shaped work
+# Attention is NOT matmul-shaped in backward. torch's own
+# sdpa_backward_flop_count issues FIVE score-shaped bmms (recompute S, dP, dV,
+# dQ, dK) against TWO in forward, so attention costs 2.5x forward to
+# differentiate, not 2x -- i.e. 3.5x forward in total. Applying the flat 3x to
+# the attention term understates the Transformer arms by up to 15.6% at 131k nt.
+ATTN_GRAD_MULT = 3.5
+ATTN_SCALE = ATTN_GRAD_MULT / GRAD_MULT   # applied inside the per-sequence
+                                          # forward value, which is later x3
 SEQUENCES = GRAD_MULT * STEPS * GLOBAL_BATCH   # 1.536e6
 
 # ---- SSM (Mamba-2) geometry ----------------------------------------------
@@ -202,14 +210,14 @@ def arms():
   # Transformer-AR: dense causal attention over L-1 tokens.
   xf_ar_pairs = tokens_ar * (tokens_ar + 1) // 2
   xf_ar = (2 * transformer_ar_params() * tokens_ar
-           + 4 * N_LAYERS * xf_ar_pairs * D_AR)
+           + ATTN_SCALE * 4 * N_LAYERS * xf_ar_pairs * D_AR)
 
   # Transformer-BD: cross_attn concatenates [x_t; x_0] to 2L. The block
   # diffusion mask permits block^2 * nb * (nb+1) pairs, NOT (2L)^2 and not the
   # telemetry's L*L + 2*L*block.
   xf_bd_pairs = BLOCK * BLOCK * NUM_BLOCKS * (NUM_BLOCKS + 1)
   xf_bd = (2 * transformer_bd_params() * (2 * LENGTH)
-           + 4 * N_LAYERS * xf_bd_pairs * D_BD)
+           + ATTN_SCALE * 4 * N_LAYERS * xf_bd_pairs * D_BD)
 
   return [
     ("uSSM-AR", p["ar"], "one grad pass, no attention, linear scan"),

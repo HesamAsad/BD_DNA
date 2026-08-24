@@ -1,0 +1,82 @@
+# Leakage-safe bidirectional Mamba-2 BD3-LM for single-nucleotide DNA.
+#
+# Hyperparameters follow the attached 87M partial-bidirectionality setup where
+# possible: block 256 (set by the launch script), state 64, conv 4, expansion 2,
+# and scan chunk 128. Width 768 keeps the parameter scale close to this repo's
+# existing ~100M DNA baseline; use hidden_size=448 for the paper-width ablation.
+name: small_bissm_rc
+type: bissm
+hidden_size: 768
+cond_dim: 128
+length: 8192
+n_blocks: 12
+n_heads: 12                 # metadata / future hybrid-attention schedule
+scale_by_sigma: True
+dropout: 0.0
+tie_word_embeddings: True
+adaln: False
+attn_backend: none
+
+ssm_state_size: 64
+ssm_conv_size: 4
+ssm_expand: 2
+ssm_head_dim: 64
+ssm_chunk_size: 128
+ssm_backend: auto            # fused upstream SSD scan on CUDA, torch in tests
+mlp_ratio: 4.0
+
+# 'all' supervises every block per training step (matches the Transformer
+# BD3-LM objective, ~num_blocks times more supervised tokens per step for a
+# small constant factor of extra compute). 'one' keeps the original single-
+# active-block estimator: unbiased for the loss value, but its gradient only
+# ever reaches one block per step.
+active_blocks: all
+
+# 0 = valid de-novo objective. Set to 1 for the C-a conditional infilling run;
+# intermediate values train one shared model with suffix-conditioning dropout.
+right_flank_probability: 0.0
+
+# 'layer_major' (default) scans the clean prefix once per layer and harvests
+# every block's boundary state from it: 24 scan calls per micro-batch at
+# L=8192/block 256 instead of 372, measured 3.80x on model fwd+bwd (LSF 102784).
+# 'block_major' restores the original per-block loop; the two produce the same
+# states and the same gradient, so this is a rollback switch, not a knob.
+boundary_impl: layer_major
+
+# 'fused' runs the active block's two directions through one input projection
+# and one output projection instead of one per direction; only the depthwise
+# convolution and the scan are direction-dependent, and the convolution reads
+# the shared projection with a reversed kernel. 'split' restores the original
+# two-full-mixer-calls spelling. Same function, so this is a rollback switch;
+# tests/test_bidirectional_ssm.py asserts the two agree on values and grads.
+bidirectional_impl: fused
+
+# Recompute the clean boundary prefill during backward instead of storing its
+# activations. The prefill runs with gradients on and covers
+# (num_blocks - 1) * block_size tokens in every layer, which is roughly half
+# the token positions a training step touches, so it dominates peak memory.
+# Memory -- not arithmetic -- is what pins the SSM arms to micro batch 4 while
+# the Transformer trains at 8 (75.1 GiB vs 41.6 GiB at batch 4; batch 8 needs
+# 137.45 of 143.77 GiB before optimizer state and OOMs). Recomputation is
+# mathematically identical, asserted by
+# tests/test_bissm_diffusion_integration.py, and costs about one extra forward
+# over the prefix.
+checkpoint_boundary_prefill: false
+
+# Ceilings on the SSM's initial state retention. Per-step retention is
+# exp(A*dt) with A drawn from (1, ssm_a_init_max) and dt from
+# (1e-3, ssm_dt_max), so lowering either initialises slower-decaying heads.
+# Defaults reproduce the original hardcoded behaviour: at 16.0/0.1 the measured
+# per-head half-life is 4.66 nt and no head reaches 256, while the C-a range
+# measurement shows the data carries right-context value out to about 1 kb.
+ssm_a_init_max: 16.0
+ssm_dt_max: 0.1
+
+# Reverse-complement equivariance (models/rc_equivariance.py). Constrains every
+# weight so that logits(rc(x)) == flip(logits(x))[..., complement], exactly.
+# Implemented by weight materialisation, so SegmentMamba2's scans, caches and
+# boundary prefill are untouched. Free parameters roughly halve at unchanged
+# width, FLOPs and activation memory; checkpoints from `small_bissm` do NOT
+# load into this arm (the state-dict keys become `...parametrizations.*`), so
+# budget for a cold start.
+rc_equivariant: true

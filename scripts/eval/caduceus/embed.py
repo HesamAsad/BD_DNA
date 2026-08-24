@@ -43,6 +43,7 @@ sys.path.insert(0, str(REPO))
 
 from scripts.eval.dnahnet.score_mavedb import (  # noqa: E402
   load_checkpoint_model, encode_dna)
+from scripts.eval.dnahnet.deg import reverse_complement  # noqa: E402
 
 for _name, _resolver in (("cwd", os.getcwd),
                          ("device_count", torch.cuda.device_count),
@@ -53,29 +54,61 @@ for _name, _resolver in (("cwd", os.getcwd),
 POOLINGS = ("mean", "max", "meanmax", "cls")
 
 
-def _hidden_states(model, ids, mask_rate=0.0, generator=None):
-  """[batch, length, hidden] just before the vocabulary projection."""
+def _tapped_hidden_states(model, ids, taps, mask_rate=0.0, generator=None):
+  """Yield `(depth, [batch, length, hidden])` for each depth, one forward pass.
+
+  `depth` is 1-indexed; the top depth is the tensor the vocabulary projection
+  consumes, i.e. `final_norm(x)`. Intermediate depths are raw layer outputs --
+  `final_norm` was fit to the top of the stack, so applying it lower down would
+  measure the norm, not the layer.
+
+  Tapping below the top is worth measuring because the backbone TIES its output
+  projection to the 13-token input embedding (`configs/model/small_bissm.yaml`
+  `tie_word_embeddings: True`). That forces the last hidden state into
+  token-embedding space, maximally specialised to "which nucleotide is at
+  position i" -- the same reason intermediate layers probe better than the last
+  for Nucleotide Transformer and for ESM.
+  """
   backbone = model.backbone
   x = ids
   if mask_rate > 0:
     noise = torch.rand(x.shape, generator=generator, device=x.device)
     x = torch.where(noise < mask_rate, model.mask_index, x)
 
-  if hasattr(backbone, "layers") and hasattr(backbone, "final_norm"):
-    # SSM backbones: replay `forward_active` up to the output head.
-    batch = x.shape[0]
-    h = backbone.token_embedding(x)
-    left = backbone._empty_cache(batch, h.device, h.dtype, "left")
-    right = backbone._empty_cache(batch, h.device, h.dtype, "right")
-    with backbone._compute_autocast(h):
-      for index, layer in enumerate(backbone.layers):
-        h = layer.scan_active(h, left.states[index], right.states[index])
-      return backbone.final_norm(h).float()
+  if not (hasattr(backbone, "layers") and hasattr(backbone, "final_norm")):
+    raise TypeError(
+      f"{type(backbone).__name__} exposes no layer stack to tap; this script "
+      f"supports the SSM backbones. Add an explicit hook for the DiT if that "
+      f"arm is needed.")
 
-  raise TypeError(
-    f"{type(backbone).__name__} exposes no layer stack to tap; this script "
-    f"supports the SSM backbones. Add an explicit hook for the DiT if that "
-    f"arm is needed.")
+  top = len(backbone.layers)
+  taps = sorted(set(taps))
+  if taps[0] < 1 or taps[-1] > top:
+    raise ValueError(f"taps must lie in 1..{top}, received {taps}")
+
+  # SSM backbones: replay `forward_active` up to the output head, stopping at
+  # the deepest requested tap so a shallow probe is also a cheaper one.
+  batch = x.shape[0]
+  h = backbone.token_embedding(x)
+  left = backbone._empty_cache(batch, h.device, h.dtype, "left")
+  right = backbone._empty_cache(batch, h.device, h.dtype, "right")
+  wanted = set(taps)
+  with backbone._compute_autocast(h):
+    for index in range(taps[-1]):
+      h = backbone.layers[index].scan_active(
+        h, left.states[index], right.states[index])
+      depth = index + 1
+      if depth in wanted:
+        yield depth, (backbone.final_norm(h) if depth == top else h).float()
+
+
+def _hidden_states(model, ids, mask_rate=0.0, generator=None):
+  """[batch, length, hidden] just before the vocabulary projection."""
+  top = len(model.backbone.layers)
+  for _, hidden in _tapped_hidden_states(model, ids, (top,), mask_rate,
+                                         generator):
+    return hidden
+  raise RuntimeError("unreachable")
 
 
 def pool(hidden, attention_mask, how):
@@ -95,24 +128,51 @@ def pool(hidden, attention_mask, how):
   return torch.cat([mean, maximum], dim=-1)
 
 
+def _encode_batch(tokenizer, chunk, length, device):
+  rows, masks = [], []
+  for sequence in chunk:
+    ids, token_mask = encode_dna(tokenizer, sequence, length)
+    rows.append(ids)
+    masks.append(token_mask)
+  return (torch.tensor(rows, dtype=torch.long, device=device),
+          torch.tensor(masks, dtype=torch.bool, device=device))
+
+
 def embed_sequences(model, tokenizer, sequences, length, pooling="mean",
                     batch_size=32, mask_rate=0.0, seed=0, device=None,
-                    progress_every=0):
+                    progress_every=0, rc_tta=False):
+  """Pooled representations, optionally conjoined over both strands.
+
+  `rc_tta` is Caduceus's post-hoc conjoining (their "-Ph" variant): embed the
+  sequence and its reverse complement and average the two pooled vectors. The
+  RC is built from the **string**, then encoded -- never by flipping the id
+  tensor, which would move the right-hand `N` padding that `encode_dna`
+  (`scripts/eval/dnahnet/score_mavedb.py:90-101`) adds to the left and make the
+  scan run through it in the wrong place. `scripts/smoke/rc_equivariance.py`
+  T8 is the regression test for that.
+
+  Note for interpreting the result on a *baseline* checkpoint: the backbone is
+  already exactly equivariant to plain length reversal with both caches empty
+  (T1), and mean pooling annihilates a flip, so on those checkpoints this is
+  mathematically a *complement*-only ensemble, not "the other reading
+  direction" -- we already have that, exactly.
+  """
   device = device or next(model.parameters()).device
   generator = torch.Generator(device=device).manual_seed(seed)
   out = []
   with torch.inference_mode():
     for start in range(0, len(sequences), batch_size):
       chunk = sequences[start:start + batch_size]
-      rows, masks = [], []
-      for sequence in chunk:
-        ids, token_mask = encode_dna(tokenizer, sequence, length)
-        rows.append(ids)
-        masks.append(token_mask)
-      ids = torch.tensor(rows, dtype=torch.long, device=device)
-      keep = torch.tensor(masks, dtype=torch.bool, device=device)
-      hidden = _hidden_states(model, ids, mask_rate, generator)
-      out.append(pool(hidden, keep, pooling).cpu().numpy())
+      ids, keep = _encode_batch(tokenizer, chunk, length, device)
+      pooled = pool(_hidden_states(model, ids, mask_rate, generator),
+                    keep, pooling)
+      if rc_tta:
+        rc_ids, rc_keep = _encode_batch(
+          tokenizer, [reverse_complement(s) for s in chunk], length, device)
+        pooled = (pooled + pool(
+          _hidden_states(model, rc_ids, mask_rate, generator),
+          rc_keep, pooling)) / 2
+      out.append(pooled.cpu().numpy())
       if progress_every and (start // batch_size) % progress_every == 0:
         print(f"    embedded {min(start + batch_size, len(sequences))}"
               f"/{len(sequences)}", flush=True)
@@ -131,6 +191,11 @@ def main():
   parser.add_argument("--batch-size", type=int, default=32)
   parser.add_argument("--mask-rate", type=float, default=0.0)
   parser.add_argument("--seed", type=int, default=0)
+  parser.add_argument("--rc-tta", action="store_true",
+                      help="post-hoc conjoining: average the pooled vectors "
+                           "of the sequence and its reverse complement "
+                           "(Caduceus-Ph). Off by default, so existing "
+                           "embeddings are unchanged.")
   args = parser.parse_args()
 
   if not torch.cuda.is_available():
@@ -153,13 +218,15 @@ def main():
 
   vectors = embed_sequences(
     model, tokenizer, sequences, length, args.pooling, args.batch_size,
-    args.mask_rate, args.seed, device, progress_every=20)
+    args.mask_rate, args.seed, device, progress_every=20,
+    rc_tta=args.rc_tta)
   args.output.parent.mkdir(parents=True, exist_ok=True)
   np.save(args.output, vectors)
   meta = {
     "checkpoint": str(args.checkpoint), "checkpoint_global_step": step,
     "backbone": str(config.algo.backbone), "window": length,
     "pooling": args.pooling, "mask_rate": args.mask_rate,
+    "rc_tta": bool(args.rc_tta),
     "num_sequences": len(sequences), "dim": int(vectors.shape[1]),
   }
   args.output.with_suffix(".meta.json").write_text(
