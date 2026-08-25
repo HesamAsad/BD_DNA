@@ -32,6 +32,6 @@ mkdir -p "$OUTPUT_DIR" logs
 nvidia-smi --query-gpu=index,name,memory.total --format=csv
 "$PYTHON" -u scripts/eval/ssm_streaming_benchmark.py \
   --checkpoint "$CKPT" --output-dir "$OUTPUT_DIR" --label "$LABEL" \
-  --prefix-lengths 8192 65536 262144 1048576 \
+  --prefix-lengths ${PREFIX_LENGTHS:-8192 65536 262144 1048576} \
   --generation-length "$GENERATION_LENGTH" \
   --diffusion-steps "$DIFFUSION_STEPS" --seed "$SEED"
