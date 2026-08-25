@@ -115,13 +115,23 @@ def flops_per_sequence(arm, length, block=256, n_layers=12):
   return tf.GRAD_MULT * fwd
 
 
-def load_measured(pattern):
-  """{arm: {length: row}} from sizing_sweep outputs."""
+def load_measured(pattern, checkpoint=False):
+  """{arm: {length: row}} from sizing_sweep outputs.
+
+  `checkpoint` selects the boundary-prefill recompute mode, and it MATTERS:
+  only the SSM arms have the flag at all, so mixing modes compares BiSSM
+  carrying a recompute against a Transformer that structurally cannot. The
+  published figure did exactly that, which cost BiSSM 17% of its throughput and
+  flattered its memory. Default False = charge every arm alike, matching what
+  the shipped configs now resolve `auto` to at these sizes.
+  """
   out = {}
   for path in sorted(glob.glob(pattern)):
     payload = json.loads(Path(path).read_text())
     for row in payload.get("rows", []):
       if row.get("oom") or row.get("peak_gib") is None:
+        continue
+      if bool(row.get("checkpoint_boundary_prefill")) != bool(checkpoint):
         continue
       out.setdefault(row["arm"], {})[row["length"]] = row
   return out
@@ -149,14 +159,21 @@ def panel(ax, xs, series, ylabel, title, logy=True):
 
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument("--measured", default="results/sizing/scaling-*.json")
+  parser.add_argument("--measured",
+                      default="results/sizing/scaling-fixed-*.json",
+                      help="steady-state (warmup 20/iters 30), both checkpoint "
+                           "modes measured for every arm that has the flag")
+  parser.add_argument("--checkpoint-prefill", action="store_true",
+                      help="plot the recompute-ON rows instead of the "
+                           "symmetric OFF ones")
   parser.add_argument("--outdir", type=Path, default=REPO / "results" / "figures")
   parser.add_argument("--flop-lengths", default="2048,4096,8192,16384,32768,65536,131072")
   args = parser.parse_args()
 
   measured = load_measured(str(REPO / args.measured)
                            if not args.measured.startswith("/")
-                           else args.measured)
+                           else args.measured,
+                           checkpoint=args.checkpoint_prefill)
   if not measured:
     print(f"no measured rows matched {args.measured}", file=sys.stderr)
 
@@ -230,7 +247,7 @@ def main():
     ("throughput", tput, sorted({L for d in tput.values() for L in d}),
      "Nucleotides / second", "Throughput: where the crossover really is", False),
     ("memory", mem, sorted({L for d in mem.values() for L in d}),
-     "Peak GPU memory (GiB)", "Memory: both linear -- a constant factor, not an asymptote", False),
+     "Peak GPU memory (GiB)", "Memory: affine in length, every arm charged alike", False),
   ]
   written = []
   for name, series, xs, ylabel, title, logy in specs:
