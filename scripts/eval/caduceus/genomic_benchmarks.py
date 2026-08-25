@@ -162,7 +162,13 @@ def load_task(name, max_train=None, max_test=None, seed=0):
                        allow=max_train is not None)
   assert_full_coverage(len(xte), n_test_full, f"{name} test rows",
                        allow=max_test is not None)
-  return xtr, ytr, xte, yte, n_train_full, n_test_full
+  # Arity stays at 4: finetune.py:590 and tests/test_caduceus_finetune.py:468
+  # both unpack four, and finetune.py already gets the full sizes from
+  # task_stats(). The coverage assertion above is what actually guards the cap;
+  # the sizes are attached for the caller that wants to record them.
+  load_task.last_sizes = {"n_train_full": n_train_full,
+                          "n_test_full": n_test_full}
+  return xtr, ytr, xte, yte
 
 
 def probe(train_x, train_y, test_x, test_y, seed=0):
@@ -235,8 +241,11 @@ def main():
   rows = []
   for name in wanted:
     try:
-      xtr, ytr, xte, yte, n_train_full, n_test_full = load_task(
+      xtr, ytr, xte, yte = load_task(
         name, args.max_train, args.max_test, args.seed)
+      sizes = getattr(load_task, "last_sizes", {})
+      n_train_full = sizes.get("n_train_full", len(xtr))
+      n_test_full = sizes.get("n_test_full", len(xte))
     except Exception as exc:  # noqa: BLE001
       print(f"{name:<36}{'LOAD FAILED':>8}   {type(exc).__name__}: {exc}"[:110])
       rows.append({"task": name, "error": f"{type(exc).__name__}: {exc}"})
