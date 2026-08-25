@@ -40,6 +40,8 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 sys.path.insert(0, str(REPO))
 
+from scripts.eval.provenance import (  # noqa: E402
+  assert_full_coverage, provenance)
 from scripts.eval.caduceus.embed import embed_sequences  # noqa: E402
 from scripts.eval.dnahnet.score_mavedb import load_checkpoint_model  # noqa: E402
 
@@ -137,17 +139,30 @@ def task_stats(name):
 
 
 def load_task(name, max_train=None, max_test=None, seed=0):
+  """Load one task. Returns the rows AND how many were available.
+
+  The sizes are returned rather than discarded because every published probe
+  result before 2026-08-25 was capped at 20000/8000 and the output recorded
+  only the USED count, with nothing to compare it against. See
+  scripts/eval/provenance.py.
+  """
   data, train_key, test_key = _open_task(name)
 
   def take(split, cap):
     rows = data[split]
+    available = len(rows)
     if cap and len(rows) > cap:
       rows = rows.shuffle(seed=seed).select(range(cap))
-    return list(rows[_sequence_column(rows)]), np.asarray(rows["label"])
+    return (list(rows[_sequence_column(rows)]), np.asarray(rows["label"]),
+            available)
 
-  xtr, ytr = take(train_key, max_train)
-  xte, yte = take(test_key, max_test)
-  return xtr, ytr, xte, yte
+  xtr, ytr, n_train_full = take(train_key, max_train)
+  xte, yte, n_test_full = take(test_key, max_test)
+  assert_full_coverage(len(xtr), n_train_full, f"{name} train rows",
+                       allow=max_train is not None)
+  assert_full_coverage(len(xte), n_test_full, f"{name} test rows",
+                       allow=max_test is not None)
+  return xtr, ytr, xte, yte, n_train_full, n_test_full
 
 
 def probe(train_x, train_y, test_x, test_y, seed=0):
@@ -220,7 +235,7 @@ def main():
   rows = []
   for name in wanted:
     try:
-      xtr, ytr, xte, yte = load_task(
+      xtr, ytr, xte, yte, n_train_full, n_test_full = load_task(
         name, args.max_train, args.max_test, args.seed)
     except Exception as exc:  # noqa: BLE001
       print(f"{name:<36}{'LOAD FAILED':>8}   {type(exc).__name__}: {exc}"[:110])
@@ -246,6 +261,10 @@ def main():
     rows.append({"task": name, "accuracy": accuracy, "C": c, "window": window,
                  "caduceus_ph_published": reference, "delta": delta,
                  "n_train": len(xtr), "n_test": len(xte),
+                 # The full split sizes, so a cap is visible in the output
+                 # rather than only inferable from suspiciously round numbers.
+                 "n_train_full": n_train_full, "n_test_full": n_test_full,
+                 "train_fraction": len(xtr) / max(n_train_full, 1),
                  "dim": int(etr.shape[1])})
 
   scored = [r for r in rows if "accuracy" in r]
@@ -270,6 +289,7 @@ def main():
   args.output_dir.mkdir(parents=True, exist_ok=True)
   path = args.output_dir / f"{args.label}.json"
   with tempfile.NamedTemporaryFile("w", dir=args.output_dir, delete=False) as fh:
+    summary["_provenance"] = provenance(args)
     json.dump(summary, fh, indent=2, sort_keys=True)
     fh.write("\n")
     tmp = Path(fh.name)

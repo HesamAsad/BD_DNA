@@ -1,0 +1,133 @@
+--- a/models/bidirectional_ssm.py
++++ b/models/bidirectional_ssm.py
+@@ -254,6 +254,24 @@
+     return x
+ 
+ 
++class _PrefillLayerShim(nn.Module):
++  """Tensor-in/tensors-out view of one prefill layer, for graph capture.
++
++  `torch.cuda.make_graphed_callables` only accepts callables whose arguments
++  are all tensors, and `scan_clean_with_boundaries` takes an int block size.
++  The shim binds it. It holds the layer by reference, so it exposes exactly the
++  same parameters and no state is duplicated.
++  """
++
++  def __init__(self, layer: "BiMambaLayer", block_size: int):
++    super().__init__()
++    self.layer = layer
++    self.block_size = int(block_size)
++
++  def forward(self, x: torch.Tensor):
++    return self.layer.scan_clean_with_boundaries(x, self.block_size)
++
++
+ class BidirectionalSSM(nn.Module):
+   """Partial-bidirectional block denoiser with optional C-a suffix cache."""
+ 
+@@ -298,6 +316,30 @@
+     self.checkpoint_boundary_prefill = self._resolve_prefill_checkpoint(
+       config, model)
+ 
++    # EXPERIMENTAL, opt-in. See `_graphed_prefill_layers` for what it does and
++    # what it requires. Off by default: it is bitwise-safe but not
++    # failure-safe.
++    self.graph_boundary_prefill = bool(
++      model.get("graph_boundary_prefill", False))
++    self._graphed_prefill = None
++    self._graphed_prefill_key = None
++    if self.graph_boundary_prefill:
++      if self.checkpoint_boundary_prefill:
++        raise ValueError(
++          "graph_boundary_prefill and checkpoint_boundary_prefill are "
++          "mutually exclusive: checkpoint runs Python saved-tensor hooks "
++          "during backward, which a CUDA graph cannot capture.")
++      if float(model.get("dropout", 0.0)) != 0.0:
++        raise ValueError(
++          "graph_boundary_prefill requires model.dropout=0: RNG inside the "
++          "captured region would be replayed with a frozen philox offset.")
++      if int(config.trainer.get("accumulate_grad_batches", 1)) > 1:
++        # Only unsafe for loops that run several forwards before one backward;
++        # Lightning does not, but the check is cheap and the failure is silent.
++        print("[bissm] graph_boundary_prefill with "
++              "accumulate_grad_batches>1: safe only if backward runs per "
++              "micro-batch (Lightning does).", flush=True)
++
+     self.token_embedding = nn.Embedding(vocab_size, self.hidden_size)
+     self.time_embedding = (
+       TimestepEmbedder(self.hidden_size, int(model.get("cond_dim", 128)))
+@@ -477,6 +519,57 @@
+       boundaries.append(cache)
+     return tuple(boundaries)
+ 
++  def _graphed_prefill_layers(self, x, block_size):
++    """CUDA-graph the 12 prefill layers, capturing forward AND backward.
++
++    WHY. At L=2048 a BiSSM step takes 258 ms while its arithmetic needs ~44,
++    and the step time is FLAT while the arithmetic quadruples to L=8192 --
++    the step is bound by the cost of ISSUING work, not doing it. The prefill
++    is 1239 of the 2132 forward dispatches and roughly two thirds of the whole
++    step once its backward is counted, so replaying it from a graph is where
++    the floor actually lives.
++
++    WHY THIS AND NOT `torch.compile`. A graph replays the same kernels with
++    the same arguments in the same order, so it is bitwise identical BY
++    CONSTRUCTION. Inductor fuses pointwise chains and keeps the intermediates
++    in fp32, which changes results in the last bits -- not allowed here.
++
++    PRECONDITIONS, all asserted below rather than assumed:
++      * static shapes -- guaranteed by a fixed `model.length` and micro batch;
++        a shape change rebuilds the graphs, which is why the cache is keyed;
++      * no RNG inside the captured region -- `model.dropout` must be 0, which
++        is what both SSM configs ship;
++      * `checkpoint_boundary_prefill` off -- checkpoint's saved-tensor hooks
++        run Python during backward and cannot be captured;
++      * Triton autotuning warmed before capture -- `make_graphed_callables`
++        runs three warmup iterations on a side stream, which is what forces
++        `mamba_chunk_scan_combined`'s autotune to settle.
++
++    KNOWN LIMITATION. A graphed callable writes its outputs into static
++    buffers that the next replay overwrites, so every micro-batch's backward
++    must run before the next micro-batch's forward. That is what Lightning
++    does under `accumulate_grad_batches`, but it is a real constraint and any
++    loop that batches several forwards before one backward will read clobbered
++    states. Refuse to enable it if that is ever configured.
++    """
++    key = (tuple(x.shape), x.dtype, block_size)
++    if self._graphed_prefill_key == key:
++      return self._graphed_prefill
++    if self._graphed_prefill is not None:
++      raise RuntimeError(
++        "graph_boundary_prefill requires a static prefill shape, but it "
++        f"changed from {self._graphed_prefill_key} to {key}. Fix the micro "
++        "batch and model.length, or set graph_boundary_prefill=false.")
++    if not x.is_cuda:
++      return None
++    shims = tuple(
++      _PrefillLayerShim(layer, block_size) for layer in self.layers)
++    samples = tuple(
++      (torch.zeros_like(x).requires_grad_(True),) for _ in shims)
++    self._graphed_prefill = torch.cuda.make_graphed_callables(shims, samples)
++    self._graphed_prefill_key = key
++    return self._graphed_prefill
++
+   # Bytes of stored prefill activation per (prefix token x layer x hidden
+   # unit), fitted to the single measured on/off pair in the tree:
+   # logs/sizing_sweep_112593.out:8-9, BiSSM L=8192 batch 4 hidden 768
+@@ -575,6 +668,16 @@
+     recompute = (self.checkpoint_boundary_prefill
+                  and torch.is_grad_enabled()
+                  and x.requires_grad)
++    graphed = None
++    if (self.graph_boundary_prefill and not recompute
++        and torch.is_grad_enabled() and x.requires_grad):
++      graphed = self._graphed_prefill_layers(x, block_size)
++    if graphed is not None:
++      for call in graphed:
++        x, conv_states, ssm_states = call(x)
++        conv_per_layer.append(conv_states)
++        ssm_per_layer.append(ssm_states)
++      return conv_per_layer, ssm_per_layer
+     for layer in self.layers:
+       if recompute:
+         # `use_reentrant=False` is required here: the reentrant implementation

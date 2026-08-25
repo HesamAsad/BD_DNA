@@ -21,30 +21,33 @@ export PYTHONPATH="$REPO"
 export HYDRA_FULL_ERROR=1
 export TOKENIZERS_PARALLELISM=false
 
-# `bsub -env` splits its own argument on commas, so list-valued variables are
-# passed with '+' as the separator and translated back here. Both spellings
-# work when the script is run directly.
-ARMS=${ARMS:-bissm,dit}
-BATCH_SIZES=${BATCH_SIZES:-4,8}
-LENGTHS=${LENGTHS:-8192}
-BLOCK_SIZE=${BLOCK_SIZE:-256}
-CHECKPOINT_MODES=${CHECKPOINT_MODES:-off,on}
-ARMS=${ARMS//+/,}
-BATCH_SIZES=${BATCH_SIZES//+/,}
-LENGTHS=${LENGTHS//+/,}
-CHECKPOINT_MODES=${CHECKPOINT_MODES//+/,}
+# This file was once a copy of the sizing-sweep launcher and still carried its
+# knobs -- ARMS, BATCH_SIZES, LENGTHS, BLOCK_SIZE, CHECKPOINT_MODES, WARMUP --
+# none of which ever reached argv, while the banner printed them as if they had.
+# Only the variables below are real. Everything echoed is built from what is
+# actually passed.
+ARMS_JSON=${ARMS_JSON:-$REPO/results/benchmark_arms.json}
+BENCH_OUT=${BENCH_OUT:-$REPO/results/benchmark_table.json}
+BATCH_SIZE=${BATCH_SIZE:-4}
+# 0 = score the WHOLE validation cache. The previous default of 32 batches was
+# 1,048,448 of 76.9M held-out nt (1.36%) and moved uSSM-AR's val NLL by 0.0084,
+# which is 1.5x the architecture difference this table exists to report.
+VAL_BATCHES=${VAL_BATCHES:-0}
+MC_SAMPLES=${MC_SAMPLES:-8}
 WARMUP=${WARMUP:-2}
 ITERS=${ITERS:-5}
-LABEL=${LABEL:-sweep}
-OUTPUT=${OUTPUT:-$REPO/results/sizing/$LABEL.json}
 
-mkdir -p "$(dirname "$OUTPUT")" logs
+mkdir -p "$(dirname "$BENCH_OUT")" logs
 
-echo "[$(date)] sizing sweep | arms=$ARMS batch=$BATCH_SIZES lengths=$LENGTHS block=$BLOCK_SIZE ckpt=$CHECKPOINT_MODES"
+echo "[$(date)] benchmark_arms | arms_json=$ARMS_JSON out=$BENCH_OUT"
+echo "  batch=$BATCH_SIZE val_batches=$VAL_BATCHES (0=all) mc=$MC_SAMPLES warmup=$WARMUP iters=$ITERS"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv
 
 "$PYTHON" -u scripts/eval/benchmark_arms.py \
-  --arms "${ARMS_JSON:-/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/results/benchmark_arms.json}" \
-  --output "${BENCH_OUT:-/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/results/benchmark_table.json}" \
-  --val-batches "${VAL_BATCHES:-32}" --mc-samples "${MC_SAMPLES:-8}" \
-  --iters "${ITERS:-5}"
+  --arms "$ARMS_JSON" \
+  --output "$BENCH_OUT" \
+  --batch-size "$BATCH_SIZE" \
+  --val-batches "$VAL_BATCHES" \
+  --mc-samples "$MC_SAMPLES" \
+  --warmup "$WARMUP" \
+  --iters "$ITERS"

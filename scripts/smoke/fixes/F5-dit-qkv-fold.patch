@@ -1,0 +1,68 @@
+--- a/models/dit.py
++++ b/models/dit.py
+@@ -531,7 +531,53 @@
+         qkv = apply_rotary_pos_emb_torchscript(
+           qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
+     return qkv
+-  
++
++  def get_qkv_packed_halves(self, x, rotary_cos_sin):
++    """qkv for `[x_t; x_0]` in ONE projection and ONE rotary.
++
++    `attn_qkv` and the rotary are both row-wise, so projecting the already
++    concatenated `[x_t; x_0]` is exactly the concatenation of projecting each
++    half; the split only ever existed because both halves must be given
++    positions `0..n-1`, and folding the halves into the BATCH axis gives them
++    that without a second GEMM.
++
++    What this removes per block per step: one `addmm`, two contiguity copies
++    of the non-contiguous `x[:, :n]` / `x[:, n:]` slices, one full-width
++    `cat` of the packed qkv, and that `cat`'s two `slice_backward` copies in
++    backward.
++
++    Bitwise: the rotary is pointwise and every element still meets the same
++    `cos`/`sin` (they are indexed by position only), and both `rearrange`s are
++    pure views of a contiguous tensor. The one operation whose result is not
++    exact BY CONSTRUCTION is the projection: cuBLAS may pick a different tile
++    or split-k for one `M = 2*b*n` GEMM than for two `M = b*n` GEMMs. The
++    reduction axis `K = hidden_size` is unchanged, which is what makes split-k
++    unlikely, but it must be MEASURED on the GPU --
++    scripts/smoke/fix_equivalence.py::F5 asserts it.
++    """
++    batch_size, seq_len, _ = x.shape
++    if seq_len != 2 * self.n or self.kv_cache is not None:
++      # Only the `[x_t; x_0]` training layout is foldable; anything else --
++      # including a live kv cache, which `get_qkv` splices in per half --
++      # keeps the original spelling rather than guessing at the split point.
++      qkv_x = self.get_qkv(x[:, :self.n], rotary_cos_sin)
++      qkv_x0 = self.get_qkv(x[:, self.n:], rotary_cos_sin)
++      return torch.cat((qkv_x, qkv_x0), dim=1)
++    qkv = self.attn_qkv(x)
++    qkv = einops.rearrange(
++      qkv, 'b (two s) (three h d) -> (b two) s three h d',
++      two=2, three=3, h=self.n_heads)
++    with torch.amp.autocast('cuda', enabled=False):
++      cos, sin = rotary_cos_sin
++      if self.attn_backend == 'flash_attn':
++        qkv = apply_rotary_pos_emb(
++          qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
++      else:
++        qkv = apply_rotary_pos_emb_torchscript(
++          qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
++    return einops.rearrange(
++      qkv, '(b two) s three h d -> b (two s) three h d', two=2)
++
+   def attn_mlp(self, x, c, gate_msa, gate_mlp, shift_mlp, scale_mlp, x_skip):
+     bias_dropout_scale_fn = self._get_bias_dropout_scale()
+     if c is not None:
+@@ -603,9 +649,7 @@
+ 
+     # get qkvs
+     if mask is not None and not sample_mode:
+-      qkv_x = self.get_qkv(x[:,:self.n], rotary_cos_sin)
+-      qkv_x0 = self.get_qkv(x[:,self.n:], rotary_cos_sin)
+-      qkv = torch.cat((qkv_x, qkv_x0), dim=1)
++      qkv = self.get_qkv_packed_halves(x, rotary_cos_sin)
+     else:
+       qkv = self.get_qkv(x, rotary_cos_sin, store_kv=store_kv)
+       

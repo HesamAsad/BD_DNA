@@ -1,0 +1,40 @@
+--- a/models/dit.py
++++ b/models/dit.py
+@@ -885,9 +885,36 @@
+                 f'alloc={torch.cuda.memory_allocated() / 2**30:.2f}GiB '
+                 f'peak={torch.cuda.max_memory_allocated() / 2**30:.2f}GiB',
+                 flush=True)
++      # NOT BITWISE -- do not land this without reading the next paragraph.
++      #
++      # Drop the `x_0` half BEFORE the head rather than after. `DDiTFinalLayer`
++      # is row-independent in the FORWARD direction (LayerNorm over the feature
++      # axis, a modulate that broadcasts over positions, a row-wise linear), so
++      # the surviving rows and hence the loss are bitwise unchanged, and the
++      # discarded half stops paying for a full-width fp32 LayerNorm and a vocab
++      # projection whose output is thrown away.
++      #
++      # The GRADIENTS are not. `grad_weight` is a reduction ACROSS rows: the
++      # old path sums 2L rows of which the second L contribute exactly zero,
++      # the new path sums L. Adding exact zeros is exact, but it moves the
++      # blocked GEMM's chunk boundaries, so the nonzero terms are grouped
++      # differently. Measured: 1.11e-16 on
++      # `output_layer.linear.weight` at float64, forward bitwise
++      # (scripts/smoke/fix_equivalence.py --cases f5f6-dit). That is one ULP,
++      # and it is a training-trajectory change, not an inference change --
++      # but the measured saving is <0.2%, so this does not pay for itself.
++      #
++      # The `(b h) d` conditioning branch inside `DDiTFinalLayer` reshapes `c`
++      # against the SEQUENCE length, so it is the one case where slicing early
++      # is not even algebraically a no-op; leave it alone.
++      trim_early = (
++        cross_attn and not sample_mode
++        and (t_cond is None or t_cond.shape[0] == x.shape[0]))
++      if trim_early:
++        x = x[:, :self.n]
+       x = self.output_layer(x, t_cond)
+     if log_mem:
+       self._block_mem_logged = True
+-    if cross_attn and not sample_mode:
++    if cross_attn and not sample_mode and not trim_early:
+       x = x[:, :self.n]
+     return x

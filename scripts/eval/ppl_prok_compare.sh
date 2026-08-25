@@ -29,7 +29,12 @@ CKPT_XF=${CKPT_XF:?set CKPT_XF=/path/to/transformer.ckpt}
 L=${L:-8192}
 BLOCK_SIZE=${BLOCK_SIZE:-256}
 EVAL_BATCH=${EVAL_BATCH:-4}
-LIMIT=${LIMIT:-512}                    # 512 * 4 * 8192 = 16.8M validation nt
+# LIMIT=0 means the FULL validation cache, matching configs/config.yaml:77
+# (`limit_val_batches: 1.0`, "validate on full dataset"). The old default of
+# 512 scored 512 of 2,347 batches -- 21.8% -- and the launcher silently
+# contradicted the config it loaded. NB `LIMIT` is a bare, collidable name
+# that `bsub -env all` will happily import from the submitting shell.
+LIMIT=${LIMIT:-1.0}                    # 1.0 = all 2,347 batches = 76.9M validation nt
 DNA_NUM_FILES=${DNA_NUM_FILES:-1}
 DNA_MAX_ROWS=${DNA_MAX_ROWS:-400000}
 ACTIVE_BLOCKS=${ACTIVE_BLOCKS:-all}

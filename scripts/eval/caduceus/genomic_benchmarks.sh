@@ -36,8 +36,20 @@ EXTRA=()
 # NB: do not call this WINDOW -- GNU screen exports WINDOW=<n> and
 # `bsub -env all` carries it in, which silently passed --window 0.
 [ -n "${GB_WINDOW:-}" ] && EXTRA+=(--window "$GB_WINDOW")
-[ -n "${GB_MAX_TRAIN:-}" ] && EXTRA+=(--max-train "$GB_MAX_TRAIN")
-[ -n "${GB_MAX_TEST:-}" ] && EXTRA+=(--max-test "$GB_MAX_TEST")
+# Subsampling is opt-in twice over, matching finetune.sh. GB_MAX_TRAIN/GB_MAX_TEST
+# arriving through `bsub -env all` are IGNORED unless GB_ALLOW_CAPS=1 says you
+# meant it. Every published probe result before 2026-08-25 was silently capped at
+# 20000/8000 by exactly this path -- on human_ensembl_regulatory that is 8.6% of
+# the training data available.
+if [ -n "${GB_MAX_TRAIN:-}${GB_MAX_TEST:-}" ]; then
+  if [ "${GB_ALLOW_CAPS:-0}" = "1" ]; then
+    echo "WARNING: subsampling ON -- max_train=${GB_MAX_TRAIN:-none} max_test=${GB_MAX_TEST:-none}"
+    [ -n "${GB_MAX_TRAIN:-}" ] && EXTRA+=(--max-train "$GB_MAX_TRAIN")
+    [ -n "${GB_MAX_TEST:-}" ] && EXTRA+=(--max-test "$GB_MAX_TEST")
+  else
+    echo "IGNORING inherited GB_MAX_TRAIN=${GB_MAX_TRAIN:-} GB_MAX_TEST=${GB_MAX_TEST:-} (set GB_ALLOW_CAPS=1 to mean it)"
+  fi
+fi
 
 echo "[$(date)] GenomicBenchmarks probe | label=$LABEL | ckpt=$CKPT | tasks=$TASKS"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader

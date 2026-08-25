@@ -54,8 +54,12 @@ STYLE = {
   "dit-ar":  ("Transformer-AR", "#5b9bd5", "^"),
   "bissm":   ("BiSSM-BD",       "#c2503f", "o"),
   "ussm-ar": ("uSSM-AR",        "#e0a62e", "D"),
+  # The control that isolates the reverse scan: same backbone family and same
+  # objective as bissm, one difference. Omitting it was an oversight -- the
+  # `act_uni` term below was already computed and then discarded.
+  "ussm":    ("uSSM-BD",        "#8c6d1f", "v"),
 }
-ORDER = ["dit", "dit-ar", "bissm", "ussm-ar"]
+ORDER = ["dit", "dit-ar", "bissm", "ussm", "ussm-ar"]
 
 
 def flops_per_sequence(arm, length, block=256, n_layers=12):
@@ -88,6 +92,11 @@ def flops_per_sequence(arm, length, block=256, n_layers=12):
 
   if arm == "ussm-ar":
     fwd = ar
+  elif arm == "ussm":
+    # uSSM-BD: the same clean boundary prefill as bissm, but a single-direction
+    # active pass -- models/unidirectional_ssm.py:_scan_active takes only a
+    # left_cache and never runs a reverse scan.
+    fwd = clean + act_uni
   elif arm == "bissm":
     fwd = clean + act_bi
   elif arm == "dit-ar":

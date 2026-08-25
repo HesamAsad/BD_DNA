@@ -192,7 +192,10 @@ def measure_nll(model, config, tokenizer, batches, seed, device,
   total, tokens = 0.0, 0
   with torch.inference_mode():
     for index, batch in enumerate(valid_loader):
-      if index >= batches:
+      # `batches` of 0 (or None) means NO LIMIT -- score the whole cache.
+      # Written as a falsy test on purpose: `index >= 0` is true on the first
+      # batch, so a bare `index >= batches` would evaluate nothing at all.
+      if batches and index >= batches:
         break
       x0 = batch["input_ids"].to(device)
       mask = batch.get("attention_mask")
@@ -213,7 +216,12 @@ def main():
                       help="JSON: [{label, checkpoint, batch_size?}, ...]")
   parser.add_argument("--output", type=Path, required=True)
   parser.add_argument("--batch-size", type=int, default=4)
-  parser.add_argument("--val-batches", type=int, default=32)
+  parser.add_argument("--val-batches", type=int, default=0,
+                      help="0 = the WHOLE validation cache (the default). A "
+                           "positive value truncates. The old default of 32 "
+                           "scored 1,048,448 of 76.9M held-out nt (1.36%) and "
+                           "moved uSSM-AR val NLL by 0.0084 -- 1.5x the "
+                           "architecture difference this table reports.")
   parser.add_argument("--mc-samples", type=int, default=8,
                       help="diffusion times averaged per batch for the "
                            "block-diffusion arms; ignored for AR")

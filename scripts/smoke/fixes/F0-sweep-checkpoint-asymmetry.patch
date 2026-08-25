@@ -1,0 +1,43 @@
+--- a/scripts/smoke/sizing_sweep.py
++++ b/scripts/smoke/sizing_sweep.py
+@@ -181,6 +181,29 @@
+     print(f"extra overrides: {list(extra)}\n")
+   modes = [m.strip() for m in args.checkpoint_modes.split(",") if m.strip()]
+   rows = []
++
++  # `arm_modes` below silently forces "off" on any arm without a boundary
++  # prefill, so a sweep run with `--checkpoint-modes on` charges the BD arms an
++  # extra forward over `L - block_size` tokens that their own AR reference does
++  # not pay -- about 1.16x of the arm's FLOPs and ~2573 of BiSSM's 8152
++  # operator dispatches per step. Every scaling run in the tree did exactly
++  # that (logs/sizing_sweep_1162{16..20}.out:1 all read `ckpt=on`), so that
++  # handicap is inside the "unexplained" column of
++  # results/figures/scaling_data.json. Say so, loudly, in the output and in the
++  # JSON, rather than leaving the reader to find it.
++  arms_run = [a.strip() for a in args.arms.split(",") if a.strip()]
++  asymmetric = ("on" in modes
++                and any(ARMS[a][2] for a in arms_run)
++                and any(not ARMS[a][2] for a in arms_run))
++  if asymmetric:
++    handicapped = [a for a in arms_run if ARMS[a][2]]
++    reference = [a for a in arms_run if not ARMS[a][2]]
++    print(f"!! ASYMMETRIC CHECKPOINTING: {handicapped} run with "
++          f"checkpoint_boundary_prefill=on, {reference} cannot and run off. "
++          f"The ckpt=on rows carry ~1.16x extra arithmetic that the reference "
++          f"rows do not. Compare only within a mode, or rerun with "
++          f"--checkpoint-modes off.\n")
++
+   header = (f"{'arm':<7}{'L':>7}{'batch':>6}{'ckpt':>6}"
+             f"{'peak GiB':>10}{'step s':>9}{'nt/s':>11}")
+   print(header)
+@@ -211,7 +234,9 @@
+     args.output.parent.mkdir(parents=True, exist_ok=True)
+     args.output.write_text(json.dumps(
+       {"device": torch.cuda.get_device_name(device),
+-       "total_gib": total, "rows": rows}, indent=2) + "\n")
++       "total_gib": total,
++       "checkpoint_asymmetry": bool(asymmetric),
++       "rows": rows}, indent=2) + "\n")
+     print(f"\nwrote {args.output}")
+ 
+ 
