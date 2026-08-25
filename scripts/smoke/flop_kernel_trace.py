@@ -599,8 +599,18 @@ def main_cli():
       raise ValueError(
         f"arm {args.arm!r} has no model.checkpoint_boundary_prefill to set")
     config.model.checkpoint_boundary_prefill = args.checkpoint_prefill == "on"
-  checkpoint_prefill = bool(
-    config.model.get("checkpoint_boundary_prefill", False))
+  # `checkpoint_boundary_prefill` may now be the string 'auto', and
+  # `bool('auto')` is True -- which would make this banner claim a recompute
+  # that is not happening. Ask the class that owns the policy instead. Arms
+  # without the key (dit, the AR arms) still read a plain False and are
+  # unaffected.
+  _raw_prefill_flag = config.model.get("checkpoint_boundary_prefill", False)
+  if isinstance(_raw_prefill_flag, str):
+    from models.bidirectional_ssm import BidirectionalSSM
+    checkpoint_prefill = BidirectionalSSM._resolve_prefill_checkpoint(
+      config, config.model)
+  else:
+    checkpoint_prefill = bool(_raw_prefill_flag)
   print(f"checkpoint_boundary_prefill={checkpoint_prefill}"
         + ("  <- the boundary prefill's forward runs TWICE, once in forward "
            "and once recomputed in backward (bidirectional_ssm.py:466-477); "

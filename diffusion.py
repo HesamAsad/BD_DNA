@@ -163,6 +163,11 @@ class Diffusion(L.LightningModule):
         self.config.training.sampling_eps_min))
       self.register_buffer('sampling_eps_max', torch.tensor(
         self.config.training.sampling_eps_max))
+      # Host mirrors, read only by `if` statements (see `_eps_host`). Kept in
+      # step with the buffers at `on_load_checkpoint` and
+      # `_clipped_schedule_search`, the only two places they are written.
+      self._sampling_eps_min_host = float(self.sampling_eps_min.item())
+      self._sampling_eps_max_host = float(self.sampling_eps_max.item())
       
     self.time_conditioning = self.config.algo.time_conditioning
     self.neg_infinity = -1000000.0
@@ -240,6 +245,8 @@ class Diffusion(L.LightningModule):
     if 'sampling_eps_min' in checkpoint.keys():
       self.sampling_eps_min = checkpoint['sampling_eps_min']
       self.sampling_eps_max = checkpoint['sampling_eps_max']
+      self._sampling_eps_min_host = float(self.sampling_eps_min.item())
+      self._sampling_eps_max_host = float(self.sampling_eps_max.item())
     # Copied from:
     # https://github.com/Dao-AILab/flash-attention/blob/main/training/src/datamodules/language_modeling_hf.py#L41
     self.fast_forward_epochs = checkpoint['loops'][
@@ -394,17 +401,32 @@ class Diffusion(L.LightningModule):
       return torch.autocast('cuda', dtype=torch.float16)
     return contextlib.nullcontext()
 
+  def _bos_is_possible(self):
+    """Whether any row *could* carry BOS, decided without touching the device.
+
+    When this is False `_bos_rows` is the all-False vector by construction, so
+    every downstream masked write is a no-op and can be skipped outright.
+    """
+    return bool(self.ignore_bos) and self.tokenizer.bos_token_id is not None
+
   def _bos_rows(self, tokens):
     """Rows whose first token really is BOS (rather than the first base)."""
-    if not self.ignore_bos or self.tokenizer.bos_token_id is None:
+    if not self._bos_is_possible():
       return torch.zeros(
         tokens.shape[0], dtype=torch.bool, device=tokens.device)
     return tokens[:, 0].eq(self.tokenizer.bos_token_id)
 
   def _preserve_observed_bos(self, noisy_tokens, clean_tokens):
+    # `bos_rows.any()` is a device->host sync: it drains the launch queue in
+    # the middle of a step whose cost is dominated by issuing launches. The
+    # branchless form writes column 0 unconditionally, leaving non-BOS rows
+    # holding exactly the value they already held, so the result is bitwise
+    # identical for every row. See scripts/smoke/fix_equivalence.py::F2.
+    if not self._bos_is_possible():
+      return noisy_tokens
     bos_rows = self._bos_rows(clean_tokens)
-    if bos_rows.any():
-      noisy_tokens[bos_rows, 0] = clean_tokens[bos_rows, 0]
+    noisy_tokens[:, 0] = torch.where(
+      bos_rows, clean_tokens[:, 0], noisy_tokens[:, 0])
     return noisy_tokens
 
   def _restrict_generation_probs(self, probabilities, current_tokens=None):
@@ -993,8 +1015,28 @@ class Diffusion(L.LightningModule):
                         0)[..., None]
     return edge
 
+  @staticmethod
+  def _eps_host(value, mirror):
+    """Host-side value of a sampling-eps bound, for CONTROL FLOW only.
+
+    `self.sampling_eps_{min,max}` are 0-d buffers, so `if eps_max >= 1` costs a
+    device->host sync per call. `mirror` is the host copy maintained at every
+    write site (`__init__`, `on_load_checkpoint`, `_clipped_schedule_search`),
+    so the branch can be taken without draining the launch queue.
+
+    The tensors remain the source of truth for the ARITHMETIC -- nothing here
+    feeds a value into a computation, so no float32/float64 rounding of the
+    bound can leak into `t`.
+    """
+    if mirror is not None:
+      return mirror
+    if value is None or not torch.is_tensor(value):
+      return value
+    return value.item()
+
   def _sample_t(
-      self, batch_dims, device, sampling_eps_min, sampling_eps_max, block_size=None):
+      self, batch_dims, device, sampling_eps_min, sampling_eps_max,
+      block_size=None, eps_min_host=None, eps_max_host=None):
     if block_size is None:
       block_size = self.block_size
     n = batch_dims[-1]
@@ -1011,8 +1053,13 @@ class Diffusion(L.LightningModule):
       t = t.repeat_interleave(block_size, dim=-1)
 
     # nll
-    if sampling_eps_max >= 1 and sampling_eps_min >= 1:
+    eps_max_h = self._eps_host(sampling_eps_max, eps_max_host)
+    eps_min_h = self._eps_host(sampling_eps_min, eps_min_host)
+    if eps_max_h >= 1 and eps_min_h >= 1:
       return torch.ones_like(t)
+    # Deliberately still the TENSOR operands: switching to the host floats
+    # would move `(max - min)` from float32 to float64-then-rounded and change
+    # `t` in the last bit.
     t = t * (sampling_eps_max - sampling_eps_min) + sampling_eps_min
     return t
 
@@ -1071,12 +1118,16 @@ class Diffusion(L.LightningModule):
       coin[:, None], torch.flip(attention_mask, dims=(1,)), attention_mask)
     return x0, attention_mask
 
-  def _forward_pass_diffusion(self, x0, t=None, sampling_eps_min=None, sampling_eps_max=None):
+  def _forward_pass_diffusion(self, x0, t=None, sampling_eps_min=None,
+                              sampling_eps_max=None, eps_min_host=None,
+                              eps_max_host=None):
     if t is None:
       t = self._sample_t(x0.shape,
                          x0.device,
                          sampling_eps_min,
-                         sampling_eps_max)
+                         sampling_eps_max,
+                         eps_min_host=eps_min_host,
+                         eps_max_host=eps_max_host)
 
     loss_scale, p = self.noise(t)
     sigma = self._sigma_from_p(p[:,0].unsqueeze(-1))
@@ -1093,7 +1144,8 @@ class Diffusion(L.LightningModule):
                    p,
                    sampling_eps_min=sampling_eps_min,
                    sampling_eps_max=sampling_eps_max)
-    if sampling_eps_min is not None and sampling_eps_min > 0.5:
+    eps_min_h = self._eps_host(sampling_eps_min, eps_min_host)
+    if eps_min_h is not None and eps_min_h > 0.5:
       loss_scale = - torch.ones_like(loss_scale)
     xt = self._preserve_observed_bos(xt, x0)
 
@@ -1256,9 +1308,14 @@ class Diffusion(L.LightningModule):
     return loss_scale * log_p_theta.reshape(batch_size, sequence_length)
 
   def _loss(self, x0, attention_mask, t=None, sampling_eps_min=None, sampling_eps_max=None):
+    eps_min_host = eps_max_host = None
     if sampling_eps_min is None and hasattr(self, 'sampling_eps_min'):
       sampling_eps_min = self.sampling_eps_min
       sampling_eps_max = self.sampling_eps_max
+      # Host mirrors of the two 0-d buffers, so the branches downstream never
+      # read the device. Maintained wherever the buffers are written.
+      eps_min_host = self._sampling_eps_min_host
+      eps_max_host = self._sampling_eps_max_host
     elif not hasattr(self, 'sampling_eps_min'):
       sampling_eps_min = 1e-3
       sampling_eps_max = 1.0
@@ -1275,12 +1332,19 @@ class Diffusion(L.LightningModule):
       loss = self._forward_pass_diffusion(
         input_tokens,
         sampling_eps_min=sampling_eps_min,
-        sampling_eps_max=sampling_eps_max,)
-    
-    bos_rows = self._bos_rows(input_tokens)
-    if bos_rows.any():
-      attention_mask[bos_rows, 0] = 0
-      
+        sampling_eps_max=sampling_eps_max,
+        eps_min_host=eps_min_host,
+        eps_max_host=eps_max_host,)
+
+    # Branchless for the same reason as `_preserve_observed_bos`: rows without
+    # BOS are written back their own value, so the mask is bitwise unchanged.
+    if self._bos_is_possible():
+      bos_rows = self._bos_rows(input_tokens)
+      attention_mask[:, 0] = torch.where(
+        bos_rows,
+        torch.zeros_like(attention_mask[:, 0]),
+        attention_mask[:, 0])
+
     nlls = (loss * attention_mask)
     token_nll = nlls.sum() / attention_mask.sum()
     return Loss(loss=token_nll,
@@ -1308,6 +1372,8 @@ class Diffusion(L.LightningModule):
     if self.config.algo.fix_clipping == False:
       self.sampling_eps_min.fill_(sampling_eps_min_best)
       self.sampling_eps_max.fill_(sampling_eps_max_best)
+      self._sampling_eps_min_host = float(sampling_eps_min_best)
+      self._sampling_eps_max_host = float(sampling_eps_max_best)
 
   def _score_entropy(self, log_score, sigma, xt, x0):
     """Computes the SEDD loss.

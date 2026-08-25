@@ -128,6 +128,8 @@ class SegmentMamba2(nn.Module):
     self.D._no_weight_decay = True
     self.norm_weight = nn.Parameter(torch.ones(self.d_inner))
     self.out_proj = nn.Linear(self.d_inner, d_model, bias=bias)
+    # Derived, device-keyed, deliberately not a buffer: see `_carry_mask`.
+    self._carry_mask_cache: dict = {}
 
   def zero_state(
       self,
@@ -409,6 +411,27 @@ class SegmentMamba2(nn.Module):
     y = y * torch.rsqrt(variance.to(dtype=y.dtype) + 1e-5)
     return y * self.norm_weight.to(dtype=y.dtype)
 
+  def _carry_mask(self, num_seg: int, device: torch.device) -> torch.Tensor:
+    """`keep[i, j] = j < i`, the strictly-earlier-block carry mask.
+
+    A constant of the geometry, not of the data or the parameters, yet the
+    inline `arange`/`arange`/`lt` spelling rebuilt it once per layer per
+    prefill call -- 72 of BiSSM's 8152 dispatches per step at L=2048, and the
+    step is dispatch-bound at short L. Caching returns the identical bool
+    tensor, so `torch.where` selects exactly the same elements.
+
+    Not a registered buffer: it is derived, must not enter any state_dict, and
+    is keyed by device so a cached entry is never used on the wrong one. Size
+    is `num_seg^2` bools -- 16 KiB at the longest geometry (L=32768).
+    """
+    key = (num_seg, device.type, device.index)
+    cached = self._carry_mask_cache.get(key)
+    if cached is None:
+      cached = (torch.arange(num_seg, device=device)[None, :]
+                < torch.arange(num_seg + 1, device=device)[:, None])
+      self._carry_mask_cache[key] = cached
+    return cached
+
   def _block_state_passing(
       self,
       dt: torch.Tensor,
@@ -443,9 +466,7 @@ class SegmentMamba2(nn.Module):
       # exponent[b, i, j, h] carries block j's final state to block i's entry.
       exponent = A * (
         cumulative[:, :, None, :] - cumulative[:, None, 1:, :])
-      keep = (
-        torch.arange(num_seg, device=dt.device)[None, :]
-        < torch.arange(num_seg + 1, device=dt.device)[:, None])
+      keep = self._carry_mask(num_seg, dt.device)
       decay = torch.where(
         keep[None, :, :, None],
         torch.exp(exponent.clamp(max=0.0)),

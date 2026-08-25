@@ -287,8 +287,16 @@ class BidirectionalSSM(nn.Module):
     # is mathematically identical and costs about one extra forward over the
     # prefix. It exists because peak memory, not arithmetic, is what pins the
     # SSM arms to micro batch 4 while the Transformer runs 8.
-    self.checkpoint_boundary_prefill = bool(
-      model.get("checkpoint_boundary_prefill", False))
+    # `true`/`false` pin the choice; `auto` decides once, here, from the run's
+    # geometry. Both branches are BITWISE identical (tests/
+    # test_bissm_diffusion_integration.py:180), so `auto` can only ever change
+    # time and memory -- never a number, never a checkpoint's output. The
+    # trade is one extra forward over the prefix (~1.16x of the arm's FLOPs,
+    # and ~2573 of BiSSM's 8152 operator dispatches per step) bought against
+    # `_prefill_activation_bytes` of peak memory, so it is only worth taking
+    # when that memory is actually scarce.
+    self.checkpoint_boundary_prefill = self._resolve_prefill_checkpoint(
+      config, model)
 
     self.token_embedding = nn.Embedding(vocab_size, self.hidden_size)
     self.time_embedding = (
@@ -468,6 +476,80 @@ class BidirectionalSSM(nn.Module):
         token_ids[:, start:start + block_size], cache, direction)
       boundaries.append(cache)
     return tuple(boundaries)
+
+  # Bytes of stored prefill activation per (prefix token x layer x hidden
+  # unit), fitted to the single measured on/off pair in the tree:
+  # logs/sizing_sweep_112593.out:8-9, BiSSM L=8192 batch 4 hidden 768
+  # n_blocks 12, peak 70.14 GiB (off) - 45.07 GiB (on) = 25.07 GiB over
+  # 4 * 7936 * 12 * 768 = 292,552,704 (token x layer x unit).
+  # Cross-checked at a second point: the same coefficient predicts batch 8 to
+  # need 50.1 GiB more than its 88.67 GiB checkpointed peak, i.e. 138.8 of
+  # 139.72 GiB -- and that configuration did OOM (logs/...:10).
+  _PREFILL_ACT_BYTES_PER_TOKEN_LAYER_UNIT = 92.0
+
+  @classmethod
+  def _prefill_activation_bytes(cls, batch, prefix_tokens, n_layers, hidden):
+    return (cls._PREFILL_ACT_BYTES_PER_TOKEN_LAYER_UNIT
+            * batch * prefix_tokens * n_layers * hidden)
+
+  @classmethod
+  def _resolve_prefill_checkpoint(cls, config, model):
+    """Decide `checkpoint_boundary_prefill` once, at construction.
+
+    Accepts `true`, `false`, or `auto`. `auto` turns recompute ON only when the
+    activations it would save are a large enough share of the device that
+    storing them plausibly threatens the peak; below that the recompute is a
+    pure loss (it costs ~14% more arithmetic and a third of the step's operator
+    dispatches, and buys memory that was never scarce).
+
+    Checked against every on/off datapoint in the tree; the rule is correct or
+    conservative at all four:
+
+      L=2048  b2  ->   2.0% -> off  (measured peak 4.25 GiB of 139.72)
+      L=8192  b4  ->  17.9% -> off  (measured: off fits at 70.14 GiB, and is
+                                     12% faster than on)
+      L=8192  b8  ->  35.9% -> on   (measured: off OOMs)
+      L=32768 b2  ->  36.7% -> on   (conservative: off would have fit at an
+                                     estimated ~97 GiB, so this leaves ~12%
+                                     on the table at the longest geometry)
+    """
+    setting = model.get("checkpoint_boundary_prefill", "auto")
+    if isinstance(setting, str):
+      normalized = setting.strip().lower()
+      if normalized not in {"auto", "true", "false"}:
+        raise ValueError(
+          "model.checkpoint_boundary_prefill must be true, false or 'auto', "
+          f"got {setting!r}")
+      if normalized != "auto":
+        return normalized == "true"
+    else:
+      return bool(setting)
+
+    total_bytes = getattr(cls, "_device_total_bytes", None)
+    if total_bytes is None:
+      if not torch.cuda.is_available():
+        # No device to run out of: the CPU paths in the test suite and the
+        # equivalence probes want the cheap, non-recomputing branch.
+        return False
+      total_bytes = torch.cuda.get_device_properties(
+        torch.cuda.current_device()).total_memory
+
+    block_size = int(config.block_size)
+    length = int(config.model.length)
+    num_blocks = max(length // block_size, 1)
+    prefix_tokens = max((num_blocks - 1) * block_size, 0)
+    batch = int(config.loader.batch_size)
+    n_layers = int(config.model.n_blocks)
+    hidden = int(config.model.hidden_size)
+    share = cls._prefill_activation_bytes(
+      batch, prefix_tokens, n_layers, hidden) / float(total_bytes)
+    budget = float(model.get("checkpoint_prefill_budget_frac", 0.20))
+    decision = share > budget
+    print(f"[bissm] checkpoint_boundary_prefill=auto -> {decision} "
+          f"(prefill activations ~{share:.1%} of device, budget {budget:.0%}; "
+          f"L={length} batch={batch} layers={n_layers} hidden={hidden})",
+          flush=True)
+    return decision
 
   def _stacked_boundary_states(
       self,

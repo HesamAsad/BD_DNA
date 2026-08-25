@@ -61,7 +61,12 @@ bidirectional_impl: fused
 # mathematically identical, asserted by
 # tests/test_bissm_diffusion_integration.py, and costs about one extra forward
 # over the prefix.
-checkpoint_boundary_prefill: false
+# 'auto' decides from the run's geometry at construction: recompute only when
+# the activations it would save are >checkpoint_prefill_budget_frac of the
+# device. Both branches are bitwise identical, so this can change time and
+# memory but never a number. `true`/`false` still pin it.
+checkpoint_boundary_prefill: auto
+checkpoint_prefill_budget_frac: 0.20
 
 # Ceilings on the SSM's initial state retention. Per-step retention is
 # exp(A*dt) with A drawn from (1, ssm_a_init_max) and dt from
