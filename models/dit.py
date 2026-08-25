@@ -690,7 +690,22 @@ class DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
       self.sigma_map = TimestepEmbedder(cond_dim)
     self.rotary_emb = Rotary(dim // config.model.n_heads)
     self.attn_backend = getattr(config.model, 'attn_backend', 'flash_attn')
-    self.max_seqlen = 1024
+    # The generation KV cache is allocated at this many tokens (:777) and the
+    # sliding window at :515-517 EVICTS the oldest block past it. It was
+    # hardcoded to 1024 while every other geometry parameter here is read from
+    # the config, so a model trained at 8192 and generating 16384 conditioned on
+    # only the last 1024 tokens and silently discarded 94% of its own output.
+    # That capped the cache at a constant 54.00 MiB regardless of context or
+    # generation length, and made generation throughput look good for the wrong
+    # reason -- attention over 1024 tokens is not the same work as full context.
+    #
+    # max_seqlen is used ONLY by the cache and that window; it appears in no
+    # training path (training uses self.n = config.model.length), so this cannot
+    # move training numerics. It does raise generation memory, which is the
+    # honest price of not throwing context away: the cache is
+    # eval_batch_size * max_seqlen * 3 * hidden_size * 2 bytes * n_blocks.
+    self.max_seqlen = int(getattr(config.model, 'max_seqlen', 0)
+                          or config.model.length)
 
     blocks = []
     for _ in range(config.model.n_blocks):
