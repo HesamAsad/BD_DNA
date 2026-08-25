@@ -718,7 +718,15 @@ class DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
           max_batch_size=config.loader.eval_batch_size,
           adaLN=self.adaLN,
           cond_dim=cond_dim,
-          attn_backend=self.attn_backend)
+          attn_backend=self.attn_backend,
+          # WAS MISSING. b0f3de4 wired max_seqlen for the block-diffusion
+          # branch below and left this one on the constructor default of 1024
+          # (:329), so the AR Transformer kept a 1023-key window whatever it was
+          # trained at. Measured: results/ar_decode/transformer-ar-101909
+          # cache_bytes = 61,281,792 = 12 blocks * 1023 tok * 3 (qkv) * 832 * 2,
+          # bit-exact -- 12.5% of its 8192 trained context. The published
+          # SSM-vs-Transformer decode memory ratio of 12.2x is really 97.4x.
+          max_seqlen=self.max_seqlen)
       else:
         block = DDiTBlock(
           n=config.model.length,

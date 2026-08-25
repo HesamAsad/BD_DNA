@@ -839,7 +839,16 @@ class Diffusion(L.LightningModule):
       return p_x0, x_new
 
   @torch.no_grad()
-  def _ar_sampler(self, bsz, seqlen=None, context_len=1024):
+  def _ar_sampler(self, bsz, seqlen=None, context_len=None):
+    """`context_len=None` means the model's full context.
+
+    This defaulted to a bare 1024, so every AR sample -- DiT and uSSM alike --
+    was conditioned on at most the last 1024 tokens regardless of
+    config.model.length, which was available and ignored. Pass an explicit
+    value only if you deliberately want a shorter window.
+    """
+    if context_len is None:
+      context_len = int(self.config.model.length)
     # reset kvs
     if self.config.sampling.kv_cache:
       self.backbone.reset_kv_cache()
@@ -1435,7 +1444,15 @@ class Diffusion(L.LightningModule):
 
   @torch.no_grad
   def _semi_ar_sampler(
-    self, n_samples, num_steps, num_strides, seqlen, context_size=1024):
+    self, n_samples, num_steps, num_strides, seqlen, context_size=None):
+    """`context_size=None` means the model's full context.
+
+    Also defaulted to a bare 1024. This is the DEFAULT generation path --
+    configs/config.yaml sets sampling.kv_cache: False, and with the cache off
+    the model sees only this window for the whole run.
+    """
+    if context_size is None:
+      context_size = int(self.config.model.length)
     if seqlen is None:
       seqlen = self.config.model.length
     sampling_steps = 0
