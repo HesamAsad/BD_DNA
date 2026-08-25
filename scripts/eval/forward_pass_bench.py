@@ -61,14 +61,23 @@ from scripts.eval.provenance import write_json  # noqa: E402
 from scripts.smoke.sizing_sweep import ARMS, build  # noqa: E402
 
 
-def run_case(arm, length, block_size, batch, warmup, iters, device):
+def run_case(arm, length, block_size, batch, warmup, iters, device,
+             attn_backend=None):
   row = {"arm": arm, "length": length, "batch_size": batch,
-         "block_size": block_size}
+         "block_size": block_size, "attn_backend": attn_backend}
   model = None
   try:
     supports_ckpt = ARMS[arm][2]
+    extra = ()
+    if attn_backend and arm in ("dit", "dit-ar"):
+      # flex is torch.compiled and raises an InductorError on this path (the
+      # same compiled kernel the FLOP counter could not enter). sdpa computes
+      # the same attention through an op that survives; note it evaluates the
+      # FULL pair set rather than only the mask-permitted ones, so dit timings
+      # under sdpa are an UPPER bound on the flex path, not equal to it.
+      extra = (f"model.attn_backend={attn_backend}",)
     config = build(arm, length, block_size, batch,
-                   False if supports_ckpt else None, ())
+                   False if supports_ckpt else None, extra)
     torch.manual_seed(0)
     model = Diffusion(config, DNATokenizer()).to(device)
     # eval(), not train(): dropout off, and nothing retained for a backward
@@ -124,6 +133,9 @@ def main_cli():
   parser.add_argument("--block-size", type=int, default=256)
   parser.add_argument("--warmup", type=int, default=5)
   parser.add_argument("--iters", type=int, default=15)
+  parser.add_argument("--attn-backend", default="sdpa",
+                      help="backend for the dit arms; flex raises an "
+                           "InductorError on the no_grad forward path")
   parser.add_argument("--output", type=Path,
                       default=REPO / "results" / "sizing" / "forward_pass.json")
   args = parser.parse_args()
@@ -141,7 +153,8 @@ def main_cli():
       if arm in ("bissm", "ussm", "dit") and length % args.block_size:
         continue
       row = run_case(arm, length, args.block_size, args.batch,
-                     args.warmup, args.iters, device)
+                     args.warmup, args.iters, device,
+                     attn_backend=args.attn_backend)
       rows.append(row)
       if row.get("oom"):
         print(f"{arm:<9}{length:>9}{'OOM':>10}")
