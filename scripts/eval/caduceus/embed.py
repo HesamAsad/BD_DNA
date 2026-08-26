@@ -28,6 +28,7 @@ test sensitivity to that choice.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -75,28 +76,68 @@ def _tapped_hidden_states(model, ids, taps, mask_rate=0.0, generator=None):
     noise = torch.rand(x.shape, generator=generator, device=x.device)
     x = torch.where(noise < mask_rate, model.mask_index, x)
 
-  if not (hasattr(backbone, "layers") and hasattr(backbone, "final_norm")):
+  is_dit = hasattr(backbone, "blocks")
+  if not is_dit and not (hasattr(backbone, "layers")
+                         and hasattr(backbone, "final_norm")):
     raise TypeError(
       f"{type(backbone).__name__} exposes no layer stack to tap; this script "
-      f"supports the SSM backbones. Add an explicit hook for the DiT if that "
-      f"arm is needed.")
+      f"supports the SSM and DiT backbones.")
 
-  top = len(backbone.layers)
+  top = len(backbone.blocks if is_dit else backbone.layers)
   taps = sorted(set(taps))
   if taps[0] < 1 or taps[-1] > top:
     raise ValueError(f"taps must lie in 1..{top}, received {taps}")
-
-  # SSM backbones: replay `forward_active` up to the output head, stopping at
-  # the deepest requested tap so a shallow probe is also a cheaper one.
+  wanted = set(taps)
   batch = x.shape[0]
+
+  if is_dit:
+    # The DiT's trailing norm lives inside `output_layer`, which is tied to the
+    # 13-token vocabulary and deliberately skipped, so every DiT tap -- top
+    # included -- is a raw block output. No block-diffusion mask: a BD
+    # checkpoint gets full attention and an AR one stays causal via b.causal,
+    # mirroring the SSM branch below.
+    h = backbone.vocab_embed(x)
+    rotary_cos_sin = backbone.rotary_emb(h)
+    # sigma_map exists only when adaLN does (dit.py:679, :687-690), i.e. for BD
+    # and not for AR, which was trained with c=None throughout.
+    sigma_map = getattr(backbone, "sigma_map", None)
+    t_cond = None
+    if sigma_map is not None:
+      t_cond = torch.nn.functional.silu(sigma_map(
+        torch.zeros(batch, device=x.device, dtype=torch.float32)))
+    ctx = (torch.amp.autocast("cuda", dtype=torch.bfloat16) if h.is_cuda
+           else contextlib.nullcontext())
+    with ctx:
+      for index in range(taps[-1]):
+        h = backbone.blocks[index](h, rotary_cos_sin, c=t_cond,
+                                   causal=backbone.causal, sample_mode=False,
+                                   mask=None, store_kv=False)
+        depth = index + 1
+        if depth in wanted:
+          yield depth, h.float()
+    return
+
+  # SSM backbones: replay the forward up to the output head, stopping at the
+  # deepest requested tap so a shallow probe is also a cheaper one.
+  #
+  # UNI vs BI matters and used to be ignored. This called `scan_active`
+  # unconditionally, which is BIDIRECTIONAL; a unidirectional (AR) checkpoint
+  # was therefore probed with a reverse scan it was never trained with, and
+  # nothing said so. UnidirectionalSSM subclasses BidirectionalSSM and
+  # overrides only backbone-level methods, so its layers do expose
+  # `scan_active` -- the call succeeded and quietly ran out of distribution.
+  uni = type(backbone).__name__ == "UnidirectionalSSM"
   h = backbone.token_embedding(x)
   left = backbone._empty_cache(batch, h.device, h.dtype, "left")
-  right = backbone._empty_cache(batch, h.device, h.dtype, "right")
-  wanted = set(taps)
+  right = None if uni else backbone._empty_cache(batch, h.device, h.dtype,
+                                                 "right")
   with backbone._compute_autocast(h):
     for index in range(taps[-1]):
-      h = backbone.layers[index].scan_active(
-        h, left.states[index], right.states[index])
+      if uni:
+        h, _ = backbone.layers[index].scan_clean(h, left.states[index])
+      else:
+        h = backbone.layers[index].scan_active(
+          h, left.states[index], right.states[index])
       depth = index + 1
       if depth in wanted:
         yield depth, (backbone.final_norm(h) if depth == top else h).float()
@@ -104,7 +145,8 @@ def _tapped_hidden_states(model, ids, taps, mask_rate=0.0, generator=None):
 
 def _hidden_states(model, ids, mask_rate=0.0, generator=None):
   """[batch, length, hidden] just before the vocabulary projection."""
-  top = len(model.backbone.layers)
+  b = model.backbone
+  top = len(b.blocks if hasattr(b, "blocks") else b.layers)
   for _, hidden in _tapped_hidden_states(model, ids, (top,), mask_rate,
                                          generator):
     return hidden
