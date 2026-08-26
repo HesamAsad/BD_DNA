@@ -33,7 +33,14 @@ RSV_ARG=""
 [ -n "$RSV" ] && RSV_ARG="-U $RSV"
 
 PYTHON=${PYTHON:-/software/cellgen/team361/ha11/envs/nichejepa/bin/python}
-RUNS=${RUNS:-outputs/hg38-caduceus}   # matches launch_hg38_arms.sh's pinned dirs
+# ABSOLUTE. main.py runs under Hydra, which chdir()s into its own run
+# directory, so a relative eval.checkpoint_path resolves against THAT and
+# produces a doubled path:
+#   outputs/hg38-caduceus/2026.08.26/231101/outputs/hg38-caduceus/.../best.ckpt
+# LSF 121761 died exactly this way for both AR arms. finetune.py does not
+# chdir, which is why the 16 GenomicBenchmarks jobs were unaffected -- so the
+# bug hid in one of the two eval paths and not the other.
+RUNS=${RUNS:-$REPO/outputs/hg38-caduceus}   # matches launch_hg38_arms.sh's pinned dirs
 WHICH=${WHICH:-best}                  # best.ckpt (val/nll-selected) or last.ckpt
 STAGE=${STAGE:-all}
 DATA_TRAIN=hg38-caduceus

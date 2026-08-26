@@ -1,0 +1,2 @@
+# submitted Wed 26 Aug 23:19:35 BST 2026 from 69a4e5b (DIRTY)
+121782 hg_ppl_all scripts/eval/ppl_ssm_baselines.sh DATA_TRAIN=hg38-caduceus,DATA_VALID=hg38-caduceus,L=8192,BLOCK_SIZE=256,LIMIT=1.0,XF_MODEL=small_xf_matched,XF_AR_MODEL=small_xf_matched,CKPT_USSM_AR=/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/outputs/hg38-caduceus/hg_ussm_ar/checkpoints/best.ckpt,CKPT_XF_AR=/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/outputs/hg38-caduceus/hg_xf_ar/checkpoints/best.ckpt
