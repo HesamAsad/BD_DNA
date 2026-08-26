@@ -145,7 +145,12 @@ EXTRA_ARGS+=(++model.ssm_state_size="$SSM_STATE_SIZE")
 if [ -n "$DATA_TRAIN" ]; then
   EXTRA_ARGS+=(data.train="$DATA_TRAIN")
   EXTRA_ARGS+=(data.valid="${DATA_VALID:-$DATA_TRAIN}")
-  EXTRA_ARGS+=(data.dna_num_files=null data.dna_max_rows=null)
+  # Overwrite rather than append a second, contradictory override. Passing
+  # both `data.dna_max_rows=400000` and `data.dna_max_rows=null` works (Hydra
+  # takes the last) but the resolved command then shows two values for one key,
+  # which is unreadable in a log and one reordering away from a silent 2% cap.
+  DNA_NUM_FILES=null
+  DNA_MAX_ROWS=null
 fi
 
 RUN_TAG=${LSB_JOBID:-$(date +%Y%m%d-%H%M%S)}

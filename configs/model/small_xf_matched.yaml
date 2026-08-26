@@ -1,0 +1,33 @@
+# Transformer geometry PARAMETER-MATCHED to the SSM arms, for both the AR and
+# the BD Transformer.
+#
+# WHY 832/13 AND NOT 768/12. A Mamba-2 layer carries more parameters than an
+# attention layer of the same width (in_proj expands 768 -> 3224, plus conv,
+# A_log, D and dt_bias), so equal hidden size does NOT mean equal capacity:
+#
+#   small_ussm / small_bissm  hidden 768   100,685,664 params
+#   small      (DiT 768/12)   hidden 768    85,019,917 params   -15.6%
+#   this file  (DiT 832/13)   hidden 832    99,772,621 params    -0.9%
+#
+# `small_ar_transformer` already used 832/13 for this reason, but the BD
+# Transformer arm was left on `small`. In a five-way comparison that made
+# Transformer-BD the only arm 15.6% smaller than the rest, which would read as
+# an architecture result and is a config artefact. 832/13 keeps head_dim at 64,
+# the same as every other arm.
+#
+# `small` is kept as-is: existing checkpoints reference it and reproducing them
+# needs it unchanged.
+name: small_xf_matched
+type: ddit
+hidden_size: 832
+cond_dim: 128
+length: 8192
+n_blocks: 12
+n_heads: 13                  # 832 / 13 = 64, matching every other arm's head_dim
+scale_by_sigma: True
+dropout: 0.0
+tie_word_embeddings: True
+adaln: False
+# Overridden per arm: the BD arm needs flex for the block-diffusion mask
+# (models/dit.py:787 rejects flash_attn there outright), the AR arm does not.
+attn_backend: flash_attn

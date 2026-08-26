@@ -34,6 +34,33 @@ VAL_EVERY=${VAL_EVERY:-100}
 VAL_BATCHES=${VAL_BATCHES:-64}
 NUM_WORKERS=${NUM_WORKERS:-16}
 WANDB_MODE=${WANDB_MODE:-online}
+# Geometry is a knob so the AR and BD Transformer arms can share one
+# parameter-matched config; small_ar_transformer and small_xf_matched are
+# the same 832/13 geometry under different names.
+MODEL=${MODEL:-small_ar_transformer}
+# Point at a pre-built cache instead of the carbon corpus (e.g. hg38-caduceus).
+# Until 2026-08-26 THIS SCRIPT HAD NO SUCH KNOB: it hardcoded
+# data=carbon-prokaryote with dna_num_files=1 / dna_max_rows=400000, which is
+# 2.09% of the prokaryote corpus. A DATA_TRAIN passed through `bsub -env` was
+# accepted by the shell and silently ignored, so an arm submitted as an hg38 run
+# would have trained on 2% of the WRONG corpus under an hg38 job name. The SSM
+# launcher already had it; these two did not, and nothing compared them.
+# dna_num_files/dna_max_rows are meaningless for a pre-built cache and are
+# nulled so the cache filename resolves (dataloader.py:492 appends _nf/_mr tags
+# only for carbon-* names, but leaving them set is still misleading).
+DATA_TRAIN=${DATA_TRAIN:-}
+DATA_VALID=${DATA_VALID:-}
+
+# Fail loudly on a variable this script cannot honour. The whole class of bug
+# above is "an env var was set, the shell accepted it, nothing read it".
+for _unsupported in DIRECTION OBJECTIVE SSM_A_INIT_MAX SSM_DT_MAX SSM_STATE_SIZE \
+                    RIGHT_FLANK_PROBABILITY CHECKPOINT_PREFILL; do
+  if [ -n "${!_unsupported:-}" ]; then
+    echo "FATAL: $_unsupported is set but this launcher does not implement it."
+    echo "       It would be silently ignored. Use the SSM launcher instead."
+    exit 2
+  fi
+done
 
 export HF_HOME=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/huggingface
 export TORCH_HOME=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/torch
@@ -48,6 +75,16 @@ mkdir -p "$HF_HOME" "$TORCH_HOME" "$XDG_CACHE_HOME" outputs watch_folder logs sa
 
 EXTRA_ARGS=()
 [[ "$WANDB_MODE" == "off" ]] && EXTRA_ARGS+=(wandb=null)
+if [ -n "$DATA_TRAIN" ]; then
+  EXTRA_ARGS+=(data.train="$DATA_TRAIN")
+  EXTRA_ARGS+=(data.valid="${DATA_VALID:-$DATA_TRAIN}")
+  # Overwrite rather than append a second, contradictory override. Passing
+  # both `data.dna_max_rows=400000` and `data.dna_max_rows=null` works (Hydra
+  # takes the last) but the resolved command then shows two values for one key,
+  # which is unreadable in a log and one reordering away from a silent 2% cap.
+  DNA_NUM_FILES=null
+  DNA_MAX_ROWS=null
+fi
 RUN_TAG=${LSB_JOBID:-$(date +%Y%m%d-%H%M%S)}
 RUN_NAME="dna-ar-transformer-lr${LR}-b2${BETA2}-wd${WEIGHT_DECAY}-L${LENGTH}-${RUN_TAG}"
 RUN_DIR=${RUN_DIR:-outputs/carbon-prokaryote/$(date +%Y.%m.%d)/${RUN_NAME}}
@@ -55,7 +92,7 @@ RUN_DIR=${RUN_DIR:-outputs/carbon-prokaryote/$(date +%Y.%m.%d)/${RUN_NAME}}
 echo "[$(date)] $RUN_NAME | host=$(hostname) | steps=$MAX_STEPS | global_batch=$GLOBAL_BATCH"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv
 "$PYTHON" -u main.py \
-  model=small_ar_transformer algo=ar data=carbon-prokaryote block_size=1 \
+  model="$MODEL" algo=ar data=carbon-prokaryote block_size=1 \
   data.dna_num_files="$DNA_NUM_FILES" \
   data.dna_max_rows="$DNA_MAX_ROWS" \
   model.length="$LENGTH" \
