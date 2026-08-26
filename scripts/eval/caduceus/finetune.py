@@ -63,6 +63,8 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 sys.path.insert(0, str(REPO))
 
+from scripts.eval.provenance import (  # noqa: E402
+  assert_full_coverage, stamp)
 from scripts.eval.caduceus.embed import pool  # noqa: E402
 from scripts.eval.caduceus.genomic_benchmarks import (  # noqa: E402
   TASKS, load_task, reference, task_stats)
@@ -667,6 +669,19 @@ def run_task(name, model, args, base_config, device, complement):
     raise ValueError(
       f"{name}: test labels reach {int(np.max(yte))} but the train split only "
       f"defines {stats['num_classes']} classes")
+  # REFUSE a silent truncation, do not merely record one. The summary already
+  # wrote n_train_used / train_fraction, which is property (2) of the failure
+  # this file's own docstring describes; property (3) -- nothing compares what
+  # was used against what was available -- was still open on THIS path, the one
+  # that produces the headline numbers. The probe script has had the guard
+  # since it was written; this one never did.
+  truncations = {}
+  assert_full_coverage(len(xtr_all), stats["n_train_full"],
+                       f"{name} train rows",
+                       allow=args.max_train is not None, record=truncations)
+  assert_full_coverage(len(xte), stats["n_test_full"], f"{name} test rows",
+                       allow=args.max_test is not None, record=truncations)
+
   guard = HeldOutTest(xte, yte)
 
   block = int(base_config["block_size"])
@@ -761,6 +776,7 @@ def run_task(name, model, args, base_config, device, complement):
     "num_classes": stats["num_classes"],
     "median_length": stats["median_length"], "max_length": stats["max_length"],
     "test_evaluations": guard.accesses, "test_access_log": guard.log,
+    "truncations": truncations.get("truncations", []),
     "caduceus_ph_published": reference(name, "ph"),
     "caduceus_ps_published": reference(name, "ps"),
     "caduceus_no_equiv_published": reference(name, "no_equiv"),
@@ -1016,6 +1032,10 @@ def main():
       "'test_evaluations' records the count."),
     "tasks": rows,
   }
+  # git sha, argv, host, LSF job id and every watched environment variable.
+  # Without this a result file cannot say which commit or which environment
+  # produced it -- and DATA_TRAIN-shaped bugs live exactly there.
+  stamp(summary, args)
   args.output_dir.mkdir(parents=True, exist_ok=True)
   path = args.output_dir / f"{args.label}.json"
   with tempfile.NamedTemporaryFile("w", dir=args.output_dir, delete=False) as fh:
