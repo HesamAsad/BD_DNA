@@ -85,16 +85,40 @@ def main():
   print(f"expect  {len(frame):,} intervals x {shifts} shifts = {expected:,}"
         f"   (on disk {data.num_rows:,}, {dropped:,} dropped at chromosome ends)")
   failures = []
-  # The builder skips a window only when the fasta slice comes back short,
-  # which happens at chromosome ends. A large deficit means something else.
-  if dropped < 0:
-    failures.append(f"MORE rows than possible: {data.num_rows:,} > {expected:,}")
-  elif dropped > expected * 0.02:
-    failures.append(f"{dropped:,} rows missing ({100 * dropped / expected:.2f}%), "
-                    f"more than chromosome ends can explain")
-
   fasta = Fasta(args.fasta, sequence_always_upper=True, as_raw=True)
   chromosome_length = {name: len(fasta[name]) for name in fasta.keys()}
+
+  # How many windows SHOULD the builder drop? It skips one only when the fasta
+  # slice comes back shorter than L. Rather than tolerate a fudge factor, work
+  # out the exact number by replaying its fetch() geometry: for hg38 at
+  # L=8192 the answer is 0, because the shortest chromosome the bed references
+  # is chr21 at 46.7 Mb. So any missing row at all is a real defect, and an
+  # exact expectation is what makes the byte-identity check below valid --
+  # a single silent drop shifts every later row's index.
+  def fetched_length(name, start, end):
+    limit = chromosome_length[name]
+    if end > limit:
+      start, end = start - (end - limit), limit
+    if start < 0:
+      end, start = end - start, 0
+    if end > limit:
+      start, end = limit - length, limit
+    return max(0, min(end, limit) - max(start, 0))
+
+  should_drop = 0
+  for row_index in range(len(frame)):
+    row = frame.iloc[row_index]
+    for shift_index in range(shifts):
+      start = int(row.start) + shift_index * length
+      if fetched_length(row.chr_name, start, start + length) < length:
+        should_drop += 1
+  print(f"predicted drops from the fasta geometry: {should_drop:,}")
+  if dropped != should_drop:
+    failures.append(
+      f"row count off: {data.num_rows:,} on disk, expected "
+      f"{expected - should_drop:,} (= {expected:,} minus {should_drop:,} "
+      f"windows the fasta geometry legitimately drops)")
+  dropped = should_drop  # below, "no drops" means "no UNEXPLAINED drops"
 
   def interval(row_index, shift_index):
     row = frame.iloc[row_index]
