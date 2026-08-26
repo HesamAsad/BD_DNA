@@ -63,24 +63,50 @@ STYLE = {
 # Which arms report a NELBO rather than an exact NLL.
 BOUNDED = {"Transformer-BD", "BiSSM-BD", "uSSM-BD"}
 
-# Job-name fragments -> the label used in every figure. Keys are matched
-# against the run directory path, longest first so `hg_ussm_bd` is not eaten
-# by `hg_ussm`.
+# Directory/job-name fragments -> the label used in every figure, matched
+# against the run directory path, LONGEST FIRST so `dna-bd3lm-uni` is not eaten
+# by a shorter key.
+#
+# These are the RUN_NAME patterns the three launchers actually build, not
+# guesses. The first version of this table guessed ("ussm-ar", "transformer-bd")
+# and matched 1 of 5 real directories; the other four fell through to the raw
+# basename. That is not cosmetic -- BOUNDED membership below is keyed on the
+# LABEL, so a BD arm that failed to match would silently lose its NELBO
+# marking, and the figure would misreport which curves are upper bounds.
+#
+#   train_dna_ssm_baseline.sh    dna-${OBJECTIVE}-${DIRECTION}-mamba2-...
+#   train_dna_ar_transformer.sh  dna-ar-transformer-...
+#   train_dna_bd3lm_prok_tuned.sh dna-bd3lm-xf-...
 INFER = [
-  ("hg_bissm_bd", "BiSSM-BD"), ("bissm-bd", "BiSSM-BD"), ("bi-mamba2", "BiSSM-BD"),
-  ("hg_ussm_ar", "uSSM-AR"), ("ussm-ar", "uSSM-AR"),
-  ("hg_ussm_bd", "uSSM-BD"), ("ussm-bd", "uSSM-BD"),
-  ("hg_xf_ar", "Transformer-AR"), ("transformer-ar", "Transformer-AR"),
-  ("hg_xf_bd", "Transformer-BD"), ("transformer-bd", "Transformer-BD"), ("xf-bd", "Transformer-BD"),
+  ("dna-bd3lm-uni-mamba2", "uSSM-BD"),
+  ("dna-bd3lm-bi-mamba2", "BiSSM-BD"),
+  ("dna-ar-uni-mamba2", "uSSM-AR"),
+  ("dna-ar-transformer", "Transformer-AR"),
+  ("dna-bd3lm-xf", "Transformer-BD"),
+  # LSF job names, for a path that carries one instead.
+  ("hg_bissm_bd", "BiSSM-BD"), ("hg_ussm_ar", "uSSM-AR"),
+  ("hg_ussm_bd", "uSSM-BD"), ("hg_xf_ar", "Transformer-AR"),
+  ("hg_xf_bd", "Transformer-BD"),
 ]
 
 
 def infer_label(path: str) -> str:
+  """Map a run directory to an arm label, or warn and fall back.
+
+  The fallback keeps the run on the figure, but a fallen-back label is NOT in
+  BOUNDED, so a BD run that lands here would be drawn without its NELBO
+  marking. Say so on stderr rather than letting the figure quietly assert that
+  a bound is a measurement.
+  """
   lowered = path.lower()
   for fragment, label in sorted(INFER, key=lambda kv: -len(kv[0])):
     if fragment in lowered:
       return label
-  return os.path.basename(path.rstrip("/"))
+  fallback = os.path.basename(path.rstrip("/"))
+  print(f"  WARNING: no arm label matches {fallback!r}; using it verbatim. "
+        f"If this is a block-diffusion run it will NOT be marked as a NELBO "
+        f"upper bound -- add its pattern to INFER.", file=sys.stderr)
+  return fallback
 
 
 def load_run(run_dir: Path) -> pd.DataFrame | None:
