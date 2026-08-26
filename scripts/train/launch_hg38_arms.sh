@@ -95,7 +95,15 @@ ARMS=(
   "hg_ussm_bd|scripts/train/train_dna_ssm_baseline.sh|4|OBJECTIVE=bd3lm,DIRECTION=uni,LR=1e-3,BETA2=0.95,WEIGHT_DECAY=0.1,BLOCK_SIZE=$BLOCK_SIZE"
   "hg_bissm_bd|scripts/train/train_dna_ssm_baseline.sh|4|OBJECTIVE=bd3lm,DIRECTION=bi,LR=1e-3,BETA2=0.95,WEIGHT_DECAY=0.1,BLOCK_SIZE=$BLOCK_SIZE"
   "hg_xf_ar|scripts/train/train_dna_ar_transformer.sh|4|MODEL=small_xf_matched,LR=1e-3,BETA2=0.95,WEIGHT_DECAY=0.1"
-  "hg_xf_bd|scripts/train/train_dna_bd3lm_prok_tuned.sh|8|MODEL=small_xf_matched,LR=3e-4,BETA2=0.999,WEIGHT_DECAY=0,BLOCK_SIZE=$BLOCK_SIZE"
+  # micro 4, not the launcher's default 8. Two reasons, both from widening this
+  # arm to small_xf_matched: 832/13 is ~8% more activation and attention memory
+  # than the 768/12 the micro-8 setting was proven at, and no peak-memory
+  # telemetry survives from those runs to check it against the H200's 139.7 GiB
+  # -- an OOM would cost a multi-hour queue wait to discover. Gradient
+  # accumulation is exact at a fixed global batch, so this changes nothing but
+  # speed, and this arm has ~4x wall-time headroom. It also makes accum=4
+  # uniform across all five arms.
+  "hg_xf_bd|scripts/train/train_dna_bd3lm_prok_tuned.sh|4|MODEL=small_xf_matched,LR=3e-4,BETA2=0.999,WEIGHT_DECAY=0,BLOCK_SIZE=$BLOCK_SIZE"
 )
 
 # docs/, not results/ -- results/ is gitignored (.gitignore:6), so a record
