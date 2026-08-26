@@ -99,6 +99,39 @@ if [ "$missing" -gt 0 ]; then
   exit 2
 fi
 
+
+# ---- collidable-environment guard -------------------------------------------
+# `bsub -env "all,..."` snapshots the SUBMITTING shell, so any bare variable the
+# target script reads and we do not explicitly set is inherited silently. This
+# is not hypothetical: GNU screen exports WINDOW=<n>, it rode in through
+# `-env all`, and it passed `--window 0` to the benchmark harness for an entire
+# campaign. WINDOW is still set to 0 in a screen session today.
+#
+# Fail before submitting rather than discover it in a result. Names we set
+# ourselves are fine -- ours win, because they come after `all` in the -env
+# string. Everything else that the target reads and the environment happens to
+# hold is a collision.
+COLLIDABLE="L LIMIT WINDOW MODEL EPOCHS SEEDS SEED LENGTH BATCH BATCH_SIZE
+            STEPS MAX_STEPS LR PRESET TASKS LABEL CKPT DROPOUT LAYER POOLING
+            EMA ATTN SWEEP SCHEDULER"
+guard_env () { # $1 = comma-separated VAR=VAL string we are about to pass
+  local passing=",$(echo "$1" | tr ',' '\n' | cut -d= -f1 | tr '\n' ',')"
+  local bad=""
+  for v in $COLLIDABLE; do
+    if printenv "$v" >/dev/null 2>&1; then
+      case "$passing" in *",$v,"*) : ;; *) bad="$bad $v=$(printenv "$v")";; esac
+    fi
+  done
+  if [ -n "$bad" ]; then
+    echo "FATAL: these are set in this shell, are READ by the target script,"
+    echo "       and are not among the values being passed -- they would be"
+    echo "       inherited silently through 'bsub -env all':"
+    for kv in $bad; do echo "         $kv"; done
+    echo "       unset them and resubmit."
+    exit 2
+  fi
+}
+
 mkdir -p logs/eval docs/runs
 RECORD="docs/runs/hg38_eval_$(date +%Y%m%d-%H%M%S).txt"
 echo "# submitted $(date) from $(git rev-parse --short HEAD)$(git diff --quiet || echo ' (DIRTY)')" > "$RECORD"
@@ -108,6 +141,7 @@ submit () { # jobname script env
     echo "bsub -J $1 -G s10396 -env \"all,$3\" < $2"
     return
   fi
+  guard_env "$3"
   out=$(bsub -J "$1" -G s10396 -env "all,$3" < "$2" 2>&1)
   echo "$out"
   jobid=$(echo "$out" | grep -oE "Job <[0-9]+>" | grep -oE "[0-9]+" | head -1)

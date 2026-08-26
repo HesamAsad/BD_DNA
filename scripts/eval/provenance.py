@@ -51,6 +51,18 @@ WATCHED_ENV = (
   "STEPS", "EPOCHS", "LENGTH", "LENGTHS", "MC_SAMPLES", "VAL_BATCHES",
   "WARMUP", "ITERS", "MAX_TRAIN", "MAX_TEST", "DEBUG", "SMOKE",
   "BD3LM_DATA_NUM_PROC", "CUDA_VISIBLE_DEVICES",
+  # Added 2026-08-26 after the hg38 audit. DATA_TRAIN is the reason: two
+  # training launchers accepted it from the environment and read it nowhere, so
+  # two arms would have trained on 2% of the wrong corpus under an hg38 job
+  # name. A result file that recorded DATA_TRAIN would have made that visible
+  # the moment anyone looked at one. The rest are every other variable that
+  # silently changes what a run means.
+  "DATA_TRAIN", "DATA_VALID", "OBJECTIVE", "DIRECTION", "MODEL",
+  "XF_MODEL", "XF_AR_MODEL", "BLOCK_SIZE", "GLOBAL_BATCH", "MICRO_BATCH",
+  "EVAL_MICRO_BATCH", "MAX_STEPS", "VAL_EVERY", "LR", "BETA2", "WEIGHT_DECAY",
+  "EMA", "PPL_EMA", "USSM_EMA", "HISTORICAL_EMA", "CLIP_SEARCH_WIDTHS",
+  "RUN_DIR", "PRESET", "WHICH", "DNA_NUM_FILES", "DNA_MAX_ROWS",
+  "CHECKPOINT_PREFILL", "RIGHT_FLANK_PROBABILITY",
 )
 
 
