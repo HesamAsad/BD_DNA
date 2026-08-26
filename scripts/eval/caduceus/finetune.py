@@ -53,8 +53,10 @@ import time
 from pathlib import Path
 
 import numpy as np
+import contextlib
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from omegaconf import OmegaConf
 
 HERE = Path(__file__).resolve().parent
@@ -289,10 +291,26 @@ class Classifier(nn.Module):
     super().__init__()
     self.backbone = backbone
     self.pooling = pooling
-    self.n_layers = len(backbone.layers) if layer < 0 else int(layer)
-    if not 1 <= self.n_layers <= len(backbone.layers):
-      raise ValueError(f"--layer must be in 1..{len(backbone.layers)}")
-    self.use_final_norm = self.n_layers == len(backbone.layers)
+    # Which readout path this backbone needs. Until 2026-08-26 the forward
+    # below unconditionally called `layers[i].scan_active(h, left, right)`,
+    # which is (a) SSM-only -- a DiT has `blocks`, not `layers`, and no
+    # `scan_active`, so every Transformer arm raised AttributeError -- and
+    # (b) BIDIRECTIONAL, so an autoregressive SSM checkpoint was read out with
+    # a reverse scan it was never trained to use. Every GenomicBenchmarks
+    # result we hold is `backbone: bissm` for exactly that reason.
+    self.kind = ("dit" if hasattr(backbone, "blocks")
+                 else "ssm-uni" if type(backbone).__name__ == "UnidirectionalSSM"
+                 else "ssm-bi")
+    depth = (backbone.blocks if self.kind == "dit" else backbone.layers)
+    self.n_layers = len(depth) if layer < 0 else int(layer)
+    if not 1 <= self.n_layers <= len(depth):
+      raise ValueError(f"--layer must be in 1..{len(depth)}")
+    # The SSM path ends at `final_norm`; the DiT's equivalent trailing norm
+    # lives inside `output_layer`, which this readout deliberately skips (it is
+    # tied to the 13-token vocabulary). So a DiT tap is never "the full stack",
+    # and the head LayerNorm forced below is what normalises it instead.
+    self.use_final_norm = (self.kind != "dit"
+                           and self.n_layers == len(depth))
     if not self.use_final_norm and not head_layernorm:
       head_layernorm = True
     width = hidden * (2 if pooling == "meanmax" else 1)
@@ -303,10 +321,16 @@ class Classifier(nn.Module):
 
   def trainable_backbone_parameters(self):
     """Only the parameters the forward pass actually reaches."""
-    modules = [self.backbone.token_embedding]
-    modules += list(self.backbone.layers[:self.n_layers])
-    if self.use_final_norm:
-      modules.append(self.backbone.final_norm)
+    if self.kind == "dit":
+      # vocab_embed + sigma_map (adaLN conditioning is fed at sigma=0, so the
+      # timestep MLP is on the path) + the tapped blocks.
+      modules = [self.backbone.vocab_embed, self.backbone.sigma_map]
+      modules += list(self.backbone.blocks[:self.n_layers])
+    else:
+      modules = [self.backbone.token_embedding]
+      modules += list(self.backbone.layers[:self.n_layers])
+      if self.use_final_norm:
+        modules.append(self.backbone.final_norm)
     seen, out = set(), []
     for module in modules:
       for parameter in module.parameters():
@@ -321,15 +345,46 @@ class Classifier(nn.Module):
   def forward(self, ids, attention_mask):
     b = self.backbone
     batch = ids.shape[0]
-    h = b.token_embedding(ids)
-    left = b._empty_cache(batch, h.device, h.dtype, "left")
-    right = b._empty_cache(batch, h.device, h.dtype, "right")
-    with b._compute_autocast(h):
-      for index in range(self.n_layers):
-        h = b.layers[index].scan_active(
-          h, left.states[index], right.states[index])
-      if self.use_final_norm:
-        h = b.final_norm(h)
+    if self.kind == "dit":
+      # Plain encoder pass: no block-diffusion mask, so a BD checkpoint gets
+      # full attention and an AR one stays causal (b.causal). This mirrors
+      # what the SSM path does -- empty left/right caches make it a plain pass
+      # over the sequence too -- rather than replaying the training-time block
+      # structure, which a classification readout has no use for.
+      h = b.vocab_embed(ids)
+      rotary_cos_sin = b.rotary_emb(h)
+      # sigma=0 is the clean end of the noise schedule, which is what a
+      # classification input actually is. The blocks tolerate c=None (dit.py:425
+      # falls back to unmodulated norms), but adaLN is a TRAINED module and
+      # bypassing it discards it; feeding the clean timestep uses it as trained.
+      sigma = torch.zeros(ids.shape[0], device=ids.device, dtype=torch.float32)
+      t_cond = F.silu(b.sigma_map(sigma))
+      ctx = (torch.amp.autocast("cuda", dtype=torch.bfloat16) if h.is_cuda
+             else contextlib.nullcontext())
+      with ctx:
+        for index in range(self.n_layers):
+          h = b.blocks[index](h, rotary_cos_sin, c=t_cond, causal=b.causal,
+                              sample_mode=False, mask=None, store_kv=False)
+      h = h.float()
+    else:
+      h = b.token_embedding(ids)
+      left = b._empty_cache(batch, h.device, h.dtype, "left")
+      with b._compute_autocast(h):
+        if self.kind == "ssm-uni":
+          # Forward-only, matching how an AR checkpoint was trained. Its layers
+          # DO expose scan_active (UnidirectionalSSM subclasses
+          # BidirectionalSSM and overrides only backbone-level methods), so the
+          # bidirectional call would have run without error and quietly used
+          # the reverse scan out of distribution.
+          for index in range(self.n_layers):
+            h, _ = b.layers[index].scan_clean(h, left.states[index])
+        else:
+          right = b._empty_cache(batch, h.device, h.dtype, "right")
+          for index in range(self.n_layers):
+            h = b.layers[index].scan_active(
+              h, left.states[index], right.states[index])
+        if self.use_final_norm:
+          h = b.final_norm(h)
     features = self.norm(pool(h.float(), attention_mask, self.pooling))
     if self.log_length:
       lengths = attention_mask.sum(dim=1).clamp(min=1).float()
@@ -857,6 +912,12 @@ def main():
   model, tokenizer, config, step = load_checkpoint_model(
     args.checkpoint, int(trained.model.length), args.eval_batch_size, device)
   model.tokenizer = tokenizer
+  # The SSM backbones set self.hidden_size; the DiT keeps its width in a local
+  # (`dim = config.model.hidden_size`, dit.py:683) and never stores it. Resolve
+  # it here rather than editing models/dit.py, which is on the live training
+  # path. Not a state_dict entry, so the pristine snapshot below is unaffected.
+  if not hasattr(model.backbone, "hidden_size"):
+    model.backbone.hidden_size = int(trained.model.hidden_size)
   model.pristine = copy.deepcopy(model.backbone.state_dict())
   complement = build_complement_table(tokenizer, model.backbone.vocab_size)
 

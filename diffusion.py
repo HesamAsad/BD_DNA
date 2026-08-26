@@ -1,5 +1,6 @@
 import contextlib
 import itertools
+import math
 import time
 from dataclasses import dataclass
 
@@ -574,6 +575,22 @@ class Diffusion(L.LightningModule):
     # bits per base: the loss is a NELBO upper bound on NLL (nats/token);
     # for ACGT, uniform random is 2.0, so lower is better.
     self.log('trainer/train_bpb', loss_val / 0.6931471805599453,
+             on_step=True, on_epoch=False, sync_dist=True)
+    # train NLL and PPL, per step. `self.metrics.train_nlls` has been updated
+    # every step since forever and logged NOWHERE -- reset at epoch start,
+    # accumulated, discarded. So the validation curves (valid/nll, valid/ppl,
+    # valid/bpd) had no train-side counterpart at all.
+    # Taken from loss_val rather than from that metric because the metric is a
+    # RUNNING mean over the epoch: it lags, and at one epoch per run it would
+    # flatten the whole curve. `losses.loss` is already the token-weighted mean
+    # NLL (diffusion.py:1358), so this is the instantaneous value.
+    self.log('trainer/train_nll', loss_val,
+             on_step=True, on_epoch=False, sync_dist=True)
+    # exp() of a NELBO for the BD arms, so this is an UPPER bound on perplexity
+    # rather than perplexity -- the same caveat that applies to valid/ppl.
+    # Clamped because an early diverging step overflows float32 above ~88 and a
+    # single inf poisons the axis of every plot drawn from this CSV.
+    self.log('trainer/train_ppl', math.exp(min(loss_val, 20.0)),
              on_step=True, on_epoch=False, sync_dist=True)
     scale = self.trainer.accumulate_grad_batches * self.trainer.world_size
     steps = max(self.trainer.global_step, 1)
