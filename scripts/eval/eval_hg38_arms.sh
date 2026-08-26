@@ -99,10 +99,21 @@ ARMS=(
 # purpose (and the table then says so).
 MIN_STEPS=${MIN_STEPS:-68042}
 
+# ONLY=ussm_ar+xf_ar evaluates a subset, for scoring arms that have finished
+# while others are still training. The completeness guard still applies to
+# whatever is selected, so a subset of FINISHED arms is fine and a subset
+# containing an unfinished one is still refused.
+ONLY=${ONLY:-}; ONLY=",${ONLY//+/,},"
+
 missing=0
 PPL_ENV=""
+selected=0
 for entry in "${ARMS[@]}"; do
   IFS='|' read -r arm leaf var <<< "$entry"
+  if [ "$ONLY" != ",," ]; then
+    case "$ONLY" in *",$arm,"*) : ;; *) continue;; esac
+  fi
+  selected=$((selected + 1))
   ckpt="$RUNS/$leaf/checkpoints/$WHICH.ckpt"
   if [ ! -f "$ckpt" ]; then
     echo "  MISSING $ckpt"
@@ -118,17 +129,27 @@ for entry in "${ARMS[@]}"; do
                   END{print m+0}' \
          "$RUNS/$leaf"/csv_logs/version_*/metrics.csv 2>/dev/null | sort -n | tail -1)
   step=${step:-0}
-  if [ "$MIN_STEPS" != "0" ] && [ "$step" -lt "$MIN_STEPS" ]; then
-    echo "  UNFINISHED $arm: $step of $MIN_STEPS steps ($ckpt)"
+  # A COMPLETED run logs its last tick a few steps short of MAX_STEPS --
+  # trainer.log_every_n_steps quantises it, so a finished 68,042-step arm
+  # reports 68,039. Comparing to MIN_STEPS exactly would reject every arm that
+  # actually finished. One logging interval of slack (0.5%) accepts a finished
+  # run and still rejects anything meaningfully short.
+  floor=$(( MIN_STEPS - MIN_STEPS / 200 ))
+  if [ "$MIN_STEPS" != "0" ] && [ "$step" -lt "$floor" ]; then
+    echo "  UNFINISHED $arm: $step of $MIN_STEPS steps (need >= $floor)"
     missing=$((missing + 1))
     continue
   fi
   echo "  ok $arm: $step steps"
   PPL_ENV="$PPL_ENV,$var=$ckpt"
 done
+if [ "$selected" = "0" ]; then
+  echo "FATAL: ONLY=${ONLY//,/ } matched none of the known arms."
+  exit 2
+fi
 if [ "$missing" -gt 0 ]; then
   echo
-  echo "FATAL: $missing of ${#ARMS[@]} arms are missing or unfinished."
+  echo "FATAL: $missing of $selected selected arms are missing or unfinished."
   echo "       Evaluating a partial set silently produces a table that reads as"
   echo "       'these are the results'. Wait for training, or pass MIN_STEPS=0"
   echo "       (and say so wherever the numbers end up) to score what exists."
@@ -208,6 +229,9 @@ if [ "$STAGE" = "all" ] || [ "$STAGE" = "gb" ]; then
   n=0
   for entry in "${ARMS[@]}"; do
     IFS='|' read -r arm leaf _ <<< "$entry"
+    if [ "$ONLY" != ",," ]; then
+      case "$ONLY" in *",$arm,"*) : ;; *) continue;; esac
+    fi
     ckpt="$RUNS/$leaf/checkpoints/$WHICH.ckpt"
     for spec in "${GB_TASKS[@]}"; do
       task="${spec%%|*}"; code="${spec##*|}"
@@ -218,7 +242,7 @@ if [ "$STAGE" = "all" ] || [ "$STAGE" = "gb" ]; then
       n=$((n + 1))
     done
   done
-  echo "  submitted $n GenomicBenchmarks jobs (${#ARMS[@]} arms x ${#GB_TASKS[@]} tasks, $SEEDS seeds each)"
+  echo "  submitted $n GenomicBenchmarks jobs ($selected arms x ${#GB_TASKS[@]} tasks, seeds $SEEDS)"
 fi
 
 echo
