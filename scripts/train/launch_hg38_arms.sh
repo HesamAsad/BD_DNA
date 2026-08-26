@@ -46,6 +46,16 @@ cd "$REPO"
 # it. All seven jobs queued on 2026-08-26 went PEND -> RUN the instant
 # `bmod -U iclr_2026` was applied, with 1100 of 1280 reserved CPUs idle.
 # Override with RSV= to use a different reservation, or RSV="" for none.
+# Wall clock, overriding each script's `#BSUB -W`. Needed because the esub
+# REFUSES bmod on a running job ("Request aborted by esub"), with or without
+# -G and -gpu -- so a limit that turns out to be too short cannot be raised in
+# place, only by killing and resuming. Set it correctly at submission.
+# BiSSM-BD is the arm that needs this: its bidirectional scan runs at ~0.56
+# it/s against uSSM-BD's 2.39, so a full epoch is ~135 h, not the ~26 h that a
+# resume-inflated early average suggested.
+WALL=${WALL:-}
+WALL_ARG=""
+[ -n "$WALL" ] && WALL_ARG="-W $WALL"
 RSV=${RSV-iclr_2026}
 RSV_ARG=""
 [ -n "$RSV" ] && RSV_ARG="-U $RSV"
@@ -192,14 +202,14 @@ for entry in "${ARMS[@]}"; do
   echo "         = every $VAL_EVERY_OPT_STEPS optimizer steps (same grid for all arms)"
   echo "         run_dir=$run_dir$([ -f "$run_dir/checkpoints/last.ckpt" ] && echo '  (will RESUME from last.ckpt)')"
   if [ "${DRY:-0}" = "1" ]; then
-    echo "bsub -J $name -G s10396 $RSV_ARG $DEP -env \"all,$full\" < $script"
+    echo "bsub -J $name -G s10396 $RSV_ARG $WALL_ARG $DEP -env \"all,$full\" < $script"
     continue
   fi
   # -env "all,..." keeps the submitting environment (module paths, HOME) and
   # layers the arm's settings on top. Without `all` the job starts with an
   # almost empty environment and the python on PATH is the system one.
   guard_env "$full"
-  out=$(bsub -J "$name" -G s10396 $RSV_ARG $DEP -env "all,$full" < "$script" 2>&1)
+  out=$(bsub -J "$name" -G s10396 $RSV_ARG $WALL_ARG $DEP -env "all,$full" < "$script" 2>&1)
   echo "$out"
   jobid=$(echo "$out" | grep -oE "Job <[0-9]+>" | grep -oE "[0-9]+" | head -1)
   echo "${jobid:-SUBMIT_FAILED} $name $script $full" >> "$RECORD"
