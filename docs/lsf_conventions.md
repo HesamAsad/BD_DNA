@@ -354,6 +354,47 @@ grep -h "l_use_weight" outputs/synthLR12k/*/*/.hydra/overrides.yaml
 
 ---
 
+## 9b. Four things that cost real time on 2026-08-26
+
+**The advance reservation blocks you unless you ask for it.** Every job sat in
+PEND with `Not enough job slot(s) while advance reservation is active: 9
+hosts`, which reads like a busy cluster and is not. `brsvs` showed the group's
+`iclr_2026` reservation holding 8 farm-gpu050x hosts with **1100 of 1280 CPUs
+idle**. A job that does not pass `-U` is not merely failing to use the
+reservation, it is blocked *by* it: the reservation withdraws those hosts from
+the general pool, so not asking is strictly worse than the reservation not
+existing. Seven jobs went PEND -> RUN the instant `bmod -U iclr_2026 -G s10396`
+was applied.
+
+    bsub -U iclr_2026 -G s10396 ... < script      # always, for GPU work
+
+**You cannot raise `-W` on a running job.** The esub refuses every `bmod` on a
+RUNNING job -- `Request aborted by esub` -- with or without `-G`, with or
+without a matching `-gpu` spec. A wall limit that turns out to be too short can
+only be fixed by killing and resuming from `last.ckpt`. Set it correctly at
+submission; over-estimating costs nothing.
+
+**`bmod` wants `-G` when PENDING and rejects it when RUNNING.** On a pending job
+`bmod -W ... -G s10396 <id>` works. On a running job the same command returns
+`Only the following parameters can be used to modify a running job: -c, -M, -W,
+...` -- `-G` is not in that list, so it fails before the esub even sees it.
+
+**A single-GPU job fragments a host and starves a 4-GPU job.** Twelve
+concurrent 1-GPU jobs scattered across the reservation left no contiguous block
+of four, and a 4-GPU arm waited hours behind them. If a multi-GPU job will not
+schedule while capacity looks free, count GPUs *per host*, not in total. The
+same applies to a CPU-only job that the esub forced to request a GPU it never
+uses -- it still occupies one.
+
+**Throughput read shortly after a resume is not real.** Not LSF, but it belongs
+next to the log forensics: Lightning fast-forwards through already completed
+batches on resume, so the progress bar's cumulative average is meaningless
+until the replay is past. A restarted arm showed **91.95 it/s at batch 2001**
+against a true steady state of 0.56. Always measure the MARGINAL rate over a
+window:
+
+    n0=$(...); sleep 300; n1=$(...); echo "$(( (n1-n0) / 300 )) it/s"
+
 ## 10. Quick reference
 
 ```bash
