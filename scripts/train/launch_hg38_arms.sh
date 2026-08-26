@@ -98,8 +98,11 @@ ARMS=(
   "hg_xf_bd|scripts/train/train_dna_bd3lm_prok_tuned.sh|8|MODEL=small_xf_matched,LR=3e-4,BETA2=0.999,WEIGHT_DECAY=0,BLOCK_SIZE=$BLOCK_SIZE"
 )
 
-mkdir -p logs results/runs
-RECORD="results/runs/hg38_arms_$(date +%Y%m%d-%H%M%S).txt"
+# docs/, not results/ -- results/ is gitignored (.gitignore:6), so a record
+# written there would never reach the repository, which is the one thing this
+# record exists to do.
+mkdir -p logs docs/runs
+RECORD="docs/runs/hg38_arms_$(date +%Y%m%d-%H%M%S).txt"
 echo "# submitted $(date) from $(git rev-parse --short HEAD)$(git diff --quiet || echo ' (DIRTY)')" > "$RECORD"
 echo "# shared: $COMMON" >> "$RECORD"
 

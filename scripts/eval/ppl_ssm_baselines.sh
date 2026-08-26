@@ -33,6 +33,19 @@ EVAL_BATCH=${EVAL_BATCH:-4}
 LIMIT=${LIMIT:-1.0}
 DNA_NUM_FILES=${DNA_NUM_FILES:-1}
 DNA_MAX_ROWS=${DNA_MAX_ROWS:-400000}
+# Evaluate against a pre-built cache (e.g. hg38-caduceus) instead of the
+# prokaryote corpus. This script had no such knob, which is the SAME defect
+# that would have sent two hg38 TRAINING arms to the prokaryote corpus: without
+# it, scoring an hg38 checkpoint here silently reports its perplexity on 2% of
+# a prokaryote validation set, and the number looks perfectly plausible.
+DATA_TRAIN=${DATA_TRAIN:-}
+DATA_VALID=${DATA_VALID:-}
+DATA_ARGS=(data=carbon-prokaryote)
+if [ -n "$DATA_TRAIN" ]; then
+  DATA_ARGS+=(data.train="$DATA_TRAIN" data.valid="${DATA_VALID:-$DATA_TRAIN}")
+  DNA_NUM_FILES=null
+  DNA_MAX_ROWS=null
+fi
 USSM_EMA=${USSM_EMA:-0}
 HISTORICAL_EMA=${HISTORICAL_EMA:-0.9999}
 
@@ -78,10 +91,15 @@ for SPEC in "${ARMS[@]}"; do
       MODEL_ARGS=(model=small_bissm algo=bd3lm_bissm "block_size=$BLOCK_SIZE")
       SSM_ARGS=(model.active_blocks=all model.right_flank_probability=0.0) ;;
     xf_bd)
-      MODEL_ARGS=(model=small algo=bd3lm model.dropout=0.0 model.attn_backend=flex "block_size=$BLOCK_SIZE")
+      # XF_MODEL follows the checkpoint: hg38 arms trained on small_xf_matched
+      # (832/13, parameter-matched to the SSM arms); the older prokaryote xf_bd
+      # checkpoints are `small` (768/12). Loading one under the other's
+      # geometry is a shape-mismatch error, not a silent wrong number, but the
+      # knob has to exist to score the new arms at all.
+      MODEL_ARGS=(model="${XF_MODEL:-small}" algo=bd3lm model.dropout=0.0 model.attn_backend=flex "block_size=$BLOCK_SIZE")
       SSM_ARGS=() ;;
     xf_ar)
-      MODEL_ARGS=(model=small_ar_transformer algo=ar block_size=1)
+      MODEL_ARGS=(model="${XF_AR_MODEL:-small_ar_transformer}" algo=ar block_size=1)
       SSM_ARGS=() ;;
   esac
   if [[ "$ARM" == "ussm_bd" || "$ARM" == "ussm_ar" || "$ARM" == "xf_ar" ]]; then
@@ -94,7 +112,7 @@ for SPEC in "${ARMS[@]}"; do
   LOG="logs/eval/ppl_ssm_${ARM}_${RUN_TAG}.log"
   "$PYTHON" -u main.py mode=ppl_eval \
     "${MODEL_ARGS[@]}" \
-    data=carbon-prokaryote \
+    "${DATA_ARGS[@]}" \
     data.dna_num_files="$DNA_NUM_FILES" \
     data.dna_max_rows="$DNA_MAX_ROWS" \
     model.length="$L" \
