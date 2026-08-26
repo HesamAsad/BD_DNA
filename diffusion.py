@@ -661,6 +661,23 @@ class Diffusion(L.LightningModule):
       
   def validation_step(self, batch, batch_idx):
     if self.var_min:
+      # How many validation batches feed the clipped-schedule variance search.
+      #
+      # THIS BOUNDS THE DOMINANT COST OF VALIDATION FOR A BD ARM. The loop
+      # below runs a SEPARATE forward pass per (eps_min, eps_max) window per
+      # batch, and clip_search_widths=[0.3..0.9] at delta 0.05 makes ~64
+      # windows. metrics.reset() calls init_valid_vars() at every
+      # on_validation_epoch_start, so the accumulation counter resets EVERY
+      # validation -- the hardcoded 100 was not a one-off warmup cost, it was
+      # 100 x 64 = 6,400 extra forwards on every single validation. Measured at
+      # ~10 minutes per validation, which over 544 validations is ~90 hours,
+      # against ~12 hours for the same model with the search off.
+      #
+      # 100 batches is far more than the variance estimate needs: at batch 4
+      # and 32 blocks per sequence, even 8 batches gives 1,024 block NELBOs per
+      # window. Default stays 100 so existing runs reproduce exactly.
+      clip_batches = int(getattr(
+        self.config.algo, 'clip_search_batches', 100) or 100)
       for noise_clip_start in self.metrics.valid_vars.keys():
         sampling_eps_min, sampling_eps_max = noise_clip_start
         if self._check_val_sampling_intvl(sampling_eps_min, sampling_eps_max) == True:
@@ -673,14 +690,14 @@ class Diffusion(L.LightningModule):
             nlls=losses_clip.nlls.clone(),
             token_mask=losses_clip.token_mask,
             loss=losses_clip.loss.clone())
-        elif len(self.metrics.valid_vars[noise_clip_start]) < 100:
+        elif len(self.metrics.valid_vars[noise_clip_start]) < clip_batches:
           # elbo from clipped schedule (biased estimate)
           losses_clip = self._loss(batch['input_ids'],
                             batch['attention_mask'],
                             sampling_eps_min=sampling_eps_min,
                             sampling_eps_max=sampling_eps_max)
-        if len(self.metrics.valid_vars[noise_clip_start]) < 100:
-          # only report variance over 100 batches
+        if len(self.metrics.valid_vars[noise_clip_start]) < clip_batches:
+          # only report variance over `clip_search_batches` batches
           nlls = losses_clip.nlls
           self.metrics.valid_vars[noise_clip_start].append(
             nlls.reshape(

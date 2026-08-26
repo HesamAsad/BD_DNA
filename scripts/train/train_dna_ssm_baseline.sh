@@ -137,7 +137,16 @@ EXTRA_ARGS+=(++model.checkpoint_boundary_prefill="$CHECKPOINT_PREFILL")
 # than anything they tested, so 0.3/0.4 are added to let the variance search
 # reach tighter, lighter windows rather than have us guess one.
 CLIP_SEARCH_WIDTHS=${CLIP_SEARCH_WIDTHS:-[0.3,0.4,0.5,0.6,0.7,0.8,0.9]}
+# Validation batches feeding the clipped-schedule variance search. Each one
+# costs a forward pass PER WINDOW, and clip_search_widths above makes ~64
+# windows, so the hardcoded 100 meant ~6,400 extra forwards on EVERY validation
+# (metrics.reset() re-inits the counter each time). Measured: ~10 min per
+# validation, ~90 h over a full run, against ~12 h for the same arm with the
+# search off. 8 batches x 4 sequences x 32 blocks = 1,024 block NELBOs per
+# window, which is ample for a variance estimate.
+CLIP_SEARCH_BATCHES=${CLIP_SEARCH_BATCHES:-8}
 [[ "$OBJECTIVE" == "ar" ]] || EXTRA_ARGS+=(algo.clip_search_widths="$CLIP_SEARCH_WIDTHS")
+[[ "$OBJECTIVE" == "ar" ]] || EXTRA_ARGS+=(algo.clip_search_batches="$CLIP_SEARCH_BATCHES")
 
 EXTRA_ARGS+=(++model.ssm_a_init_max="$SSM_A_INIT_MAX")
 EXTRA_ARGS+=(++model.ssm_dt_max="$SSM_DT_MAX")

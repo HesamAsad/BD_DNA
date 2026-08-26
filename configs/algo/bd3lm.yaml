@@ -10,6 +10,7 @@ cross_attn: True
 var_min: True
 clip_search_delta: 0.05
 clip_search_widths: []
+clip_search_batches: 100   # validation batches feeding the variance search; each costs one forward PER WINDOW
 fix_clipping: False
 sampler: semi_ar
 mdlm_loss_scale: False

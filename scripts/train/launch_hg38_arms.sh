@@ -161,8 +161,14 @@ RECORD="docs/runs/hg38_arms_$(date +%Y%m%d-%H%M%S).txt"
 echo "# submitted $(date) from $(git rev-parse --short HEAD)$(git diff --quiet || echo ' (DIRTY)')" > "$RECORD"
 echo "# shared: $COMMON" >> "$RECORD"
 
+# ONLY=hg_xf_bd+hg_ussm_bd restricts the submission to named arms, for
+# restarting a subset without disturbing arms that are running correctly.
+ONLY=${ONLY:-}; ONLY=",${ONLY//+/,},"
 for entry in "${ARMS[@]}"; do
   IFS='|' read -r name script micro env <<< "$entry"
+  if [ "$ONLY" != ",," ]; then
+    case "$ONLY" in *",$name,"*) : ;; *) continue;; esac
+  fi
   if (( GLOBAL_BATCH % (micro * GPUS) != 0 )); then
     echo "FATAL: $name global batch $GLOBAL_BATCH is not divisible by "
     echo "       micro $micro x $GPUS gpus; dataloader.py:764 rejects this."
