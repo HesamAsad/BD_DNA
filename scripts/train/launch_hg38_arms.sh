@@ -115,9 +115,21 @@ for entry in "${ARMS[@]}"; do
   fi
   accum=$(( GLOBAL_BATCH / (micro * GPUS) ))
   val_every=$(( VAL_EVERY_OPT_STEPS * accum ))
-  full="$COMMON,MICRO_BATCH=$micro,VAL_EVERY=$val_every,$env"
+  # RUN_DIR is PINNED and carries no job id. Every launcher defaults it to a
+  # path containing ${LSB_JOBID}, so a resubmitted job lands in a fresh
+  # directory, finds no last.ckpt, and silently restarts from step 0 --
+  # discarding up to 43 hours. checkpointing.resume_ckpt_path is
+  # ${save_dir}/checkpoints/last.ckpt (config.yaml:103) and save_dir is the
+  # hydra run dir, so a stable path is the whole resume mechanism. These runs
+  # are long enough, and NCCL timeouts frequent enough, that this matters.
+  # It also puts the five arms under one parent, which is what
+  # `training_curves.py --glob "outputs/hg38-caduceus/*"` expects, and the
+  # leaf names match its INFER table.
+  run_dir="outputs/hg38-caduceus/$name"
+  full="$COMMON,MICRO_BATCH=$micro,VAL_EVERY=$val_every,RUN_DIR=$run_dir,$env"
   echo "  $name: micro=$micro accum=$accum -> val every $val_every micro-batches"
   echo "         = every $VAL_EVERY_OPT_STEPS optimizer steps (same grid for all arms)"
+  echo "         run_dir=$run_dir$([ -f "$run_dir/checkpoints/last.ckpt" ] && echo '  (will RESUME from last.ckpt)')"
   if [ "${DRY:-0}" = "1" ]; then
     echo "bsub -J $name -G s10396 $DEP -env \"all,$full\" < $script"
     continue
