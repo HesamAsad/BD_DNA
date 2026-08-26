@@ -41,6 +41,35 @@ SEEDS=${SEEDS:-0+1+2+3+4}
 # stopped.
 EPOCHS=${EPOCHS:-10}
 
+# The 8 GenomicBenchmarks tasks, fanned out one job each per arm rather than
+# one job per arm covering all 8.
+#
+# WHY. LSF 120181 spent 56,806 s (15.8 h) on ONE task
+# (human_ensembl_regulatory) at preset=legacy, ONE seed, across an 8-point
+# sweep -- about 2 h per config at legacy's 4 epochs. At the 10 epochs Caduceus
+# uses that is ~5 h per seed, so ~25 h for five seeds on that task ALONE. A
+# single job covering all 8 tasks could not finish inside any sane limit, and
+# under the old 24 h it would have been killed partway through task 1 of 8,
+# leaving a results file that looks like a legitimate partial run.
+#
+# 5 arms x 8 tasks = 40 one-GPU jobs, each 5 seeds, each independent, each free
+# to schedule whenever a GPU frees. The small tasks finish in minutes.
+# task | short code. The code only names the LSF job: truncating the task name
+# instead collides (`human_enhancers_cohn` and `human_enhancers_ensembl` share
+# their first 15 characters), and two dozen identically-named jobs is
+# unmonitorable. The full task name still goes in LABEL, which is what names
+# the result JSON.
+GB_TASKS=(
+  "dummy_mouse_enhancers_ensembl|dummy"
+  "demo_coding_vs_intergenomic_seqs|coding"
+  "demo_human_or_worm|worm"
+  "human_enhancers_cohn|cohn"
+  "human_enhancers_ensembl|enhens"
+  "human_ensembl_regulatory|reg"
+  "human_nontata_promoters|prom"
+  "human_ocr_ensembl|ocr"
+)
+
 # arm | run dir leaf | the CKPT_* variable ppl_ssm_baselines.sh reads
 ARMS=(
   "ussm_ar|hg_ussm_ar|CKPT_USSM_AR"
@@ -105,12 +134,20 @@ fi
 # No GB_MAX_TRAIN/GB_MAX_TEST: the caps are opt-in twice over now, and every
 # published number before 2026-08-25 was silently capped by exactly that path.
 if [ "$STAGE" = "all" ] || [ "$STAGE" = "gb" ]; then
+  n=0
   for entry in "${ARMS[@]}"; do
     IFS='|' read -r arm leaf _ <<< "$entry"
     ckpt="$RUNS/$leaf/checkpoints/$WHICH.ckpt"
-    submit "hg_gb_$arm" scripts/eval/caduceus/finetune.sh \
-      "CKPT=$ckpt,LABEL=hg38_$arm,PRESET=$PRESET,SEEDS=$SEEDS,EPOCHS=$EPOCHS"
+    for spec in "${GB_TASKS[@]}"; do
+      task="${spec%%|*}"; code="${spec##*|}"
+      # LABEL carries the full task name so the 40 result JSONs cannot
+      # overwrite each other -- finetune.py names its output from the label.
+      submit "hg_gb_${arm}_${code}" scripts/eval/caduceus/finetune.sh \
+        "CKPT=$ckpt,LABEL=hg38_${arm}_${task},TASKS=$task,PRESET=$PRESET,SEEDS=$SEEDS,EPOCHS=$EPOCHS"
+      n=$((n + 1))
+    done
   done
+  echo "  submitted $n GenomicBenchmarks jobs (${#ARMS[@]} arms x ${#GB_TASKS[@]} tasks, $SEEDS seeds each)"
 fi
 
 echo

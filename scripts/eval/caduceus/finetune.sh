@@ -3,7 +3,7 @@
 #BSUB -G s10396
 #BSUB -q training-parallel
 #BSUB -n 16
-#BSUB -W 24:00
+#BSUB -W 72:00
 #BSUB -R "span[hosts=1]"
 #BSUB -R "select[mem>128000 && hname!='farm-gpu0504']"
 #BSUB -R "rusage[mem=128000]"
