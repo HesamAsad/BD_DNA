@@ -194,3 +194,4 @@ ssd-lm/logging/
 docs/slides/vendor/
 cache/
 mi_rows.npy
+data/hg38/

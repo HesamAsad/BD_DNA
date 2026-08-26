@@ -72,6 +72,30 @@ mkdir -p "$HF_HOME" "$TORCH_HOME" "$XDG_CACHE_HOME" outputs watch_folder logs sa
 
 EXTRA_ARGS=()
 [[ "$WANDB_MODE" == "off" ]] && EXTRA_ARGS+=(wandb=null)
+# BD3-LM's central recipe contribution: clipped noise schedules. The paper
+# (arXiv:2503.09573 sec 4.3, 5.2) shows the AR-vs-diffusion perplexity gap is
+# driven by GRADIENT VARIANCE, not anything fundamental -- only masked tokens
+# contribute to the loss and E[mask rate]=0.5 under a linear schedule, so
+# gradients are estimated from 2x fewer tokens. Table 8, block size 4:
+# linear U[0,1] gives PPL 30.18 at NELBO variance 23.45; clipped U[0.45,0.95]
+# gives 29.21 at variance 6.24.
+#
+# `clip_search_widths` is a list of WINDOW WIDTHS; metrics.py:init_valid_vars
+# scans each width across offsets at clip_search_delta, and the search picks
+# whichever window minimises measured NELBO variance. Empty list = only
+# (eps, 1) = the plain linear schedule, i.e. the feature switched off. It was
+# empty in every DNA run we have done.
+#
+# The upstream scripts (scripts/train/train_{lm1b,owt}_bd3lm.sh:26) pass
+# [0.5,0.6,0.7,0.8,0.9]; our DNA launchers never carried it across. We widen
+# the low end because the optimum is block-size dependent and moves toward
+# LIGHTER masking as blocks grow -- paper Table 2: L'=4 prefers U[0.5,1],
+# L'=16 prefers U[0.3,0.8], L'=128 prefers U[0,0.5]. Our block is 256, larger
+# than anything they tested, so 0.3/0.4 are added to let the variance search
+# reach tighter, lighter windows rather than have us guess one.
+CLIP_SEARCH_WIDTHS=${CLIP_SEARCH_WIDTHS:-[0.3,0.4,0.5,0.6,0.7,0.8,0.9]}
+EXTRA_ARGS+=(algo.clip_search_widths="$CLIP_SEARCH_WIDTHS")
+
 
 RUN_TAG=${LSB_JOBID:-$(date +%Y%m%d-%H%M%S)}
 RUN_NAME="dna-bd3lm-xf-lr${LR}-b2${BETA2}-wd${WEIGHT_DECAY}-ema${EMA}-${SCHEDULER}-L${LENGTH}-${RUN_TAG}"
