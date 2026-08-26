@@ -102,13 +102,44 @@ for SPEC in "${ARMS[@]}"; do
       MODEL_ARGS=(model="${XF_AR_MODEL:-small_ar_transformer}" algo=ar block_size=1)
       SSM_ARGS=() ;;
   esac
-  if [[ "$ARM" == "ussm_bd" || "$ARM" == "ussm_ar" || "$ARM" == "xf_ar" ]]; then
-    # New baseline launcher defaults to no EMA, matching the Mamba-style
-    # optimizer recipe. The historical BiSSM/Transformer checkpoints have EMA.
-    EMA_ARGS=("training.ema=$USSM_EMA" eval.disable_ema=False)
+  # EMA follows the CHECKPOINT, not a hardcoded arm list.
+  #
+  # This used to be `arm in (ussm_bd, ussm_ar, xf_ar) ? USSM_EMA : HISTORICAL_EMA`,
+  # with HISTORICAL_EMA defaulting to 0.9999 because the 2026-08 BiSSM and
+  # Transformer checkpoints carried EMA weights. Asking for an EMA a checkpoint
+  # does not have raises `KeyError: 'ema'` -- it has cost us a run once already,
+  # and every hg38 arm trains with ema=0, so the same list would have broken
+  # bissm and xf_bd again the first time it was pointed at them.
+  #
+  # The checkpoint records what it was trained with, so read it. An explicit
+  # PPL_EMA still wins, and an unreadable checkpoint falls back to the old
+  # per-arm default rather than guessing.
+  if [[ -n "${PPL_EMA:-}" ]]; then
+    CKPT_EMA="$PPL_EMA"
   else
-    EMA_ARGS=("training.ema=$HISTORICAL_EMA" eval.disable_ema=False)
+    CKPT_EMA=$("$PYTHON" - "$CKPT" <<'PY' 2>/dev/null
+import sys, torch
+try:
+    raw = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
+    cfg = raw.get("hyper_parameters", {}).get("config", {})
+    print(cfg.get("training", {}).get("ema", ""))
+except Exception:
+    print("")
+PY
+)
   fi
+  if [[ -z "$CKPT_EMA" ]]; then
+    if [[ "$ARM" == "ussm_bd" || "$ARM" == "ussm_ar" || "$ARM" == "xf_ar" ]]; then
+      CKPT_EMA="$USSM_EMA"
+    else
+      CKPT_EMA="$HISTORICAL_EMA"
+    fi
+    echo "  $ARM: could not read training.ema from the checkpoint; "\
+         "falling back to $CKPT_EMA"
+  else
+    echo "  $ARM: training.ema=$CKPT_EMA (from the checkpoint)"
+  fi
+  EMA_ARGS=("training.ema=$CKPT_EMA" eval.disable_ema=False)
   LOG="logs/eval/ppl_ssm_${ARM}_${RUN_TAG}.log"
   "$PYTHON" -u main.py mode=ppl_eval \
     "${MODEL_ARGS[@]}" \
