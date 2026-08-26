@@ -32,6 +32,7 @@ RSV=${RSV-iclr_2026}
 RSV_ARG=""
 [ -n "$RSV" ] && RSV_ARG="-U $RSV"
 
+PYTHON=${PYTHON:-/software/cellgen/team361/ha11/envs/nichejepa/bin/python}
 RUNS=${RUNS:-outputs/hg38-caduceus}   # matches launch_hg38_arms.sh's pinned dirs
 WHICH=${WHICH:-best}                  # best.ckpt (val/nll-selected) or last.ckpt
 STAGE=${STAGE:-all}
@@ -90,6 +91,14 @@ ARMS=(
   "xf_bd|hg_xf_bd|CKPT_XF"
 )
 
+# A checkpoint EXISTING is not the same as a run being FINISHED. best.ckpt
+# appears at the first validation, so from ~125 steps onwards every existence
+# check passes and this launcher would happily evaluate five half-trained
+# models into a table that looks complete. Require the checkpoint to carry at
+# least MIN_STEPS optimizer steps; MIN_STEPS=0 to score partial runs on
+# purpose (and the table then says so).
+MIN_STEPS=${MIN_STEPS:-68042}
+
 missing=0
 PPL_ENV=""
 for entry in "${ARMS[@]}"; do
@@ -100,13 +109,29 @@ for entry in "${ARMS[@]}"; do
     missing=$((missing + 1))
     continue
   fi
+  # Progress comes from the run's CSV log, not from torch.load on the
+  # checkpoint: loading five 1.2 GB checkpoints just to read one integer took
+  # over two minutes and would run on every invocation. The CSV's highest step
+  # is the same number and costs a file scan.
+  step=$(awk -F, 'NR==1{for(i=1;i<=NF;i++) if($i=="step") k=i; next}
+                  k && $k ~ /^[0-9]+$/ && $k+0>m {m=$k+0}
+                  END{print m+0}' \
+         "$RUNS/$leaf"/csv_logs/version_*/metrics.csv 2>/dev/null | sort -n | tail -1)
+  step=${step:-0}
+  if [ "$MIN_STEPS" != "0" ] && [ "$step" -lt "$MIN_STEPS" ]; then
+    echo "  UNFINISHED $arm: $step of $MIN_STEPS steps ($ckpt)"
+    missing=$((missing + 1))
+    continue
+  fi
+  echo "  ok $arm: $step steps"
   PPL_ENV="$PPL_ENV,$var=$ckpt"
 done
 if [ "$missing" -gt 0 ]; then
   echo
-  echo "FATAL: $missing of ${#ARMS[@]} checkpoints are missing. Evaluating a"
-  echo "       partial set silently produces a table with holes that reads as"
-  echo "       'these are the results'. Wait for training, or set WHICH=last."
+  echo "FATAL: $missing of ${#ARMS[@]} arms are missing or unfinished."
+  echo "       Evaluating a partial set silently produces a table that reads as"
+  echo "       'these are the results'. Wait for training, or pass MIN_STEPS=0"
+  echo "       (and say so wherever the numbers end up) to score what exists."
   exit 2
 fi
 
