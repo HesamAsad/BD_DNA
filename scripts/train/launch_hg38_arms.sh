@@ -39,6 +39,17 @@ set -euo pipefail
 REPO=/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms
 cd "$REPO"
 
+# -U iclr_2026: the group's advance reservation. WITHOUT IT jobs sit in PEND
+# with "Not enough job slot(s) while advance reservation is active: 9 hosts"
+# -- the reservation holds those hosts out of the general pool, so a job that
+# does not ask for it is blocked BY the reservation instead of being served by
+# it. All seven jobs queued on 2026-08-26 went PEND -> RUN the instant
+# `bmod -U iclr_2026` was applied, with 1100 of 1280 reserved CPUs idle.
+# Override with RSV= to use a different reservation, or RSV="" for none.
+RSV=${RSV-iclr_2026}
+RSV_ARG=""
+[ -n "$RSV" ] && RSV_ARG="-U $RSV"
+
 # ---- shared across every arm; changing one of these changes the comparison --
 DATA_TRAIN=hg38-caduceus
 DATA_VALID=hg38-caduceus
@@ -175,14 +186,14 @@ for entry in "${ARMS[@]}"; do
   echo "         = every $VAL_EVERY_OPT_STEPS optimizer steps (same grid for all arms)"
   echo "         run_dir=$run_dir$([ -f "$run_dir/checkpoints/last.ckpt" ] && echo '  (will RESUME from last.ckpt)')"
   if [ "${DRY:-0}" = "1" ]; then
-    echo "bsub -J $name -G s10396 $DEP -env \"all,$full\" < $script"
+    echo "bsub -J $name -G s10396 $RSV_ARG $DEP -env \"all,$full\" < $script"
     continue
   fi
   # -env "all,..." keeps the submitting environment (module paths, HOME) and
   # layers the arm's settings on top. Without `all` the job starts with an
   # almost empty environment and the python on PATH is the system one.
   guard_env "$full"
-  out=$(bsub -J "$name" -G s10396 $DEP -env "all,$full" < "$script" 2>&1)
+  out=$(bsub -J "$name" -G s10396 $RSV_ARG $DEP -env "all,$full" < "$script" 2>&1)
   echo "$out"
   jobid=$(echo "$out" | grep -oE "Job <[0-9]+>" | grep -oE "[0-9]+" | head -1)
   echo "${jobid:-SUBMIT_FAILED} $name $script $full" >> "$RECORD"

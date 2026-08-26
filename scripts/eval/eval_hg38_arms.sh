@@ -21,6 +21,17 @@ set -euo pipefail
 REPO=/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms
 cd "$REPO"
 
+# -U iclr_2026: the group's advance reservation. WITHOUT IT jobs sit in PEND
+# with "Not enough job slot(s) while advance reservation is active: 9 hosts"
+# -- the reservation holds those hosts out of the general pool, so a job that
+# does not ask for it is blocked BY the reservation instead of being served by
+# it. All seven jobs queued on 2026-08-26 went PEND -> RUN the instant
+# `bmod -U iclr_2026` was applied, with 1100 of 1280 reserved CPUs idle.
+# Override with RSV= to use a different reservation, or RSV="" for none.
+RSV=${RSV-iclr_2026}
+RSV_ARG=""
+[ -n "$RSV" ] && RSV_ARG="-U $RSV"
+
 RUNS=${RUNS:-outputs/hg38-caduceus}   # matches launch_hg38_arms.sh's pinned dirs
 WHICH=${WHICH:-best}                  # best.ckpt (val/nll-selected) or last.ckpt
 STAGE=${STAGE:-all}
@@ -138,11 +149,11 @@ echo "# submitted $(date) from $(git rev-parse --short HEAD)$(git diff --quiet |
 
 submit () { # jobname script env
   if [ "${DRY:-0}" = "1" ]; then
-    echo "bsub -J $1 -G s10396 -env \"all,$3\" < $2"
+    echo "bsub -J $1 -G s10396 $RSV_ARG -env \"all,$3\" < $2"
     return
   fi
   guard_env "$3"
-  out=$(bsub -J "$1" -G s10396 -env "all,$3" < "$2" 2>&1)
+  out=$(bsub -J "$1" -G s10396 $RSV_ARG -env "all,$3" < "$2" 2>&1)
   echo "$out"
   jobid=$(echo "$out" | grep -oE "Job <[0-9]+>" | grep -oE "[0-9]+" | head -1)
   echo "${jobid:-SUBMIT_FAILED} $1 $2 $3" >> "$RECORD"
