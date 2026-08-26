@@ -63,8 +63,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 sys.path.insert(0, str(REPO))
 
-from scripts.eval.provenance import (  # noqa: E402
-  assert_full_coverage, stamp)
+from scripts.eval.provenance import stamp  # noqa: E402
 from scripts.eval.caduceus.embed import pool  # noqa: E402
 from scripts.eval.caduceus.genomic_benchmarks import (  # noqa: E402
   TASKS, load_task, reference, task_stats)
@@ -669,18 +668,26 @@ def run_task(name, model, args, base_config, device, complement):
     raise ValueError(
       f"{name}: test labels reach {int(np.max(yte))} but the train split only "
       f"defines {stats['num_classes']} classes")
-  # REFUSE a silent truncation, do not merely record one. The summary already
-  # wrote n_train_used / train_fraction, which is property (2) of the failure
-  # this file's own docstring describes; property (3) -- nothing compares what
-  # was used against what was available -- was still open on THIS path, the one
-  # that produces the headline numbers. The probe script has had the guard
-  # since it was written; this one never did.
+  # Coverage is already ENFORCED for this path: load_task() above calls
+  # assert_full_coverage on both splits (genomic_benchmarks.py:161-164), so an
+  # undeclared cap raises there before we get here. Asserting again would only
+  # print the warning twice.
+  #
+  # What that call does not do is pass `record`, so a DECLARED truncation warns
+  # on stderr and leaves no trace in the result file. Recording it here is the
+  # part that was missing: `train_fraction` alone tells you a number is short
+  # but not that the shortfall was deliberate.
   truncations = {}
-  assert_full_coverage(len(xtr_all), stats["n_train_full"],
-                       f"{name} train rows",
-                       allow=args.max_train is not None, record=truncations)
-  assert_full_coverage(len(xte), stats["n_test_full"], f"{name} test rows",
-                       allow=args.max_test is not None, record=truncations)
+  if args.max_train is not None and len(xtr_all) < stats["n_train_full"]:
+    truncations.setdefault("truncations", []).append(
+      {"what": f"{name} train rows", "used": len(xtr_all),
+       "available": stats["n_train_full"],
+       "fraction": len(xtr_all) / stats["n_train_full"]})
+  if args.max_test is not None and len(xte) < stats["n_test_full"]:
+    truncations.setdefault("truncations", []).append(
+      {"what": f"{name} test rows", "used": len(xte),
+       "available": stats["n_test_full"],
+       "fraction": len(xte) / stats["n_test_full"]})
 
   guard = HeldOutTest(xte, yte)
 
