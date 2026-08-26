@@ -143,9 +143,10 @@ guard_env () { # $1 = comma-separated VAR=VAL string we are about to pass
   fi
 }
 
-mkdir -p logs/eval docs/runs
+[ "${DRY:-0}" = "1" ] || mkdir -p logs/eval docs/runs
 RECORD="docs/runs/hg38_eval_$(date +%Y%m%d-%H%M%S).txt"
-echo "# submitted $(date) from $(git rev-parse --short HEAD)$(git diff --quiet || echo ' (DIRTY)')" > "$RECORD"
+REC () { [ "${DRY:-0}" = "1" ] || echo "$@" >> "$RECORD"; }
+[ "${DRY:-0}" = "1" ] || echo "# submitted $(date) from $(git rev-parse --short HEAD)$(git diff --quiet || echo ' (DIRTY)')" > "$RECORD"
 
 submit () { # jobname script env
   if [ "${DRY:-0}" = "1" ]; then
@@ -156,7 +157,7 @@ submit () { # jobname script env
   out=$(bsub -J "$1" -G s10396 $RSV_ARG -env "all,$3" < "$2" 2>&1)
   echo "$out"
   jobid=$(echo "$out" | grep -oE "Job <[0-9]+>" | grep -oE "[0-9]+" | head -1)
-  echo "${jobid:-SUBMIT_FAILED} $1 $2 $3" >> "$RECORD"
+  REC "${jobid:-SUBMIT_FAILED} $1 $2 $3"
 }
 
 # ---- perplexity: one job, all five arms, on the hg38 validation split -------
@@ -196,5 +197,5 @@ if [ "$STAGE" = "all" ] || [ "$STAGE" = "gb" ]; then
 fi
 
 echo
-echo "recorded to $RECORD"
+[ "${DRY:-0}" = "1" ] || echo "recorded to $RECORD"
 [ "${DRY:-0}" = "1" ] || cat "$RECORD"

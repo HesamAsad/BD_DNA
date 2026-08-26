@@ -186,10 +186,11 @@ guard_env () { # $1 = comma-separated VAR=VAL string we are about to pass
   fi
 }
 
-mkdir -p logs docs/runs
+[ "${DRY:-0}" = "1" ] || mkdir -p logs docs/runs
 RECORD="docs/runs/hg38_arms_$(date +%Y%m%d-%H%M%S).txt"
-echo "# submitted $(date) from $(git rev-parse --short HEAD)$(git diff --quiet || echo ' (DIRTY)')" > "$RECORD"
-echo "# shared: $COMMON" >> "$RECORD"
+REC () { [ "${DRY:-0}" = "1" ] || echo "$@" >> "$RECORD"; }
+[ "${DRY:-0}" = "1" ] || echo "# submitted $(date) from $(git rev-parse --short HEAD)$(git diff --quiet || echo ' (DIRTY)')" > "$RECORD"
+REC "# shared: $COMMON"
 
 # ONLY=hg_xf_bd+hg_ussm_bd restricts the submission to named arms, for
 # restarting a subset without disturbing arms that are running correctly.
@@ -248,9 +249,9 @@ for entry in "${ARMS[@]}"; do
   out=$(bsub -J "$name" -G s10396 $RSV_ARG $WALL_ARG $DEP -env "all,$full" < "$script" 2>&1)
   echo "$out"
   jobid=$(echo "$out" | grep -oE "Job <[0-9]+>" | grep -oE "[0-9]+" | head -1)
-  echo "${jobid:-SUBMIT_FAILED} $name $script $full" >> "$RECORD"
+  REC "${jobid:-SUBMIT_FAILED} $name $script $full"
 done
 
 echo
-echo "recorded to $RECORD"
+[ "${DRY:-0}" = "1" ] || echo "recorded to $RECORD"
 [ "${DRY:-0}" = "1" ] || cat "$RECORD"
