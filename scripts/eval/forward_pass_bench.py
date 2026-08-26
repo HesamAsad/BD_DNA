@@ -63,8 +63,14 @@ from scripts.smoke.sizing_sweep import ARMS, build  # noqa: E402
 
 def run_case(arm, length, block_size, batch, warmup, iters, device,
              attn_backend=None):
+  # Record the geometry, not just the arm name. `dit` meant model=small
+  # (768/12, 85.02M) before 2026-08-26 and model=small_xf_matched (832/13,
+  # 99.77M) after, so an arm name alone does not identify what was measured --
+  # and a figure built by mixing an old json with a new one would compare two
+  # different Transformers under one label with nothing on the page to say so.
   row = {"arm": arm, "length": length, "batch_size": batch,
-         "block_size": block_size, "attn_backend": attn_backend}
+         "block_size": block_size, "attn_backend": attn_backend,
+         "model_config": ARMS[arm][0], "algo_config": ARMS[arm][1]}
   model = None
   try:
     supports_ckpt = ARMS[arm][2]
@@ -80,6 +86,7 @@ def run_case(arm, length, block_size, batch, warmup, iters, device,
                    False if supports_ckpt else None, extra)
     torch.manual_seed(0)
     model = Diffusion(config, DNATokenizer()).to(device)
+    row["backbone_params"] = sum(p.numel() for p in model.backbone.parameters())
     # eval(), not train(): dropout off, and nothing retained for a backward
     # that never happens. This is the inference path.
     model.eval()
@@ -117,6 +124,17 @@ def run_case(arm, length, block_size, batch, warmup, iters, device,
     row.update({"oom": True, "peak_gib": None, "peak_gb": None,
                 "forward_seconds": None, "forward_ms": None,
                 "tokens_per_second": None})
+  except Exception as exc:  # noqa: BLE001
+    # Record and continue. Only OutOfMemoryError was caught before, so a
+    # failure of any other kind killed the whole sweep -- which is why the
+    # previous forward_pass.json holds 7 `dit` rows and ZERO oom rows, a
+    # combination that reads like "we chose not to measure past 2^16" when it
+    # actually means "the run died there". The BD Transformer allocates a dense
+    # (2L x 2L) attention mask (dit.py:773), which is O(L^2) BYTES and fails
+    # well before the model itself would.
+    row.update({"oom": False, "error": f"{type(exc).__name__}: {exc}"[:200],
+                "peak_gib": None, "peak_gb": None, "forward_seconds": None,
+                "forward_ms": None, "tokens_per_second": None})
   finally:
     del model
     torch.cuda.empty_cache()
@@ -158,6 +176,8 @@ def main_cli():
       rows.append(row)
       if row.get("oom"):
         print(f"{arm:<9}{length:>9}{'OOM':>10}")
+      elif row.get("error"):
+        print(f"{arm:<9}{length:>9}{'FAIL':>10}  {row['error'][:60]}")
       else:
         print(f"{arm:<9}{length:>9}{row['forward_ms']:>10.2f}"
               f"{row['tokens_per_second']:>13,.0f}{row['peak_gb']:>9.2f}")

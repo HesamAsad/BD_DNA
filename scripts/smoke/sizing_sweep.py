@@ -58,13 +58,23 @@ ARMS = {
   # name: (model config, algo config, whether the prefill flag applies)
   "bissm": ("small_bissm", "bd3lm_bissm", True),
   "ussm": ("small_ussm", "bd3lm_ussm", True),
-  "dit": ("small", "bd3lm", False),
+  # small_xf_matched (832/13, 99.77M) NOT small (768/12, 85.02M). A Mamba-2
+  # layer carries more parameters than an attention layer of the same width, so
+  # equal hidden size is not equal capacity: measuring `small` against the
+  # 100.69M SSM arms understated the Transformer's memory and latency by
+  # comparing a 15.6% smaller model. Everything in
+  # results/sizing/*.json measured before 2026-08-26 used `small`; those files
+  # are still valid for what they measured, they are just not parameter-matched.
+  "dit": ("small_xf_matched", "bd3lm", False),
   # The AR arms are the honest apples-to-apples memory comparison: neither does
   # a boundary prefill (diffusion.py routes only bd3lm through
   # _forward_pass_bissm) and neither doubles the mixer, so what is left is the
   # per-token cost of a Mamba-2 layer against a causal attention layer.
   "ussm-ar": ("small_ussm", "ar", False),
-  "dit-ar": ("small_ar_transformer", "ar", False),
+  # Same 832/13 geometry as the BD arm above, under the name that says so, so
+  # the two Transformer curves are visibly the same model differing only in
+  # objective.
+  "dit-ar": ("small_xf_matched", "ar", False),
 }
 AR_ARMS = {"ussm-ar", "dit-ar"}
 
