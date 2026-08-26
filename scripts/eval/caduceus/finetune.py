@@ -322,9 +322,13 @@ class Classifier(nn.Module):
   def trainable_backbone_parameters(self):
     """Only the parameters the forward pass actually reaches."""
     if self.kind == "dit":
-      # vocab_embed + sigma_map (adaLN conditioning is fed at sigma=0, so the
-      # timestep MLP is on the path) + the tapped blocks.
-      modules = [self.backbone.vocab_embed, self.backbone.sigma_map]
+      # vocab_embed + the tapped blocks, plus sigma_map when this checkpoint
+      # has one (BD only -- see the note in forward). An AR DiT has no
+      # sigma_map, so listing it unconditionally raised AttributeError before
+      # a single batch was seen.
+      modules = [self.backbone.vocab_embed]
+      if getattr(self.backbone, "sigma_map", None) is not None:
+        modules.append(self.backbone.sigma_map)
       modules += list(self.backbone.blocks[:self.n_layers])
     else:
       modules = [self.backbone.token_embedding]
@@ -353,12 +357,24 @@ class Classifier(nn.Module):
       # structure, which a classification readout has no use for.
       h = b.vocab_embed(ids)
       rotary_cos_sin = b.rotary_emb(h)
-      # sigma=0 is the clean end of the noise schedule, which is what a
-      # classification input actually is. The blocks tolerate c=None (dit.py:425
-      # falls back to unmodulated norms), but adaLN is a TRAINED module and
-      # bypassing it discards it; feeding the clean timestep uses it as trained.
-      sigma = torch.zeros(ids.shape[0], device=ids.device, dtype=torch.float32)
-      t_cond = F.silu(b.sigma_map(sigma))
+      # Conditioning follows how this checkpoint was BUILT, not a fixed choice.
+      # dit.py:679 sets adaLN = (not causal) or model.adaln, and :687-690 create
+      # sigma_map only then -- so a BD DiT has one and an AR DiT does NOT, and
+      # was trained with c=None throughout (diffusion.py passes sigma=None for
+      # the AR parameterization). Assuming sigma_map exists raised
+      # AttributeError on every Transformer-AR checkpoint.
+      #
+      # Where it does exist, feed sigma=0: the clean end of the schedule, which
+      # is what a classification input is. The blocks tolerate c=None
+      # (dit.py:425 falls back to unmodulated norms), but adaLN is a TRAINED
+      # module and bypassing it silently discards it.
+      sigma_map = getattr(b, "sigma_map", None)
+      if sigma_map is None:
+        t_cond = None
+      else:
+        sigma = torch.zeros(ids.shape[0], device=ids.device,
+                            dtype=torch.float32)
+        t_cond = F.silu(sigma_map(sigma))
       ctx = (torch.amp.autocast("cuda", dtype=torch.bfloat16) if h.is_cuda
              else contextlib.nullcontext())
       with ctx:
