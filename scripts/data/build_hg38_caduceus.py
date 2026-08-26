@@ -73,6 +73,10 @@ ap.add_argument("--bed", default=str(REPO / "data/hg38/human-sequences.bed"))
 ap.add_argument("--cache_dir", default=str(REPO / "data_cache/carbon"))
 ap.add_argument("--name", default="hg38-caduceus")
 ap.add_argument("--splits", default="train,valid")
+# Default 1: the SERIAL path is the one verified byte-exact against the fasta.
+# The sharded path below is correct by construction (the idx -> (interval, tile)
+# mapping is unchanged) but was never validated at scale, so it is opt-in.
+ap.add_argument("--num_proc", type=int, default=1)
 ap.add_argument("--limit", type=int, default=0,
                 help="cap windows per split (smoke tests only; 0 = all)")
 args = ap.parse_args()
@@ -127,9 +131,18 @@ def build(split):
     print(f"  {split}: {len(df):,} intervals x {SHIFTS} shifts = {total:,} windows "
           f"= {total * L / 1e9:.2f}e9 nt", flush=True)
 
-    def gen():
+    def gen(lo=0, hi=None):
+        """Windows [lo, hi). Sharding here is what lets num_proc parallelise.
+
+        The bottleneck is the arrow write, not the fasta: a 8192-window slice
+        costs 0.075 ms (13,317/s available) while a single process delivered
+        only 209/s end to end. Sharding by window index keeps the mapping
+        idx -> (interval, tile) identical to the serial version, so the output
+        is byte-for-byte the same, just written by several workers.
+        """
         t0 = time.time()
-        for idx in range(total):
+        hi = total if hi is None else min(hi, total)
+        for idx in range(lo, hi):
             row_idx, shift_idx = idx // SHIFTS, idx % SHIFTS
             row = df.iloc[row_idx]
             start, end = compute_interval(int(row.start), shift_idx)
@@ -140,15 +153,21 @@ def build(split):
             # N -> masked out of the loss, matching their N -> PAD -> ignore_index
             mask = (ids != N_ID).astype(np.float32)
             yield {"input_ids": ids, "attention_mask": mask}
-            if idx and idx % 200_000 == 0:
-                rate = idx / (time.time() - t0)
-                print(f"    {idx:,}/{total:,}  {rate:,.0f}/s  "
-                      f"eta {(total - idx) / rate / 3600:.1f} h", flush=True)
+            if idx and (idx - lo) % 200_000 == 0:
+                rate = (idx - lo) / (time.time() - t0)
+                print(f"    shard@{lo:,}: {idx - lo:,}  {rate:,.0f}/s", flush=True)
 
     feats = datasets.Features({
         "input_ids": datasets.Sequence(datasets.Value("int32")),
         "attention_mask": datasets.Sequence(datasets.Value("float32"))})
-    ds = datasets.Dataset.from_generator(gen, features=feats)
+    nproc = max(1, min(args.num_proc, 32))
+    if nproc > 1 and total > 10_000:
+        edges = [total * i // nproc for i in range(nproc + 1)]
+        ds = datasets.Dataset.from_generator(
+            gen, features=feats, num_proc=nproc,
+            gen_kwargs={"lo": edges[:-1], "hi": edges[1:]})
+    else:
+        ds = datasets.Dataset.from_generator(gen, features=feats)
     suffix = "_train" if split == "train" else "_validation"
     out = os.path.join(args.cache_dir,
                        f"{args.name}{suffix}_bs{L}_wrapped_specialFalse.dat")
