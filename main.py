@@ -460,13 +460,20 @@ def _train(config, logger, tokenizer):
   # Log to Weights & Biases when `wandb` is configured, else a lightweight CSV
   # logger. We avoid `logger=None` (Lightning falls back to TensorBoardLogger,
   # which imports tensorflow) and `logger=False` (breaks LearningRateMonitor).
+  # ALWAYS attach a CSV logger, even when wandb is on. Lightning takes a list.
+  # wandb is for watching a run live; the CSV is what survives locally and is
+  # what any later plot of val/nll and val/ppl across arms will be built from.
+  # Without this, a run with WANDB_MODE=online leaves NO metric file on disk.
+  csv_logger = L.pytorch.loggers.CSVLogger(
+    save_dir=os.getcwd(), name='csv_logs', flush_logs_every_n_steps=50)
   if config.get('wandb', None) is not None:
-    wandb_logger = L.pytorch.loggers.WandbLogger(
-      config=omegaconf.OmegaConf.to_object(config),
-      ** config.wandb)
+    wandb_logger = [
+      L.pytorch.loggers.WandbLogger(
+        config=omegaconf.OmegaConf.to_object(config),
+        ** config.wandb),
+      csv_logger]
   else:
-    wandb_logger = L.pytorch.loggers.CSVLogger(
-      save_dir=os.getcwd(), name='csv_logs')
+    wandb_logger = csv_logger
 
   if (config.checkpointing.resume_from_ckpt
       and config.checkpointing.resume_ckpt_path is not None
