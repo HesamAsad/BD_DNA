@@ -63,9 +63,29 @@ RSV_ARG=""
 # ---- shared across every arm; changing one of these changes the comparison --
 DATA_TRAIN=hg38-caduceus
 DATA_VALID=hg38-caduceus
-LENGTH=8192
 BLOCK_SIZE=256
-GLOBAL_BATCH=64
+# Context length is a knob so the 1024 and 32768 campaigns reuse this launcher.
+# TOKENS_PER_STEP is held FIXED across lengths, which is what makes the three
+# campaigns comparable: the corpus is a fixed 35.67e9 tokens, so a constant
+# 524,288 tokens per step gives exactly 68,042 steps at every length.
+#
+#     L=1,024   34,837,504 windows / batch 512 = 68,042 steps
+#     L=8,192    4,354,688 windows / batch  64 = 68,042 steps
+#     L=32,768   1,088,672 windows / batch  16 = 68,042 steps
+#
+# Same steps, same tokens, same epochs -- context length is then the only
+# variable. MICRO_BATCH follows as GLOBAL_BATCH/16, which holds accumulation at
+# 4 everywhere, so VAL_EVERY=500 stays 125 optimizer steps at every length too.
+LENGTH=${LENGTH:-8192}
+TOKENS_PER_STEP=${TOKENS_PER_STEP:-524288}
+GLOBAL_BATCH=$(( TOKENS_PER_STEP / LENGTH ))
+GPUS=4
+if (( GLOBAL_BATCH < 16 || GLOBAL_BATCH % 16 != 0 )); then
+  echo "FATAL: L=$LENGTH gives global batch $GLOBAL_BATCH, which is not a"
+  echo "       multiple of 16 (= $GPUS gpus x accumulation 4). Pick a length"
+  echo "       that divides $TOKENS_PER_STEP into a multiple of 16."
+  exit 2
+fi
 # 4,354,688 windows / 64 = 68,042.0 optimizer steps = exactly 1.00 epochs over
 # the WINDOW LIST. Not one pass over the genome: scripts/data/audit_hg38_corpus.py
 # shows the 2^20 stretch makes those 35.67 Gb of windows cover only 2.34 Gb of
@@ -175,7 +195,10 @@ echo "# shared: $COMMON" >> "$RECORD"
 # restarting a subset without disturbing arms that are running correctly.
 ONLY=${ONLY:-}; ONLY=",${ONLY//+/,},"
 for entry in "${ARMS[@]}"; do
-  IFS='|' read -r name script micro env <<< "$entry"
+  IFS='|' read -r name script _micro env <<< "$entry"
+  # MICRO_BATCH is derived from the length, not taken from the table: the
+  # table's value is only right for L=8192. GLOBAL_BATCH/16 holds accum at 4.
+  micro=$(( GLOBAL_BATCH / 16 ))
   if [ "$ONLY" != ",," ]; then
     case "$ONLY" in *",$name,"*) : ;; *) continue;; esac
   fi
@@ -196,8 +219,21 @@ for entry in "${ARMS[@]}"; do
   # It also puts the five arms under one parent, which is what
   # `training_curves.py --glob "outputs/hg38-caduceus/*"` expects, and the
   # leaf names match its INFER table.
-  run_dir="outputs/hg38-caduceus/$name"
+  # L=8192 keeps the original path so the arms already running there still
+  # resume from their last.ckpt; other lengths get their own root.
+  if [ "$LENGTH" = "8192" ]; then
+    run_dir="outputs/hg38-caduceus/$name"
+  else
+    run_dir="outputs/hg38-caduceus-L${LENGTH}/$name"
+  fi
   full="$COMMON,MICRO_BATCH=$micro,VAL_EVERY=$val_every,RUN_DIR=$run_dir,$env"
+  # Past ~L=16384 the stored boundary prefill does not fit: the SSM launcher's
+  # own note measures 138 of the H200's 139.72 GiB at L=32768 micro 2, which
+  # will not survive DDP buffers. Recomputing costs ~10% throughput and saves
+  # ~36% of peak. Only the SSM arms read this flag.
+  if (( LENGTH >= 16384 )) && [[ "$script" == *ssm_baseline* ]]; then
+    full="$full,CHECKPOINT_PREFILL=true"
+  fi
   echo "  $name: micro=$micro accum=$accum -> val every $val_every micro-batches"
   echo "         = every $VAL_EVERY_OPT_STEPS optimizer steps (same grid for all arms)"
   echo "         run_dir=$run_dir$([ -f "$run_dir/checkpoints/last.ckpt" ] && echo '  (will RESUME from last.ckpt)')"
