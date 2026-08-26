@@ -19,7 +19,11 @@ as measurements and AR-vs-BD as an upper bound only. The axis labels say so.
 
 Three x axes, because "better" depends on what you are holding fixed:
   step      what you watch while it runs; fair only at equal batch and length.
-  tokens    data efficiency -- the axis that matters for a corpus-bound claim.
+  tokens    tokens PUSHED THROUGH THE MODEL, which is not the same as data
+            seen: the hg38 corpus repeats every base ~15.2x
+            (scripts/data/audit_hg38_corpus.py), so this axis measures compute
+            spent on tokens, not breadth of data. Fair for comparing arms,
+            wrong for any "learns from less data" claim.
   PFLOP     compute efficiency -- the axis that matters for a budget-bound one.
 Both `trainer/total_gtokens` and `trainer/total_pflop` are already cumulative
 and cluster-scaled in the log (diffusion.py:_log_train_telemetry).
@@ -179,7 +183,7 @@ def panel(ax, runs, y, x, ylabel, title, logy=False, window=1, marker=True):
             label=label + ("  (NELBO)" if label in BOUNDED else ""))
     drawn += 1
   ax.set_xlabel({"step": "Training step",
-                 "trainer/total_gtokens": "Tokens seen (billions)",
+                 "trainer/total_gtokens": "Tokens processed (billions)",
                  "trainer/total_pflop": "Compute (PFLOP)"}.get(x, x))
   ax.set_ylabel(ylabel)
   ax.set_title(title, fontsize=10.5)
@@ -243,7 +247,7 @@ def main():
   panel(axes[0], runs, "val/nll", "step",
         "Validation NLL (nats/token)", "Against steps")
   panel(axes[1], runs, "val/nll", "trainer/total_gtokens",
-        "Validation NLL (nats/token)", "Against data")
+        "Validation NLL (nats/token)", "Against tokens processed")
   panel(axes[2], runs, "val/nll", "trainer/total_pflop",
         "Validation NLL (nats/token)", "Against compute")
   fig.suptitle("Validation NLL — AR arms report an exact NLL, BD arms a NELBO "

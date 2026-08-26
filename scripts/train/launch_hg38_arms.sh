@@ -45,8 +45,11 @@ DATA_VALID=hg38-caduceus
 LENGTH=8192
 BLOCK_SIZE=256
 GLOBAL_BATCH=64
-# 4,354,688 windows / 64 = 68,042.0 optimizer steps = EXACTLY 1.00 epochs.
-# Not a round number by accident -- it is the corpus, and it divides exactly.
+# 4,354,688 windows / 64 = 68,042.0 optimizer steps = exactly 1.00 epochs over
+# the WINDOW LIST. Not one pass over the genome: scripts/data/audit_hg38_corpus.py
+# shows the 2^20 stretch makes those 35.67 Gb of windows cover only 2.34 Gb of
+# distinct sequence, so this is ~15.2 passes over the genome. Do not reason
+# about overfitting or data efficiency from the word "epoch" here.
 MAX_STEPS=68042
 # val_check_interval counts MICRO-batches, NOT optimizer steps -- so a fixed
 # VAL_EVERY means different things to arms with different micro batches, and
