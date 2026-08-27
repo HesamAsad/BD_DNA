@@ -5,9 +5,9 @@
 #BSUB -n 8
 #BSUB -W 12:00
 #BSUB -R "span[hosts=1]"
-#BSUB -R "select[mem>128000 && hname!='farm-gpu0504']"
-#BSUB -R "rusage[mem=128000]"
-#BSUB -M 128000
+#BSUB -R "select[mem>200000 && hname!='farm-gpu0504']"
+#BSUB -R "rusage[mem=200000]"
+#BSUB -M 200000
 #BSUB -gpu "num=1:mode=exclusive_process:gmodel=NVIDIAH200"
 #BSUB -cwd /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms
 #BSUB -o /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/logs/fwd_matched_%J.out
@@ -61,8 +61,23 @@ export HYDRA_FULL_ERROR=1
 mkdir -p logs results/sizing results/figures
 
 OUT=${OUT:-results/sizing/forward_pass_matched.json}
-ARMS=${ARMS:-bissm,ussm,ussm-ar,dit,dit-ar}
-LENGTHS=${LENGTHS:-1024,2048,4096,8192,16384,32768,65536,131072,262144,524288}
+# TWO PASSES, because the BD Transformer cannot be swept as far as the others.
+#
+# LSF 121223 was killed at 206 GB of HOST memory against a 128 GB request. The
+# cause is dit.py:773: under the sdpa backend gen_mask builds a DENSE
+# (2L x 2L) boolean block-diffusion mask, which is O(L^2) BYTES -- ~68 GB at
+# 2^17, ~275 GB at 2^18 -- and gen_mask runs inside __init__, BEFORE .to(device),
+# so it allocates on the HOST. run_case's exception handling cannot catch this:
+# LSF kills the process, nothing raises.
+#
+# The AR Transformer builds no mask at all (gen_mask is called only when
+# algo.cross_attn, dit.py:749), so it sweeps the full range like the SSMs.
+# Capping only `dit` keeps every other curve complete instead of truncating the
+# whole figure to the weakest arm.
+WIDE_ARMS=${WIDE_ARMS:-bissm,ussm,ussm-ar,dit-ar}
+WIDE_LENGTHS=${WIDE_LENGTHS:-1024,2048,4096,8192,16384,32768,65536,131072,262144,524288}
+BD_XF_ARMS=${BD_XF_ARMS:-dit}
+BD_XF_LENGTHS=${BD_XF_LENGTHS:-1024,2048,4096,8192,16384,32768,65536}
 
 echo "[$(date)] forward-pass sweep, parameter-matched Transformer arms"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
@@ -72,14 +87,37 @@ from scripts.smoke.sizing_sweep import ARMS
 for k,v in ARMS.items(): print(f'  {k:<9} model={v[0]:<18} algo={v[1]}')"
 
 "$PYTHON" -u scripts/eval/forward_pass_bench.py \
-  --arms "$ARMS" \
-  --lengths "$LENGTHS" \
-  --batch 1 \
-  --block-size 256 \
-  --warmup 5 \
-  --iters 15 \
-  --output "$OUT"
+  --arms "$WIDE_ARMS" --lengths "$WIDE_LENGTHS" \
+  --batch 1 --block-size 256 --warmup 5 --iters 15 \
+  --output "${OUT%.json}_wide.json"
 rc=$?
+echo "[$(date)] wide-arm bench exit=$rc"
+
+"$PYTHON" -u scripts/eval/forward_pass_bench.py \
+  --arms "$BD_XF_ARMS" --lengths "$BD_XF_LENGTHS" \
+  --batch 1 --block-size 256 --warmup 5 --iters 15 \
+  --output "${OUT%.json}_bdxf.json"
+rc=$((rc + $?))
+echo "[$(date)] BD-transformer bench exit=$rc"
+
+# Merge, keeping both provenance blocks so the two passes stay attributable.
+"$PYTHON" - "$OUT" "${OUT%.json}_wide.json" "${OUT%.json}_bdxf.json" <<'PYMERGE'
+import json, sys
+out, *parts = sys.argv[1:]
+rows, prov = [], {}
+for i, p in enumerate(parts):
+    d = json.load(open(p))
+    rows += d.get("rows", [])
+    prov[f"pass{i}"] = {k: v for k, v in d.items() if k != "rows"}
+json.dump({"rows": rows, "passes": prov,
+           "protocol": ("forward only, no_grad, eval mode, median of "
+                        "post-warmup iterations; two passes because the BD "
+                        "Transformer's dense (2L x 2L) host-side mask caps it "
+                        "at 2^16")},
+          open(out, "w"), indent=2, sort_keys=True)
+print(f"merged {len(rows)} rows -> {out}")
+PYMERGE
+rc=$((rc + $?))
 echo "[$(date)] bench exit=$rc"
 
 if [ "$rc" = "0" ]; then
