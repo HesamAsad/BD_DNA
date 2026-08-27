@@ -1,0 +1,220 @@
+{
+  "_provenance": {
+    "argv": [
+      "scripts/eval/hg38_report.py",
+      "--json",
+      "results/hg38_report.json"
+    ],
+    "git_dirty": false,
+    "git_sha": "ce93361b86bbf9b4fd680cef4cd98e2516d32992",
+    "host": "tiger22-head1",
+    "lsf_job_id": null,
+    "python": "3.10.15",
+    "resolved_args": {
+      "gb_dir": "results/caduceus/genomic_benchmarks_ft",
+      "gb_prefix": "hg38_",
+      "json": "results/hg38_report.json",
+      "length": 8192,
+      "ppl_glob": "logs/eval/ppl_ssm_baselines_*.tsv",
+      "runs": null
+    },
+    "watched_env": {
+      "WINDOW": "0"
+    }
+  },
+  "arms": {
+    "bissm_bd": {
+      "best_val_nll_step": 25250,
+      "best_val_nll_training": 1.0926614999771118,
+      "caduceus_ph_mean_over_same_tasks": null,
+      "final_val_nll": null,
+      "final_val_ppl": null,
+      "gb_mean_accuracy": null,
+      "genomic_benchmarks": {},
+      "is_nelbo_upper_bound": true,
+      "label": "BiSSM-BD",
+      "last_step_seen": 25619
+    },
+    "ussm_ar": {
+      "best_val_nll_step": 50249,
+      "best_val_nll_training": 0.9933376312255859,
+      "caduceus_ph_mean_over_same_tasks": 0.866,
+      "final_val_nll": 0.9818366169929504,
+      "final_val_ppl": 2.6694,
+      "gb_mean_accuracy": 0.8303909614807059,
+      "genomic_benchmarks": {
+        "demo_coding_vs_intergenomic_seqs": {
+          "accuracy": 0.937832,
+          "n_train_full": 75000,
+          "n_train_used": 75000,
+          "ph": 0.915,
+          "ps": 0.91,
+          "std": 0.0005647796030311362
+        },
+        "demo_human_or_worm": {
+          "accuracy": 0.9691599999999999,
+          "n_train_full": 75000,
+          "n_train_used": 75000,
+          "ph": 0.973,
+          "ps": 0.968,
+          "std": 0.0008723302127061714
+        },
+        "dummy_mouse_enhancers_ensembl": {
+          "accuracy": 0.7115702479338843,
+          "n_train_full": 968,
+          "n_train_used": 968,
+          "ph": 0.754,
+          "ps": 0.793,
+          "std": 0.03539274893448572
+        },
+        "human_enhancers_cohn": {
+          "accuracy": 0.7507772020725388,
+          "n_train_full": 20843,
+          "n_train_used": 20843,
+          "ph": 0.747,
+          "ps": 0.745,
+          "std": 0.003982989973768786
+        },
+        "human_enhancers_ensembl": {
+          "accuracy": 0.8739037778495318,
+          "n_train_full": 123872,
+          "n_train_used": 123872,
+          "ph": 0.893,
+          "ps": 0.9,
+          "std": 0.004777570109902744
+        },
+        "human_ensembl_regulatory": {
+          "accuracy": 0.7155961395179596,
+          "n_train_full": 231348,
+          "n_train_used": 231348,
+          "ph": 0.872,
+          "ps": 0.873,
+          "std": 0.06366702232666581
+        },
+        "human_nontata_promoters": {
+          "accuracy": 0.9411777728580917,
+          "n_train_full": 27097,
+          "n_train_used": 27097,
+          "ph": 0.946,
+          "ps": 0.945,
+          "std": 0.0013765146386282689
+        },
+        "human_ocr_ensembl": {
+          "accuracy": 0.7431105516136416,
+          "n_train_full": 139804,
+          "n_train_used": 139804,
+          "ph": 0.828,
+          "ps": 0.818,
+          "std": 0.0020608737613296213
+        }
+      },
+      "is_nelbo_upper_bound": false,
+      "label": "uSSM-AR",
+      "last_step_seen": 68039
+    },
+    "ussm_bd": {
+      "best_val_nll_step": 40250,
+      "best_val_nll_training": 1.1275147199630737,
+      "caduceus_ph_mean_over_same_tasks": null,
+      "final_val_nll": null,
+      "final_val_ppl": null,
+      "gb_mean_accuracy": null,
+      "genomic_benchmarks": {},
+      "is_nelbo_upper_bound": true,
+      "label": "uSSM-BD",
+      "last_step_seen": 41089
+    },
+    "xf_ar": {
+      "best_val_nll_step": 54999,
+      "best_val_nll_training": 0.9970210194587708,
+      "caduceus_ph_mean_over_same_tasks": 0.866,
+      "final_val_nll": 0.9855318069458008,
+      "final_val_ppl": 2.6792,
+      "gb_mean_accuracy": 0.8554271861099336,
+      "genomic_benchmarks": {
+        "demo_coding_vs_intergenomic_seqs": {
+          "accuracy": 0.9424720000000001,
+          "n_train_full": 75000,
+          "n_train_used": 75000,
+          "ph": 0.915,
+          "ps": 0.91,
+          "std": 0.0026713771729203707
+        },
+        "demo_human_or_worm": {
+          "accuracy": 0.9706400000000001,
+          "n_train_full": 75000,
+          "n_train_used": 75000,
+          "ph": 0.973,
+          "ps": 0.968,
+          "std": 0.0003959797974644813
+        },
+        "dummy_mouse_enhancers_ensembl": {
+          "accuracy": 0.7586776859504132,
+          "n_train_full": 968,
+          "n_train_used": 968,
+          "ph": 0.754,
+          "ps": 0.793,
+          "std": 0.004214065713713032
+        },
+        "human_enhancers_cohn": {
+          "accuracy": 0.7474668969487622,
+          "n_train_full": 20843,
+          "n_train_used": 20843,
+          "ph": 0.747,
+          "ps": 0.745,
+          "std": 0.005316786714866504
+        },
+        "human_enhancers_ensembl": {
+          "accuracy": 0.878159509202454,
+          "n_train_full": 123872,
+          "n_train_used": 123872,
+          "ph": 0.893,
+          "ps": 0.9,
+          "std": 0.0028716510322094346
+        },
+        "human_ensembl_regulatory": {
+          "accuracy": 0.8687851957098054,
+          "n_train_full": 231348,
+          "n_train_used": 231348,
+          "ph": 0.872,
+          "ps": 0.873,
+          "std": 0.0010806011405413072
+        },
+        "human_nontata_promoters": {
+          "accuracy": 0.935421740092982,
+          "n_train_full": 27097,
+          "n_train_used": 27097,
+          "ph": 0.946,
+          "ps": 0.945,
+          "std": 0.0008301232348573251
+        },
+        "human_ocr_ensembl": {
+          "accuracy": 0.7417944609750515,
+          "n_train_full": 139804,
+          "n_train_used": 139804,
+          "ph": 0.828,
+          "ps": 0.818,
+          "std": 0.0011143331050798182
+        }
+      },
+      "is_nelbo_upper_bound": false,
+      "label": "Transformer-AR",
+      "last_step_seen": 68039
+    },
+    "xf_bd": {
+      "best_val_nll_step": 25250,
+      "best_val_nll_training": 1.0676058530807495,
+      "caduceus_ph_mean_over_same_tasks": null,
+      "final_val_nll": null,
+      "final_val_ppl": null,
+      "gb_mean_accuracy": null,
+      "genomic_benchmarks": {},
+      "is_nelbo_upper_bound": true,
+      "label": "Transformer-BD",
+      "last_step_seen": 25329
+    }
+  },
+  "length": 8192,
+  "ppl_source": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/logs/eval/ppl_ssm_baselines_121782.tsv",
+  "runs": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/outputs/hg38-caduceus"
+}

@@ -1,0 +1,370 @@
+{
+  "demo_coding_vs_intergenomic_seqs": {
+    "ussm_ar": {
+      "accuracy": 0.937832,
+      "accuracy_per_seed": [
+        0.93732,
+        0.93876,
+        0.93756,
+        0.93732,
+        0.9382
+      ],
+      "accuracy_std": 0.0005647796030311362,
+      "best_epoch": [
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "caduceus_ph_published": 0.915,
+      "caduceus_ps_published": 0.91,
+      "n_train_full": 75000,
+      "n_train_used": 75000
+    },
+    "xf_ar": {
+      "accuracy": 0.9424720000000001,
+      "accuracy_per_seed": [
+        0.9454,
+        0.93872,
+        0.94352,
+        0.9448,
+        0.93992
+      ],
+      "accuracy_std": 0.0026713771729203707,
+      "best_epoch": [
+        1,
+        1,
+        1,
+        1,
+        2
+      ],
+      "caduceus_ph_published": 0.915,
+      "caduceus_ps_published": 0.91,
+      "n_train_full": 75000,
+      "n_train_used": 75000
+    }
+  },
+  "demo_human_or_worm": {
+    "ussm_ar": {
+      "accuracy": 0.9691599999999999,
+      "accuracy_per_seed": [
+        0.96904,
+        0.96844,
+        0.97056,
+        0.96964,
+        0.96812
+      ],
+      "accuracy_std": 0.0008723302127061714,
+      "best_epoch": [
+        2,
+        3,
+        1,
+        1,
+        1
+      ],
+      "caduceus_ph_published": 0.973,
+      "caduceus_ps_published": 0.968,
+      "n_train_full": 75000,
+      "n_train_used": 75000
+    },
+    "xf_ar": {
+      "accuracy": 0.9706400000000001,
+      "accuracy_per_seed": [
+        0.97084,
+        0.97032,
+        0.97128,
+        0.97016,
+        0.9706
+      ],
+      "accuracy_std": 0.0003959797974644813,
+      "best_epoch": [
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "caduceus_ph_published": 0.973,
+      "caduceus_ps_published": 0.968,
+      "n_train_full": 75000,
+      "n_train_used": 75000
+    }
+  },
+  "dummy_mouse_enhancers_ensembl": {
+    "ussm_ar": {
+      "accuracy": 0.7115702479338843,
+      "accuracy_per_seed": [
+        0.7272727272727273,
+        0.6487603305785123,
+        0.6983471074380165,
+        0.7479338842975206,
+        0.7355371900826446
+      ],
+      "accuracy_std": 0.03539274893448572,
+      "best_epoch": [
+        2,
+        0,
+        1,
+        5,
+        1
+      ],
+      "caduceus_ph_published": 0.754,
+      "caduceus_ps_published": 0.793,
+      "n_train_full": 968,
+      "n_train_used": 968
+    },
+    "xf_ar": {
+      "accuracy": 0.7586776859504132,
+      "accuracy_per_seed": [
+        0.7520661157024794,
+        0.7644628099173554,
+        0.7603305785123967,
+        0.7603305785123967,
+        0.756198347107438
+      ],
+      "accuracy_std": 0.004214065713713032,
+      "best_epoch": [
+        2,
+        1,
+        2,
+        2,
+        4
+      ],
+      "caduceus_ph_published": 0.754,
+      "caduceus_ps_published": 0.793,
+      "n_train_full": 968,
+      "n_train_used": 968
+    }
+  },
+  "human_enhancers_cohn": {
+    "ussm_ar": {
+      "accuracy": 0.7507772020725388,
+      "accuracy_per_seed": [
+        0.7515831894070236,
+        0.7538860103626943,
+        0.7429476108232584,
+        0.7525906735751295,
+        0.7528785261945884
+      ],
+      "accuracy_std": 0.003982989973768786,
+      "best_epoch": [
+        2,
+        2,
+        3,
+        2,
+        1
+      ],
+      "caduceus_ph_published": 0.747,
+      "caduceus_ps_published": 0.745,
+      "n_train_full": 20843,
+      "n_train_used": 20843
+    },
+    "xf_ar": {
+      "accuracy": 0.7474668969487622,
+      "accuracy_per_seed": [
+        0.7521588946459413,
+        0.7415083477259643,
+        0.7530224525043178,
+        0.75,
+        0.7406447898675877
+      ],
+      "accuracy_std": 0.005316786714866504,
+      "best_epoch": [
+        2,
+        1,
+        1,
+        2,
+        2
+      ],
+      "caduceus_ph_published": 0.747,
+      "caduceus_ps_published": 0.745,
+      "n_train_full": 20843,
+      "n_train_used": 20843
+    }
+  },
+  "human_enhancers_ensembl": {
+    "ussm_ar": {
+      "accuracy": 0.8739037778495318,
+      "accuracy_per_seed": [
+        0.8809815950920246,
+        0.8708427510494027,
+        0.8720051662899581,
+        0.8679044236357766,
+        0.8777849531804972
+      ],
+      "accuracy_std": 0.004777570109902744,
+      "best_epoch": [
+        5,
+        5,
+        5,
+        3,
+        5
+      ],
+      "caduceus_ph_published": 0.893,
+      "caduceus_ps_published": 0.9,
+      "n_train_full": 123872,
+      "n_train_used": 123872
+    },
+    "xf_ar": {
+      "accuracy": 0.878159509202454,
+      "accuracy_per_seed": [
+        0.8769131417500807,
+        0.8740071036486923,
+        0.880109783661608,
+        0.8824023248304811,
+        0.8773651921214078
+      ],
+      "accuracy_std": 0.0028716510322094346,
+      "best_epoch": [
+        5,
+        6,
+        5,
+        5,
+        5
+      ],
+      "caduceus_ph_published": 0.893,
+      "caduceus_ps_published": 0.9,
+      "n_train_full": 123872,
+      "n_train_used": 123872
+    }
+  },
+  "human_ensembl_regulatory": {
+    "ussm_ar": {
+      "accuracy": 0.7155961395179596,
+      "accuracy_per_seed": [
+        0.7500736402543621,
+        0.7406303605773396,
+        0.7206002113908478,
+        0.5929340010049728,
+        0.7737424843622754
+      ],
+      "accuracy_std": 0.06366702232666581,
+      "best_epoch": [
+        7,
+        9,
+        3,
+        1,
+        9
+      ],
+      "caduceus_ph_published": 0.872,
+      "caduceus_ps_published": 0.873,
+      "n_train_full": 231348,
+      "n_train_used": 231348
+    },
+    "xf_ar": {
+      "accuracy": 0.8687851957098054,
+      "accuracy_per_seed": [
+        0.8682965709632146,
+        0.8706184048654549,
+        0.868036664183113,
+        0.8693535252022941,
+        0.8676208133349506
+      ],
+      "accuracy_std": 0.0010806011405413072,
+      "best_epoch": [
+        8,
+        9,
+        8,
+        9,
+        7
+      ],
+      "caduceus_ph_published": 0.872,
+      "caduceus_ps_published": 0.873,
+      "n_train_full": 231348,
+      "n_train_used": 231348
+    }
+  },
+  "human_nontata_promoters": {
+    "ussm_ar": {
+      "accuracy": 0.9411777728580917,
+      "accuracy_per_seed": [
+        0.9390081912773965,
+        0.9419969005977419,
+        0.9431038299756476,
+        0.9412220500332079,
+        0.9405578924064645
+      ],
+      "accuracy_std": 0.0013765146386282689,
+      "best_epoch": [
+        3,
+        5,
+        5,
+        4,
+        4
+      ],
+      "caduceus_ph_published": 0.946,
+      "caduceus_ps_published": 0.945,
+      "n_train_full": 27097,
+      "n_train_used": 27097
+    },
+    "xf_ar": {
+      "accuracy": 0.935421740092982,
+      "accuracy_per_seed": [
+        0.9345804737657737,
+        0.9361301748948417,
+        0.9361301748948417,
+        0.9342483949524021,
+        0.9360194819570511
+      ],
+      "accuracy_std": 0.0008301232348573251,
+      "best_epoch": [
+        5,
+        6,
+        5,
+        7,
+        5
+      ],
+      "caduceus_ph_published": 0.946,
+      "caduceus_ps_published": 0.945,
+      "n_train_full": 27097,
+      "n_train_used": 27097
+    }
+  },
+  "human_ocr_ensembl": {
+    "ussm_ar": {
+      "accuracy": 0.7431105516136416,
+      "accuracy_per_seed": [
+        0.7425898374914168,
+        0.7442206454566263,
+        0.7448214694438087,
+        0.7392996108949417,
+        0.7446211947814145
+      ],
+      "accuracy_std": 0.0020608737613296213,
+      "best_epoch": [
+        2,
+        1,
+        2,
+        1,
+        1
+      ],
+      "caduceus_ph_published": 0.828,
+      "caduceus_ps_published": 0.818,
+      "n_train_full": 139804,
+      "n_train_used": 139804
+    },
+    "xf_ar": {
+      "accuracy": 0.7417944609750515,
+      "accuracy_per_seed": [
+        0.7417315175097277,
+        0.7436198214694438,
+        0.7417315175097277,
+        0.7417887388418403,
+        0.7401007095445182
+      ],
+      "accuracy_std": 0.0011143331050798182,
+      "best_epoch": [
+        1,
+        1,
+        1,
+        2,
+        1
+      ],
+      "caduceus_ph_published": 0.828,
+      "caduceus_ps_published": 0.818,
+      "n_train_full": 139804,
+      "n_train_used": 139804
+    }
+  }
+}
