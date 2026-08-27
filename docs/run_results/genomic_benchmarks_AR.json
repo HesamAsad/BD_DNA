@@ -1,4 +1,20 @@
 {
+  "_baselines": {
+    "human_ensembl_regulatory": {
+      "length_only_decision_tree_depth10": 0.9152,
+      "length_only_decision_tree_depth6": 0.9004,
+      "majority_class": 0.3704,
+      "note": "This task is ~90% solvable from len(seq) ALONE, which beats every published number on it (Caduceus-Ph 0.872, PS 0.873, CNN 0.872, HyenaDNA 0.869) and our own Transformer-AR 0.8688. Do not report this task without this baseline. The signal is unique to this task: a length-only model scores exactly the majority rate on all 7 others."
+    },
+    "human_ocr_ensembl": {
+      "kmer5_logistic_full_train": 0.6926,
+      "legacy_plus_swept_backbone_lr_3e-5": 0.8044,
+      "legacy_preset_same_ckpt": 0.7878,
+      "majority_class": 0.5,
+      "note": "Balanced 50/50, length-matched by construction (length AUC 0.4906), no leakage. The ~0.742 plateau is the v2 preset leaving backbone_lr at 1e-5 while raising batch 16->128; three different backbones from three corpora pin within 0.005 of it.",
+      "v2_preset_same_ckpt": 0.7469
+    }
+  },
   "demo_coding_vs_intergenomic_seqs": {
     "ussm_ar": {
       "accuracy": 0.937832,
