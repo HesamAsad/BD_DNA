@@ -74,6 +74,11 @@ EXTRA=(--preset "$PRESET" --seeds "$SEEDS")
 [ -n "${BATCH_SIZE:-}" ]        && EXTRA+=(--batch-size "$BATCH_SIZE")
 [ -n "${EVAL_BATCH_SIZE:-}" ]   && EXTRA+=(--eval-batch-size "$EVAL_BATCH_SIZE")
 [ -n "${BACKBONE_LR:-}" ]       && EXTRA+=(--backbone-lr "$BACKBONE_LR")
+# PATIENCE=0 disables early stopping (finetune.py:615 treats 0 as falsy). The
+# v2 preset sets 8, which on human_ocr_ensembl halted every run at step 4,900
+# of 9,830 -- half the epoch budget unused, on the task where the backbone most
+# needs the adaptation.
+[ -n "${PATIENCE:-}" ]          && EXTRA+=(--patience "$PATIENCE")
 [ -n "${HEAD_LR:-}" ]           && EXTRA+=(--head-lr "$HEAD_LR")
 [ -n "${WEIGHT_DECAY:-}" ]      && EXTRA+=(--weight-decay "$WEIGHT_DECAY")
 [ -n "${DROPOUT:-}" ]           && EXTRA+=(--dropout "$DROPOUT")
