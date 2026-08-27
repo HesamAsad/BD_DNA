@@ -15,6 +15,48 @@
       "v2_preset_same_ckpt": 0.7469
     }
   },
+  "_ocr_rerun_2026_08_27": {
+    "attribution": {
+      "delta_from_backbone_lr_1e-5_to_3e-5": {
+        "note": "the entire gain, and consistent across architectures",
+        "ussm_ar": 0.0367,
+        "xf_ar": 0.0386
+      },
+      "delta_from_disabling_early_stopping": {
+        "note": "straddles zero: early stopping was NOT the limiter",
+        "ussm_ar": 0.001,
+        "xf_ar": -0.006
+      }
+    },
+    "cells": {
+      "ussm_ar": {
+        "baseline_lr1e-5_patience8": 0.7431,
+        "control_lr1e-5_patience0": 0.7441,
+        "fix_lr3e-5_patience0": 0.7808
+      },
+      "xf_ar": {
+        "baseline_lr1e-5_patience8": 0.7418,
+        "control_lr1e-5_patience0": 0.7358,
+        "fix_lr3e-5_patience0": 0.7744
+      }
+    },
+    "consequence": "Raise backbone_lr; leave patience at 8. The v2 preset raised batch 16->128 without touching backbone_lr, which finetune.py's own docstring names as a handicap v2 was written to fix. ALSO: the cap was MASKING an architecture difference -- at lr 1e-5 both arms sat at ~0.742 (gap 0.0013), and once adapted uSSM-AR leads Transformer-AR 0.7808 vs 0.7744 (gap 0.0064). Still short of Caduceus-Ph 0.828, who swept lr in {1e-3,2e-3} and selected 2e-3 for THIS task in all four of their columns.",
+    "design": "3 seeds per cell, full 139,804 train rows, preset v2, same checkpoints. LSF 122072-122075.",
+    "still_untested": [
+      "reverse-complement augmentation (rc_aug 0.0 for us; both Caduceus variants always use it; worth +0.033 in the one in-repo measurement)",
+      "a proper backbone_lr sweep above 3e-5"
+    ],
+    "updated_8_task_means": {
+      "caduceus_ph": 0.866,
+      "excluding_degenerate_regulatory_7_tasks": {
+        "caduceus_ph": 0.8651,
+        "ussm_ar": 0.8522,
+        "xf_ar": 0.8582
+      },
+      "ussm_ar": 0.8351,
+      "xf_ar": 0.8595
+    }
+  },
   "demo_coding_vs_intergenomic_seqs": {
     "ussm_ar": {
       "accuracy": 0.937832,
