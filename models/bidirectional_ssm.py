@@ -158,6 +158,61 @@ def stack_boundary_caches(
   return DirectionalCache(tuple(states), length=-1, direction=direction)
 
 
+def _timescale_kwargs(model, layer_index: int, n_layers: int) -> dict:
+  """Per-layer (A, dt) init ranges implementing a depth-scheduled half-life.
+
+  WHY THIS EXISTS. Per-head state retention is exp(A*dt), so the half-life is
+  tau = ln2 / (A * dt). With one (A, dt) range shared by every layer the whole
+  stack samples one narrow band of timescales, and DNA structure spans codons
+  (3 nt) to regulatory domains (10^4+ nt). Giving layer l a target tau_l that
+  grows geometrically with depth tiles that axis at zero parameter cost.
+
+  THE ARITHMETIC MATTERS. tau is linear in 1/(A*dt), so hitting tau_l means
+  A_l = ln2 / (tau_l * dt). A square-root heuristic misses by orders of
+  magnitude at the long end: for tau = 100 kb it lands on ~4.6 nt.
+
+  AND THE FLOOR HAS TO MOVE. The old A_init_range floor was hardcoded to 1.0,
+  which with dt_min 1e-3 caps tau at 693 nt. Targets beyond that need A below
+  1, so `ssm_tau_max` drives the floor rather than being clipped by it.
+
+  MEASURED CAVEAT, recorded here because it decides how to read the result:
+  on the 2026-08 hg38 BiSSM run the long timescales were present at INIT
+  (median tau 10.8 nt, 17 of 288 heads above 100 nt, max 510 nt) and TRAINING
+  REMOVED THEM -- it left A roughly alone and raised dt ~62x, collapsing the
+  median to 1.32 nt with no head above 4.71. So scheduling the initialisation
+  alone is unlikely to survive; `ssm_dt_max` is scheduled with it so the slow
+  layers cannot simply be driven fast again, and the trained tau distribution
+  should be re-measured before any claim is made about reach.
+
+  Set ssm_tau_min / ssm_tau_max to enable. Absent them the previous behaviour
+  is reproduced exactly.
+  """
+  a_max = float(model.get("ssm_a_init_max", 16.0))
+  dt_max = float(model.get("ssm_dt_max", 1e-1))
+  tau_min = model.get("ssm_tau_min", None)
+  tau_max = model.get("ssm_tau_max", None)
+  if tau_min is None or tau_max is None:
+    return {"a_init_max": a_max, "dt_max": dt_max}
+
+  import math as _math
+  tau_min, tau_max = float(tau_min), float(tau_max)
+  span = max(n_layers - 1, 1)
+  tau_l = tau_min * (tau_max / tau_min) ** (layer_index / span)
+  # Keep a band around the centre so each layer still holds a spread of
+  # timescales; the schedule moves the band's centre, it does not collapse it.
+  width = float(model.get("ssm_tau_band", 4.0))          # multiplicative
+  lo, hi = tau_l / _math.sqrt(width), tau_l * _math.sqrt(width)
+  # tau = ln2/(A*dt). Pin dt at this layer's ceiling and solve for A.
+  dt_l = min(dt_max, _math.log(2) / (lo * 1e-3)) if lo > 0 else dt_max
+  dt_l = float(min(dt_max, max(1e-6, _math.log(2) / (tau_l * 1.0))))
+  a_hi = _math.log(2) / (lo * dt_l)
+  a_lo = _math.log(2) / (hi * dt_l)
+  return {"a_init_min": a_lo, "a_init_max": a_hi,
+          "dt_min": dt_l * 0.5, "dt_max": dt_l,
+          "dt_init_floor": dt_l * 0.1,
+          "freeze_dt": bool(model.get("ssm_freeze_dt", False))}
+
+
 class BiMambaLayer(nn.Module):
   def __init__(
       self,
@@ -171,7 +226,11 @@ class BiMambaLayer(nn.Module):
       dropout: float,
       backend: str,
       a_init_max: float = 16.0,
+      a_init_min: float = 1.0,
       dt_max: float = 1e-1,
+      dt_min: float = 1e-3,
+      dt_init_floor: float = 1e-4,
+      freeze_dt: bool = False,
       bidirectional_impl: str = "fused",
   ):
     super().__init__()
@@ -197,8 +256,28 @@ class BiMambaLayer(nn.Module):
       # is 4.66 nucleotides and no head exceeds 256, while the C-a range
       # measurement shows the DATA carries right-context value out to ~1 kb.
       # Lowering either ceiling initialises slower-decaying heads.
-      A_init_range=(1.0, float(a_init_max)),
-      dt_max=float(dt_max))
+      # The FLOOR is a knob, not a constant. Per-head half-life is
+      # tau = ln2 / (A * dt), so the longest tau this layer can represent is
+      # ln2 / (a_init_min * dt_min). With the old hardcoded floor of 1.0 and
+      # dt_min 1e-3 that ceiling is 693 nt; a depth schedule targeting more
+      # than that is unreachable no matter what a_init_max is set to.
+      A_init_range=(float(a_init_min), float(a_init_max)),
+      dt_min=float(dt_min),
+      dt_max=float(dt_max),
+      # A THIRD hidden ceiling. SegmentMamba2 clamps the sampled dt to
+      # dt_init_floor (default 1e-4) AFTER sampling, which caps the half-life
+      # at ln2/(A*1e-4) -- about 13.9k nt at A=0.5, no matter what dt_min says.
+      # The schedule has to lower this too or it silently truncates at 13.9k.
+      dt_init_floor=float(dt_init_floor))
+    if freeze_dt:
+      # Hold dt where the schedule put it. Without this the schedule is only
+      # an INITIALISATION: dt_bias is learnable, and on the 2026-08 hg38 run
+      # training raised dt ~62x, collapsing the median half-life from 10.8 nt
+      # to 1.32 nt with no head above 4.71. A depth schedule that trains dt
+      # freely measures whether the model KEEPS long timescales; one that
+      # freezes dt measures whether long timescales HELP when imposed. Those
+      # are different questions and both are worth asking, so this is a knob.
+      self.mixer.dt_bias.requires_grad_(False)
     self.mlp_norm = RMSNorm(dim)
     self.mlp = FeedForward(dim, mlp_ratio, dropout)
     self.dropout = nn.Dropout(dropout)
@@ -313,11 +392,10 @@ class BidirectionalSSM(nn.Module):
         mlp_ratio=float(model.get("mlp_ratio", 4.0)),
         dropout=float(model.dropout),
         backend=str(model.get("ssm_backend", "auto")),
-        a_init_max=float(model.get("ssm_a_init_max", 16.0)),
-        dt_max=float(model.get("ssm_dt_max", 1e-1)),
+        **_timescale_kwargs(model, index, int(model.n_blocks)),
         bidirectional_impl=str(
           model.get("bidirectional_impl", "fused")))
-      for _ in range(int(model.n_blocks))
+      for index in range(int(model.n_blocks))
     ])
     self.final_norm = RMSNorm(self.hidden_size)
     self.output = nn.Linear(self.hidden_size, vocab_size, bias=False)
@@ -342,7 +420,7 @@ class BidirectionalSSM(nn.Module):
       self.rc_free_parameters = rc_equivariance.apply_rc_equivariance(
         self,
         self.complement_ids,
-        a_init_max=float(model.get("ssm_a_init_max", 16.0)),
+        **_timescale_kwargs(model, index, int(model.n_blocks)),
         dt_max=float(model.get("ssm_dt_max", 1e-1)))
 
   def _initialize_weights(self):

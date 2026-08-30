@@ -148,6 +148,29 @@ CLIP_SEARCH_BATCHES=${CLIP_SEARCH_BATCHES:-8}
 [[ "$OBJECTIVE" == "ar" ]] || EXTRA_ARGS+=(algo.clip_search_widths="$CLIP_SEARCH_WIDTHS")
 [[ "$OBJECTIVE" == "ar" ]] || EXTRA_ARGS+=(algo.clip_search_batches="$CLIP_SEARCH_BATCHES")
 
+# Depth-scheduled state timescales. Empty by default, so absent these the
+# model is bit-identical to before. Passed as a space-separated list of Hydra
+# overrides, e.g.
+#   SSM_TAU_ARGS="++model.ssm_tau_min=8.0 ++model.ssm_tau_max=100000.0"
+# Per-head half-life is ln2/(A*dt); three separate hardcoded floors
+# (A_init_range[0]=1.0, dt_max, dt_init_floor=1e-4) each cap it, and
+# models/bidirectional_ssm.py:_timescale_kwargs moves all three together.
+SSM_TAU_ARGS=${SSM_TAU_ARGS:-}
+# Refuse a variable this launcher cannot honour, rather than ignoring it.
+# A first attempt at the timescale runs passed EXTRA_MODEL_ARGS, which nothing
+# reads -- the same shape as the DATA_TRAIN bug that would have sent two arms
+# to the wrong corpus.
+for _unsupported in EXTRA_MODEL_ARGS MODEL_ARGS HYDRA_ARGS; do
+  if [ -n "${!_unsupported:-}" ]; then
+    echo "FATAL: $_unsupported is set but this launcher does not read it."
+    echo "       Use SSM_TAU_ARGS for extra model overrides."
+    exit 2
+  fi
+done
+if [ -n "$SSM_TAU_ARGS" ]; then
+  # shellcheck disable=SC2206
+  EXTRA_ARGS+=($SSM_TAU_ARGS)
+fi
 EXTRA_ARGS+=(++model.ssm_a_init_max="$SSM_A_INIT_MAX")
 EXTRA_ARGS+=(++model.ssm_dt_max="$SSM_DT_MAX")
 EXTRA_ARGS+=(++model.ssm_state_size="$SSM_STATE_SIZE")
