@@ -11,21 +11,37 @@ value per step, so the influence of a token d positions back decays as
 the operating-point estimate from the bias alone -- the right quantity for
 comparing checkpoints, not an exact receptive field.
 
-WHY IT MATTERS HERE. On the 2026-08 hg38 BiSSM run the timescales were present
-at INITIALISATION and training destroyed them:
+READ THIS BEFORE QUOTING ANY NUMBER FROM THIS SCRIPT.
 
-    at init      tau median 10.8 nt,  max 510 nt,  17/288 heads above 100 nt
-    after train  tau median  1.32 nt, max 4.71 nt,  0/288 heads above 100 nt
+This tool measures the BIAS-ONLY operating point, and for a trained checkpoint
+that systematically UNDERSTATES the true timescale by roughly 7-11x. Training
+drives `dt_bias` up and simultaneously teaches `in_proj`'s dt slice to pull the
+sum back down, so the bias alone is not where the model actually operates.
+Measured on real validation data (`measure_runtime_timescales.py`, 2026-08-31),
+runtime dt came in at 0.1-0.2x the bias on every trained SSM arm:
 
-Training left A roughly alone (median 8.86 -> 0.96) and raised dt about 62x
-(0.0088 -> 0.5433), and dt dominates the product. So the narrow band is a
-LEARNED outcome, not an initialisation artefact -- which is why a depth
-schedule over the init alone is expected to be undone, and why the frozen-dt
-arm exists.
+    arm            tau bias-only          tau at RUNTIME
+    hg_ussm_ar     (this tool)            median  14.7 nt, max 2,753 nt
+    hg_ussm_bd                            median   8.5 nt, max 1,780 nt
+    hg_bissm_bd    median 1.32, max 4.71  median  10.2 nt, max 2,155 nt
 
-Run this on the depth-scheduled runs to answer the actual question: does the
-schedule survive training, and if it is forced to survive (frozen dt), does the
-likelihood improve?
+The headline this docstring used to carry -- "training destroyed the
+timescales, 0/288 heads above 100 nt" -- was an ARTEFACT of the bias-only view.
+At runtime hg_bissm_bd has heads out to 2,155 nt and 93/288 above 16 nt. The
+qualitative reading survives (these models are still local: a ~10 nt median
+against a 32,768 nt context) but the quantitative claim was off by one to two
+orders of magnitude and the "zero long heads" part was simply wrong.
+
+That correction matters for what it implies. The full-attention oracle found
+ALL context value within +-256 nt, and the runtime tail already reaches ~2 kb --
+about 10x the usable range. So the timescales were never the bottleneck, and
+the depth-schedule intervention was aimed at a non-problem; its null result is
+expected rather than surprising.
+
+USE `measure_runtime_timescales.py` for any claim about what a trained model
+actually does. This script remains the right tool for two narrower jobs: the
+timescale at INITIALISATION (where dt_proj has not yet learned to compensate),
+and checking whether a `freeze_dt` arm's bias stayed pinned.
 
 Usage:
   python scripts/eval/measure_timescales.py outputs/hg38-caduceus/tau_frozen/checkpoints/best.ckpt
@@ -53,8 +69,23 @@ def timescales(path):
   """(per-layer list of tau arrays, flat tau array) for one checkpoint."""
   raw = torch.load(path, map_location="cpu", weights_only=False)
   state = raw.get("state_dict", raw)
-  a_keys = sorted(k for k in state if k.endswith("A_log"))
-  d_keys = sorted(k for k in state if k.endswith("dt_bias"))
+  # Sort by NUMERIC layer index. Plain sorted() is lexicographic, which orders
+  # layers.10 and layers.11 before layers.2 -- that permutes the per-layer table
+  # and makes a clean geometric depth schedule look non-monotonic. The aggregate
+  # stats are unaffected (order does not change a median), and A_log/dt_bias
+  # stay correctly paired either way since they share a layer index.
+  def by_layer(suffix):
+    keys = [k for k in state if k.endswith(suffix)]
+    def index(k):
+      parts = k.split(".")
+      for a, b in zip(parts, parts[1:]):
+        if a == "layers" and b.isdigit():
+          return int(b)
+      return -1
+    return sorted(keys, key=index)
+
+  a_keys = by_layer("A_log")
+  d_keys = by_layer("dt_bias")
   if not a_keys or len(a_keys) != len(d_keys):
     return None, None, raw.get("global_step")
   per_layer = []
