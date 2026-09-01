@@ -22,6 +22,31 @@ are drawn as horizontal reference lines across the T axis rather than as
 curves. That is the comparison: at which T, if any, does a BD arm generate as
 fast as AR?
 
+
+MEASURED RESULT (2026-09-01, 69 runs). The framing above anticipated BD being
+the expensive one. It is not, at any T this sweep reached. The decisive count
+is FORWARD PASSES, not token-updates: AR does L of them, BD does (L/b)*T. With
+b=256, BD does FEWER forwards than AR whenever T < 256, and the sweep tops out
+at T=64. So BD leads almost everywhere, and the true break-even sits at T = b =
+256, outside this grid.
+
+  fastest AR is Transformer-AR, flat at ~125 tok/s for every N (sliding KV
+  cache => constant per-token cost). uSSM-AR is roughly half that, 45-64 tok/s,
+  rising with N as its fixed per-step overhead amortises -- the launch-bound
+  signature, not a bandwidth limit.
+
+  BD stays ahead of the fastest AR up to:
+    N=1,024   uSSM-BD T<=32   BiSSM-BD T<=16   Transformer-BD T<=64
+    N=4,096   uSSM-BD T<=64   BiSSM-BD T<=32   Transformer-BD T<=64
+    N=16,384  all three arms T<=64 (never crossed in range)
+
+  Memory is the cleaner architectural story: the SSM arms are FLAT in N at
+  0.72-0.73 GB with a 4.7 MiB cache, while Transformer-BD grows 1.19->1.37 GB
+  and carries a 468 MiB cache -- 100x the SSM state.
+
+CAVEAT: T=1 runs first in each (arm, N) group and absorbs warm-up, so several
+T=1 points read slower than their T=2 neighbours (uSSM-BD at N=1,024: 137.7 vs
+174.0 tok/s). Treat T=1 as contaminated; the T>=2 curve is the trustworthy one.
 Usage:
   python scripts/eval/generation_curves.py --indir results/generation
 """
@@ -62,7 +87,9 @@ def load(indir: Path):
   ssm_streaming_benchmark nests the generation block under "generation".
   """
   out = {}
-  for path in sorted(glob.glob(str(indir / "*.json"))):
+  # recursive: each run writes <indir>/<label>/summary.json, because both
+  # harnesses hardcode the summary.json basename.
+  for path in sorted(str(p) for p in indir.rglob("*.json")):
     try:
       payload = json.load(open(path))
     except (OSError, json.JSONDecodeError):
@@ -71,7 +98,11 @@ def load(indir: Path):
     match = LABEL.search(payload.get("label", stem) or stem)
     if not match:
       continue
-    body = payload.get("generation") or payload
+    # The two harnesses nest their numbers differently: ssm_streaming puts them
+    # under "generation", ar_decode under "benchmark", and neither at the top
+    # level. Checking only the first two silently drops every Transformer-AR
+    # run -- an absent arm, not an error.
+    body = (payload.get("generation") or payload.get("benchmark") or payload)
     tps = body.get("tokens_per_second")
     if tps is None:
       continue

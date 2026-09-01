@@ -39,6 +39,31 @@ set -uo pipefail
 # T is meaningless for the AR arms (one token per step, no refinement), so they
 # are measured once and drawn as a horizontal reference across the T axis.
 #
+# MEASURED RESULT (2026-09-01, 69 runs). The framing above anticipated BD being
+# the expensive one. It is not, at any T this sweep reached. The decisive count
+# is FORWARD PASSES, not token-updates: AR does L of them, BD does (L/b)*T. With
+# b=256, BD does FEWER forwards than AR whenever T < 256, and the sweep tops out
+# at T=64. So BD leads almost everywhere, and the true break-even sits at T = b =
+# 256, outside this grid.
+#
+#   fastest AR is Transformer-AR, flat at ~125 tok/s for every N (sliding KV
+#   cache => constant per-token cost). uSSM-AR is roughly half that, 45-64 tok/s,
+#   rising with N as its fixed per-step overhead amortises -- the launch-bound
+#   signature, not a bandwidth limit.
+#
+#   BD stays ahead of the fastest AR up to:
+#     N=1,024   uSSM-BD T<=32   BiSSM-BD T<=16   Transformer-BD T<=64
+#     N=4,096   uSSM-BD T<=64   BiSSM-BD T<=32   Transformer-BD T<=64
+#     N=16,384  all three arms T<=64 (never crossed in range)
+#
+#   Memory is the cleaner architectural story: the SSM arms are FLAT in N at
+#   0.72-0.73 GB with a 4.7 MiB cache, while Transformer-BD grows 1.19->1.37 GB
+#   and carries a 468 MiB cache -- 100x the SSM state.
+#
+# CAVEAT: T=1 runs first in each (arm, N) group and absorbs warm-up, so several
+# T=1 points read slower than their T=2 neighbours (uSSM-BD at N=1,024: 137.7 vs
+# 174.0 tok/s). Treat T=1 as contaminated; the T>=2 curve is the trustworthy one.
+#
 # Outputs one JSON per (arm, N, T) under results/generation/, which
 # scripts/eval/generation_curves.py turns into the figure.
 
@@ -54,6 +79,11 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export HYDRA_FULL_ERROR=1
 mkdir -p logs results/generation
 
+# OUTPUT PATHS. Both harnesses write "<output-dir>/summary.json" unconditionally
+# -- --label goes INSIDE the payload, it does not name the file. A shared
+# --output-dir therefore means all 69 runs overwrite one file and the sweep
+# still exits 0. Each run gets its own directory; generation_curves.py globs
+# recursively and reads the label from the payload.
 R=$REPO/outputs/hg38-caduceus
 OUT=results/generation
 LENGTHS=${LENGTHS:-"1024 4096 16384"}
@@ -85,7 +115,7 @@ if [ -f "$ck" ]; then
   for N in $LENGTHS; do
     echo; echo "[$(date)] AR $arm  N=$N  (ssm_streaming -> generate_ar)"
     "$PYTHON" -u scripts/eval/ssm_streaming_benchmark.py \
-      --checkpoint "$ck" --output-dir "$OUT" \
+      --checkpoint "$ck" --output-dir "$OUT/gen_${arm}_N${N}" \
       --label "gen_${arm}_N${N}" \
       --prompt-length "$PROMPT" --generation-length "$N" \
       --generation-batch-size 1 --prefix-lengths "$N" || rc=$((rc+1))
@@ -97,7 +127,7 @@ if [ -f "$ck" ]; then
   for N in $LENGTHS; do
     echo; echo "[$(date)] AR $arm  N=$N  (ar_decode -> generate_transformer)"
     "$PYTHON" -u scripts/eval/ar_decode_benchmark.py \
-      --checkpoint "$ck" --output-dir "$OUT" \
+      --checkpoint "$ck" --output-dir "$OUT/gen_${arm}_N${N}" \
       --label "gen_${arm}_N${N}" \
       --prompt-length "$PROMPT" --generation-length "$N" || rc=$((rc+1))
   done
@@ -112,7 +142,7 @@ for spec in $BD_ARMS; do
     for T in $TSTEPS; do
       echo; echo "[$(date)] BD $arm  N=$N  T=$T"
       "$PYTHON" -u scripts/eval/ssm_streaming_benchmark.py \
-        --checkpoint "$ck" --output-dir "$OUT" \
+        --checkpoint "$ck" --output-dir "$OUT/gen_${arm}_N${N}_T${T}" \
         --label "gen_${arm}_N${N}_T${T}" \
         --prompt-length "$PROMPT" --generation-length "$N" \
         --generation-batch-size 1 --diffusion-steps "$T" \
