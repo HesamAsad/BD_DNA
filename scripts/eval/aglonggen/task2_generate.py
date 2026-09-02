@@ -110,6 +110,13 @@ def main():
                   help="interior span in blocks of block_size")
   ap.add_argument("--n-loci", type=int, default=24)
   ap.add_argument("--num-steps", type=int, default=64)
+  ap.add_argument("--refine-passes", type=int, default=0,
+                  help="0 (DEFAULT, and the only setting that should be "
+                       "used) = single left-to-right pass. >0 sweeps each "
+                       "block against its self-generated neighbours, which "
+                       "was MEASURED WORSE on every condition -- gap-2048 "
+                       "denovo went from 12%% to 83%% of loci failing. See "
+                       "Diffusion.sample_infill_refined.")
   ap.add_argument("--seed", type=int, default=0)
   ap.add_argument("--out", type=Path,
                   default=REPO / "results/aglonggen/task2_gen.json")
@@ -183,7 +190,11 @@ def main():
         r = right[:, :0]                     # empty suffix -> left-only
       torch.manual_seed(args.seed)
       with torch.inference_mode():
-        full = model.sample_infill_ca(left, r, gap_nt, args.num_steps)
+        if args.refine_passes > 0:
+          full = model.sample_infill_refined(
+            left, r, gap_nt, args.num_steps, passes=args.refine_passes)
+        else:
+          full = model.sample_infill_ca(left, r, gap_nt, args.num_steps)
       # the returned tail is whatever suffix was fed; splice the REAL right
       # flank back so every condition is scored on the same 16,384 window and
       # only the generated interior differs
@@ -214,7 +225,7 @@ def main():
   args.out.write_text(json.dumps({
     "checkpoint": str(args.checkpoint), "global_step": step,
     "length": LENGTH, "block_size": block, "num_steps": args.num_steps,
-    "split": args.split, "chroms": sorted(chroms) if chroms else "all",
+    "refine_passes": args.refine_passes, "split": args.split, "chroms": sorted(chroms) if chroms else "all",
     "n_loci": len(loci), "records": records}, indent=2))
   bad = [r for r in records if len(r["sequence"]) != LENGTH]
   print(f"\nwrote {args.out}  ({len(records)} sequences, "

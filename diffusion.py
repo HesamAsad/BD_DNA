@@ -1633,7 +1633,134 @@ class Diffusion(L.LightningModule):
 
     gap = torch.cat(generated_blocks, dim=1)
     return torch.cat((left_context, gap, right_context), dim=1)
-  
+
+  def sample_infill_refined(
+      self,
+      left_context: torch.Tensor,
+      right_context: torch.Tensor,
+      gap_length: int,
+      num_steps: int,
+      passes: int = 2,
+  ) -> torch.Tensor:
+    """C-a infilling with a POSITIONALLY CORRECT right cache.
+
+    THE BUG THIS FIXES. Training conditions the active block on
+
+        right_cache = prefill_right(x0[:, end:])
+
+    -- everything to the right of the block, which for an interior block
+    INCLUDES the interior blocks after it. `sample_infill_ca` instead prefills
+    the right cache from the committed flank alone and freezes it, so when the
+    gap spans n blocks the right belief for block i starts (n-1-i) blocks too
+    far away. At n=1 the two agree exactly; at n=8 block 0's right belief is
+    displaced by 1,792 nt.
+
+    That is not a subtle inefficiency. Measured on 24 loci at 16,384 nt
+    (2026-09-02), the fraction of loci whose AlphaGenome RNA-seq MSE exceeds 10
+    goes 0.00, 0.00, 0.33, 0.62 as the gap grows 256 -> 512 -> 1024 -> 2048,
+    while the same model with an EMPTY right cache stays near 0.12. A wrong
+    flank (`mismatch`) was as good as the true one, which is the signature of a
+    cache that carries no usable information -- exactly what a displaced belief
+    would look like.
+
+    THE ATTEMPTED FIX. Bootstrap the interior left-to-right (the old
+    behaviour), then sweep it `passes` times; on each sweep every block is
+    re-denoised with
+
+        left_cache  = prefill_left(left_context + blocks[:i])
+        right_cache = prefill_right(blocks[i+1:] + right_context)
+
+    which is the training contract exactly. Block-wise Gibbs sampling over the
+    interior, costing `passes * n` extra prefills.
+
+    *** IT DOES NOT WORK. DO NOT USE passes>0 WITHOUT READING THIS. ***
+
+    Measured against the displaced sampler on identical loci and seed, 24 loci
+    at 16,384 nt, passes=2 (2026-09-02). Median AlphaGenome RNA-seq MSE and
+    the fraction of loci above 10:
+
+        gap 1024   ca        2.6 / 0.33   ->    43.9 / 0.67
+        gap 2048   ca       72.9 / 0.62   -> 1,972.4 / 0.79
+        gap 2048   denovo    1.2 / 0.12   -> 4,675.2 / 0.83
+
+    Every condition got worse, and `denovo` -- which the sweeps degraded from
+    0.12 to 0.83 -- is the diagnostic case. Its `right_context` is empty, so
+    refinement gave it a right cache built ENTIRELY from the model's own
+    generated blocks. That is the mechanism: re-denoising a block against
+    self-generated neighbours is a Gibbs chain whose conditionals are not
+    accurate enough to be stable, so each sweep amplifies the previous sweep's
+    errors instead of correcting them.
+
+    So the positional displacement documented above is real, but it is NOT the
+    cause of the multi-block pathology; correcting it while feeding the model
+    its own output is strictly worse than leaving it displaced. The best
+    configuration measured so far remains a single left-to-right pass with NO
+    right cache at all (`sample_infill_ca` with an empty right context), which
+    is also the configuration that conditions least on non-local information.
+
+    Kept in the tree because the negative result is worth more than the code:
+    it rules out the obvious mechanical explanation and points at the model's
+    conditionals rather than the sampler's bookkeeping.
+
+    Returns ``[left_context; generated_gap; right_context]``.
+    """
+    if self.config.algo.backbone != 'bissm':
+      raise ValueError("sample_infill_refined requires algo.backbone=bissm")
+    if gap_length <= 0 or gap_length % self.block_size:
+      raise ValueError(
+        f"gap_length must be a positive multiple of block_size={self.block_size}")
+    if num_steps <= 0 or passes < 0:
+      raise ValueError("num_steps must be positive and passes non-negative")
+
+    batch_size = left_context.shape[0]
+    n_blocks = gap_length // self.block_size
+    dt = 1.0 / num_steps
+
+    def denoise(left_cache, right_cache):
+      """One block, from the prior, under explicitly supplied caches."""
+      self.backbone._sampling_left_cache = left_cache
+      self.backbone._sampling_right_cache = right_cache
+      active = self._sample_prior(batch_size, self.block_size).to(self.device)
+      p_x0 = None
+      for step in range(num_steps):
+        if self.mask_index not in active:
+          break
+        t = torch.full((batch_size, 1), 1.0 - step * dt,
+                       device=self.device, dtype=self.dtype)
+        # first_hitting is a de-novo speed heuristic and is not part of the
+        # C-a conditioning contract; keep the fixed ancestral grid.
+        p_x0, active = self._ddpm_caching_update(
+          x=active, t=t, dt=dt, p_x0=p_x0, first_hitting=False)
+      if self.mask_index in active:
+        raise RuntimeError(
+          "C-a sampler finished with masked tokens; increase num_steps")
+      return active
+
+    def left_of(blocks, i):
+      parts = [left_context] + blocks[:i]
+      return self.backbone.prefill_left(torch.cat(parts, dim=1), detach=True)
+
+    def right_of(blocks, i):
+      parts = blocks[i + 1:] + [right_context]
+      return self.backbone.prefill_right(torch.cat(parts, dim=1))
+
+    self.backbone.reset_kv_cache(eval_batch_size=batch_size)
+
+    # Bootstrap: left-to-right, right cache = flank only. Identical to
+    # sample_infill_ca, and the starting point the sweeps then correct.
+    blocks: list[torch.Tensor] = []
+    flank_right = self.backbone.prefill_right(right_context)
+    for i in range(n_blocks):
+      blocks.append(denoise(left_of(blocks, i), flank_right))
+
+    # Sweeps: every block now sees the true training-time context on both sides.
+    for _ in range(passes):
+      for i in range(n_blocks):
+        blocks[i] = denoise(left_of(blocks, i), right_of(blocks, i))
+
+    gap = torch.cat(blocks, dim=1)
+    return torch.cat((left_context, gap, right_context), dim=1)
+
   def _check_stop_conds(self, x):
     """Stop a variable-length batch once every row has emitted EOS.
 
