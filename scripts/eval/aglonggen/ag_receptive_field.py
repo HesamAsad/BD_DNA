@@ -231,7 +231,11 @@ def main():
     for name, pairs in agg[b].items():
       d = np.concatenate([p[0] for p in pairs])
       v = np.concatenate([p[1] for p in pairs])
-      edges = np.array([0, 64, 128, 256, 512, 1024, 2048, 4096, 8192])
+      # Bins must reach far enough to see the decay END, not just its start.
+      # The last edge absorbs everything beyond it, so a short ladder makes a
+      # long-range oracle look like it saturates at 8 kb.
+      edges = np.array([0, 64, 128, 256, 512, 1024, 2048, 4096, 8192,
+                        16384, 32768, 65536])
       edges = edges[edges <= b // 2]
       idx = np.digitize(d, edges) - 1
       binned[name] = {int(edges[k]): float(v[idx == k].mean())
