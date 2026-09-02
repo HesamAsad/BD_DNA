@@ -824,7 +824,13 @@ def get_dataloaders(config, tokenizer, skip_train=False,
       num_workers=config.loader.num_workers,
       pin_memory=config.loader.pin_memory,
       shuffle=not config.data.streaming,
-      persistent_workers=True)
+      # persistent_workers=True is invalid when num_workers=0, and torch
+      # raises rather than ignoring it. Hardcoding True therefore made
+      # num_workers=0 impossible -- which is exactly the setting torch's own
+      # "DataLoader worker exited unexpectedly, details are lost due to
+      # multiprocessing" message tells you to use to recover the real
+      # traceback. Behaviour is unchanged whenever workers are in use.
+      persistent_workers=config.loader.num_workers > 0)
     train_loader.tokenizer = tokenizer
   if skip_valid:
     valid_loader = None

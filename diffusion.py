@@ -331,7 +331,14 @@ class Diffusion(L.LightningModule):
           pin_memory=self.config.loader.pin_memory,
           sampler=dl_sampler,
           shuffle=False,
-          persistent_workers=True))
+          # Same constraint as the loader in dataloader.get_dataloaders: torch
+          # rejects persistent_workers when num_workers=0 rather than ignoring
+          # it, so hardcoding True blocks single-process loading -- the one
+          # setting that recovers a real traceback when a worker dies. This
+          # site rebuilds the loaders in on_train_start, so BOTH must allow it
+          # or num_workers=0 still fails, just later and with a stack that
+          # points somewhere else.
+          persistent_workers=self.config.loader.num_workers > 0))
     self.trainer.fit_loop._combined_loader.flattened = updated_dls
 
   def optimizer_step(self, *args, **kwargs):
