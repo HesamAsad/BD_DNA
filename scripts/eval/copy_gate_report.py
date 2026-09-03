@@ -65,6 +65,51 @@ def best_nll(run_dir: Path):
   return best, steps, seen
 
 
+
+def milestones(run_dir: Path, marks=(0.25, 0.50, 0.75)):
+  """First step at which `recovered` crossed each mark.
+
+  WHY THIS AND NOT JUST recovered-at-budget. Measured 2026-09-03, the phase
+  transition ONSET scales with copy distance: D=256 reached 25% at step 2,878
+  and D=512 at 5,023 -- about 1.75x the steps per doubling. So "recovered at a
+  fixed budget" can conflate "cannot learn this" with "has not yet had time".
+
+  BUT THAT SCALING DOES NOT EXTRAPOLATE, and the distinction it warns about
+  turned out not to apply here. Extending 1.75x predicts D=1024 crosses 25%
+  near step 8,600. Given the full 10,000 steps it never crossed at all, ending
+  at recovered 0.009 -- indistinguishable from D=2048 and from chance. D=1024
+  was handed more budget than D=512 needed to reach 50% (6,206) and went
+  nowhere. So the ceiling at 512 is REAL, not an artifact, and the failure is
+  a hard break rather than a rising cost. Keep reporting both numbers: the
+  onset ratio is the sensitive instrument for candidates that do move, and the
+  verdict is what says whether the break has shifted.
+
+  Steps-to-milestone is budget-independent and strictly more informative: a
+  candidate that halves the steps needed at a given distance is real progress
+  even when it flips no pass/fail bit.
+  """
+  files = sorted(glob.glob(str(run_dir / "**" / "metrics.csv"), recursive=True),
+                 key=lambda p: Path(p).stat().st_size, reverse=True)
+  hit = {m: None for m in marks}
+  if not files:
+    return hit
+  best = None
+  for row in csv.DictReader(open(files[0])):
+    v, st = row.get("val/nll"), row.get("step")
+    if not v or not st:
+      continue
+    try:
+      v, st = float(v), int(float(st))
+    except ValueError:
+      continue
+    best = v if best is None else min(best, v)
+    rec = 1.0 - best / FLOOR
+    for m in marks:
+      if hit[m] is None and rec >= m:
+        hit[m] = st
+  return hit
+
+
 def status(run_dir: Path):
   """Distinguish 'still running' from 'crashed' from 'finished with no metric'."""
   err = run_dir / "train.err"
@@ -99,7 +144,7 @@ def main():
       continue
     print(f"=== {tag}")
     print(f"  {'offset':>8}{'val/nll':>10}{'recovered':>11}{'verdict':>10}  note")
-    passed = []
+    passed, onset = [], {}
     for d in dirs:
       D = int(d.name[1:])
       nll, step, seen = best_nll(d)
@@ -112,8 +157,12 @@ def main():
       verdict = "PASS" if rec > PASS else "fail"
       if rec > PASS:
         passed.append(D)
-      note = f"step {step}" + (f", {state}" if state != "finished" else "")
+      ms = milestones(d)
+      reach = " ".join(f"{int(m*100)}%@{ms[m]:,}" for m in sorted(ms) if ms[m])
+      note = (reach or "never crossed 25%") + (
+        f", {state}" if state != "finished" else "")
       print(f"  {D:>8}{nll:>10.4f}{rec:>11.3f}{verdict:>10}  {note}")
+      onset[D] = ms.get(0.25)
     if passed:
       ranges[tag] = max(passed)
       short = min(int(d.name[1:]) for d in dirs)
@@ -126,6 +175,14 @@ def main():
               f"(largest offset recovered above {PASS:.0%})")
     else:
       print("\n  copy range: NONE -- not even the shortest offset was learned")
+    # The scaling of transition onset with distance is the real measurement.
+    pts = sorted((D, s_) for D, s_ in onset.items() if s_)
+    if len(pts) > 1:
+      print("  transition onset (steps to 25%) vs distance:")
+      for (d0, s0), (d1, s1) in zip(pts, pts[1:]):
+        print(f"    {d0:>5} -> {d1:<5} {s0:>7,} -> {s1:<7,} "
+              f"= {s1/s0:.2f}x steps for {d1/d0:.0f}x distance")
+      print("  A fix that lowers THIS is progress even if it flips no verdict.")
     print()
 
   if len(ranges) > 1:
