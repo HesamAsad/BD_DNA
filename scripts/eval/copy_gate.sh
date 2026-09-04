@@ -58,6 +58,11 @@ MAX_STEPS=${MAX_STEPS:-3000}
 N_TRAIN=${N_TRAIN:-2048}
 N_VAL=${N_VAL:-256}
 NUM_WORKERS=${NUM_WORKERS:-2}
+# The DiT needs an attention backend and rejects the config default
+# (flash_attn) on the block-diffusion path; every working arm in this repo
+# uses flex. The recurrent backbones ignore this, so it is safe to always
+# pass it and it keeps SSM and Transformer ladders on one code path.
+ATTN=${ATTN:-flex}
 GLOBAL_BATCH=${GLOBAL_BATCH:-32}
 MICRO_BATCH=${MICRO_BATCH:-4}
 WALL=${WALL:-12:00}
@@ -124,6 +129,7 @@ $PYTHON -u main.py mode=train \\
   data=carbon-prokaryote data.train=$NAME data.valid=$NAME \\
   data.dna_num_files=null \\
   model.length=$LENGTH block_size=$BLOCK_SIZE \\
+  model.attn_backend=$ATTN \\
   loader.global_batch_size=$GLOBAL_BATCH \\
   loader.eval_global_batch_size=$GLOBAL_BATCH \\
   loader.batch_size=$MICRO_BATCH loader.eval_batch_size=$MICRO_BATCH \\
