@@ -45,16 +45,61 @@ ap.add_argument('--n_probe', type=int, default=40, help='eval probe spans per va
 ap.add_argument('--name', required=True)
 ap.add_argument('--cache_dir',
                 default='/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/data_cache/carbon')
+ap.add_argument('--direction', choices=('forward', 'backward'), default='forward',
+                help="forward: x[i]=x[i-D], solvable from the LEFT cache. "
+                     "backward: x[:D]=x[D:], solvable ONLY from the RIGHT "
+                     "cache -- the bidirectional test. See make_seq.")
 ap.add_argument('--seed', type=int, default=0)
 args = ap.parse_args()
 L, D, M = args.length, args.offset, args.motif_len
 assert 0 < D < L, 'need 0 < offset < length'
 assert D + M < L, 'need room for at least one probe span past the offset'
+if args.direction == 'backward' and L != 2 * D:
+  raise SystemExit(
+    f'backward needs --length exactly 2*offset (got L={L}, D={D}). Any longer '
+    'and the copy pattern repeats, which restores a leftward route and defeats '
+    'the whole point of the variant.')
 
 
 def make_seq(rng):
-  """x[:D] random; x[i] = x[i-D] thereafter (tiles if L > 2D)."""
+  """Build one sequence in the requested direction.
+
+  forward:  x[:D] random, x[i] = x[i-D] thereafter (tiling if L > 2D).
+
+  backward: x[D:] random, x[:D] = x[D:2D]. The target half is a copy of the
+  half that comes AFTER it, so the only source is D positions to the RIGHT.
+
+  WHY THE FORWARD TASK CANNOT TEST BIDIRECTIONALITY. Tiling makes the sequence
+  PERIODIC with period D, so x[i] equals x[i-D] *and* x[i+D]: a left-only model
+  solves it exactly as well as a bidirectional one. Every copy-gate number
+  measured so far therefore says nothing about the right cache.
+
+  HOW THE BACKWARD VARIANT DISCRIMINATES, and it is NOT that left-only scores
+  chance -- copying is symmetric, so with two identical halves each half is
+  reachable from one side:
+
+      target in [D, 2D)  ->  source at i-D, to the LEFT   (any model)
+      target in [0, D)   ->  source at i+D, to the RIGHT  (needs right cache)
+
+  So a left-only model tops out at HALF the positions and lands near
+  recovered = 0.5, while a model that reads its right cache goes to ~1.0. The
+  50% ceiling is the signal.
+
+  *** THIS BREAKS THE GATE'S DEFAULT PASS THRESHOLD. *** PASS at 0.50 is
+  exactly the left-only ceiling, so on this variant it certifies the failure
+  mode it is meant to detect. Read backward runs against ~0.5 (left-only) and
+  ~1.0 (bidirectional); anything near 0.5 means the right cache went unused.
+
+  This needs L = 2D, enforced below. Any L > 2D would let the pattern repeat
+  and reintroduce a leftward route, which is precisely the flaw being avoided.
+  The offset stays FIXED, so there is no retrieval ambiguity of the kind that
+  made the old "echo" benchmark unsolvable even in principle.
+  """
   x = np.empty(L, dtype=np.int32)
+  if args.direction == 'backward':
+    x[D:] = NUC[rng.integers(0, 4, size=L - D)]
+    x[:D] = x[D:2 * D]
+    return x
   x[:D] = NUC[rng.integers(0, 4, size=D)]
   for i in range(D, L, D):
     j = min(i + D, L)
@@ -63,11 +108,15 @@ def make_seq(rng):
 
 
 def probes(rng):
-  """Sample probe spans wholly inside the duplicated tail."""
+  """Probe spans inside the predictable region, which differs by direction."""
   out = []
   for _ in range(args.n_probe):
-    t = int(rng.integers(D, L - M))
-    out.append({'source': t - D, 'target': t, 'gap': D, 'motif_len': M})
+    if args.direction == 'backward':
+      t = int(rng.integers(0, D - M))          # target is the LEADING copy
+      out.append({'source': t + D, 'target': t, 'gap': D, 'motif_len': M})
+    else:
+      t = int(rng.integers(D, L - M))
+      out.append({'source': t - D, 'target': t, 'gap': D, 'motif_len': M})
   return out
 
 

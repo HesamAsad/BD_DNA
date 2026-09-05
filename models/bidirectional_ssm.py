@@ -105,18 +105,24 @@ class DirectionalCache:
   states: tuple[Mamba2State, ...]
   length: int
   direction: str
+  # Per-layer strided hidden states, in ORIGINAL sequence order, for the
+  # attention layers of a hybrid stack. Empty for a pure SSM, so every existing
+  # construction site stays correct without change.
+  memory: tuple = ()
 
   def detach(self) -> "DirectionalCache":
     return DirectionalCache(
       tuple(state.detach() for state in self.states),
       self.length,
-      self.direction)
+      self.direction,
+      tuple(None if m is None else m.detach() for m in self.memory))
 
   def clone(self) -> "DirectionalCache":
     return DirectionalCache(
       tuple(state.clone() for state in self.states),
       self.length,
-      self.direction)
+      self.direction,
+      tuple(None if m is None else m.clone() for m in self.memory))
 
   @property
   def nbytes(self) -> int:
@@ -333,6 +339,107 @@ class BiMambaLayer(nn.Module):
     return x
 
 
+class MemoryAttention(nn.Module):
+  """Retrieve from a strided memory of the committed context by content.
+
+  WHY THIS EXISTS. The copy gate (2026-09-04) measured the same ladder on this
+  backbone and on the DiT, holding data, block size, objective, masking,
+  optimiser and budget fixed so that only the mixer differed:
+
+      offset   BiSSM steps to 50%   DiT steps to 50%
+         256               3,518                543
+         512               6,206                638
+       1,024        never in 10k                863
+       2,048        never in 10k              4,094
+
+  Copying from D back needs a length-D delay line. A fixed-size recurrent state
+  cannot be one, so the SSM hits a hard wall between 512 and 1,024 that more
+  training does not cross; attention retrieves by content and degrades
+  gracefully instead. The wall is the mixer, not the objective -- the copy task
+  pays the model directly to route that information.
+
+  WHAT THIS MODULE DOES. `_prefill` already computes per-layer hidden states
+  across the whole committed context and then throws them away, keeping only
+  the recurrent state. Those states are exactly the keys and values attention
+  needs. This keeps every `stride`-th one and attends to it from the active
+  block, so the model gains content lookup while the bulk of the sequence still
+  costs one linear scan.
+
+  Positional information is required, not optional. Attention over an unordered
+  set cannot express "the token 1,024 back", which is the whole task, so each
+  memory slot carries a log-bucketed relative-distance bias per head.
+
+  COST, stated honestly. Memory now grows as prefix/stride instead of staying
+  constant, which gives up part of the linear-scaling advantage the generation
+  sweep measured (0.72 GB flat with a 4.7 MiB cache, against the DiT's 1.37 GB
+  and 468 MiB). `stride` is the dial between the two.
+  """
+
+  _MAX_BUCKET = 32
+
+  def __init__(self, dim: int, n_heads: int = 8, dropout: float = 0.0,
+               zero_init: bool = True, locality: float = 0.0):
+    super().__init__()
+    if dim % n_heads:
+      raise ValueError(f"hidden {dim} must divide n_heads {n_heads}")
+    self.n_heads = n_heads
+    self.head_dim = dim // n_heads
+    self.norm = RMSNorm(dim)
+    self.q_proj = nn.Linear(dim, dim, bias=False)
+    self.kv_proj = nn.Linear(dim, 2 * dim, bias=False)
+    self.out_proj = nn.Linear(dim, dim, bias=False)
+    self.distance_bias = nn.Embedding(self._MAX_BUCKET, n_heads)
+    # MEASURED FAILURE THIS ADDRESSES (2026-09-05). With a zero distance bias
+    # every memory slot looks identical at step 0, so attention over a stride-1
+    # memory of ~4,000 positions computes a near-uniform average -- mean
+    # pooling, which carries almost nothing. Combined with a zero-init
+    # out_proj (which leaves q_proj/kv_proj with NO gradient until out_proj
+    # grows), the first thing the module learns to inject is that
+    # uninformative average. Measured against a pure SSM under identical
+    # conditions, the hybrid then failed even the 256 sanity rung the SSM
+    # passed: recovered 0.053 vs 0.505.
+    #
+    # `locality` starts the bias decaying with distance, so attention begins
+    # local and sharpens outward rather than starting as a global blur.
+    # `zero_init=False` lets gradient reach the projections from step 0.
+    with torch.no_grad():
+      buckets = torch.arange(self._MAX_BUCKET, dtype=torch.float32)
+      self.distance_bias.weight.copy_(
+        (-locality * buckets)[:, None].expand(-1, n_heads))
+    if zero_init:
+      # A strict addition at init: the hybrid IS the pure SSM at step 0, so a
+      # measured difference cannot be a different starting point. Costs the
+      # projections their step-0 gradient, which is the trade above.
+      nn.init.zeros_(self.out_proj.weight)
+    else:
+      nn.init.normal_(self.out_proj.weight, std=0.02 / math.sqrt(dim))
+    self.dropout = nn.Dropout(dropout)
+
+  @classmethod
+  def _buckets(cls, distances: torch.Tensor) -> torch.Tensor:
+    """Log-spaced distance buckets; nearby offsets stay separable."""
+    d = distances.clamp(min=1).float()
+    return torch.log2(d).floor().clamp(max=cls._MAX_BUCKET - 1).long()
+
+  def forward(self, x, memory, distances):
+    """x: [B, T, C] active block. memory: [B, M, C]. distances: [M] in tokens."""
+    if memory is None or memory.shape[1] == 0:
+      return x
+    batch, length, _ = x.shape
+    q = self.q_proj(self.norm(x))
+    k, v = self.kv_proj(memory).chunk(2, dim=-1)
+    shape = lambda t: t.view(  # noqa: E731
+      batch, -1, self.n_heads, self.head_dim).transpose(1, 2)
+    q, k, v = shape(q), shape(k), shape(v)
+    # [1, heads, 1, M] -- every query position sees the same memory distances
+    bias = self.distance_bias(
+      self._buckets(distances.to(x.device))).t()[None, :, None, :]
+    out = torch.nn.functional.scaled_dot_product_attention(
+      q, k, v, attn_mask=bias.to(q.dtype))
+    out = out.transpose(1, 2).reshape(batch, length, -1)
+    return x + self.dropout(self.out_proj(out))
+
+
 class BidirectionalSSM(nn.Module):
   """Partial-bidirectional block denoiser with optional C-a suffix cache."""
 
@@ -397,6 +504,22 @@ class BidirectionalSSM(nn.Module):
           model.get("bidirectional_impl", "fused")))
       for index in range(int(model.n_blocks))
     ])
+    # Hybrid: attention every `ssm_attn_every` layers (0 disables, and 0 is the
+    # default, so a plain BiSSM is bit-identical to before this existed).
+    self.attn_every = int(model.get("ssm_attn_every", 0))
+    self.attn_stride = int(model.get("ssm_attn_stride", 16))
+    if self.attn_every < 0 or self.attn_stride < 1:
+      raise ValueError("ssm_attn_every must be >=0 and ssm_attn_stride >=1")
+    self.attn = nn.ModuleList([
+      MemoryAttention(self.hidden_size,
+                      n_heads=int(model.get("ssm_attn_heads", 8)),
+                      dropout=float(model.dropout),
+                      zero_init=bool(model.get("ssm_attn_zero_init", True)),
+                      locality=float(model.get("ssm_attn_locality", 0.0)))
+      if self.attn_every and (index % self.attn_every == self.attn_every - 1)
+      else None
+      for index in range(int(model.n_blocks))
+    ])
     self.final_norm = RMSNorm(self.hidden_size)
     self.output = nn.Linear(self.hidden_size, vocab_size, bias=False)
     if bool(model.get("tie_word_embeddings", True)):
@@ -430,6 +553,15 @@ class BidirectionalSSM(nn.Module):
         nn.init.xavier_uniform_(module.weight)
         if module.bias is not None:
           nn.init.zeros_(module.bias)
+    # This sweep runs over EVERY nn.Linear, so it undoes MemoryAttention's
+    # zero-init of out_proj and a fresh hybrid would start as a different
+    # function from the SSM it is supposed to extend. Re-zero it here, after
+    # the sweep, so attention is a strict addition at step 0 and any measured
+    # difference against the pure-SSM ladder is attention doing something --
+    # not a different random starting point.
+    for module in self.modules():
+      if isinstance(module, MemoryAttention):
+        nn.init.zeros_(module.out_proj.weight)
 
   def _compute_autocast(self, x: torch.Tensor):
     """bf16 for the layer stack, mirroring ``models/dit.py``'s inner autocast.
@@ -493,12 +625,25 @@ class BidirectionalSSM(nn.Module):
       cache = self._empty_cache(batch_size, x.device, x.dtype, direction)
     self._validate_cache(cache, batch_size, direction)
 
-    final_states = []
+    final_states, memory = [], []
     for layer_index, layer in enumerate(self.layers):
       x, state = layer.scan_clean(x, cache.states[layer_index])
       final_states.append(state)
+      # Keep every stride-th hidden state for the attention layers. These are
+      # already computed and were previously discarded; only the retention is
+      # new. Both directions run far-end-first (prefill_right flips its input),
+      # so index -1 is the position CLOSEST to the active block in each -- and
+      # the stride is anchored to the end so that closest position is always
+      # kept, which is the one attention most needs.
+      if self.attn[layer_index] is not None:
+        index = torch.arange(
+          x.shape[1] - 1, -1, -self.attn_stride, device=x.device).flip(0)
+        memory.append(x.index_select(1, index))
+      else:
+        memory.append(None)
     return DirectionalCache(
-      tuple(final_states), cache.length + token_ids.shape[1], direction)
+      tuple(final_states), cache.length + token_ids.shape[1], direction,
+      tuple(memory))
 
   def prefill_left(
       self,
@@ -831,7 +976,59 @@ class BidirectionalSSM(nn.Module):
           x,
           left_cache.states[layer_index],
           right_cache.states[layer_index])
+        attention = self.attn[layer_index]
+        if attention is not None:
+          memory, distances = self._gather_memory(
+            left_cache, right_cache, layer_index, x)
+          x = attention(x, memory, distances)
       return self.output(self.final_norm(x))
+
+  def _gather_memory(self, left_cache, right_cache, layer_index, x):
+    """Committed-context memory either side of the active block, with distances.
+
+    Distance is measured in tokens from the active block, so a copy at a fixed
+    offset is expressible: the bias makes one bucket separable from the next.
+    A pure-SSM cache carries no memory, so a hybrid handed one degrades to the
+    plain scan rather than failing.
+    """
+    parts, spans = [], []
+    saw_context = False
+    for cache, side in ((left_cache, "left"), (right_cache, "right")):
+      memory = getattr(cache, "memory", ())
+      block = memory[layer_index] if layer_index < len(memory) else None
+      if cache is not None and cache.length not in (0, -1):
+        saw_context = True
+      if block is None or block.shape[1] == 0:
+        continue
+      count = block.shape[1]
+      # index -1 is nearest the block in both directions; slot j sits
+      # (count-1-j)*stride + 1 tokens away.
+      distance = (torch.arange(count, device=x.device).flip(0)
+                  * self.attn_stride + 1)
+      parts.append(block.to(x.dtype))
+      spans.append(distance)
+    if not parts and saw_context:
+      # FAIL LOUDLY. The folded boundary path (prefill_*_boundaries_stacked ->
+      # stack_boundary_caches, which model.active_blocks='all' uses) does not
+      # build memory, so attention would silently become the identity and the
+      # hybrid would train as a plain SSM. That produces a null result for
+      # entirely the wrong reason -- the failure mode that has cost this
+      # project the most compute. Refuse instead.
+      raise RuntimeError(
+        "MemoryAttention is enabled but the cache carries no memory. The "
+        "folded boundary caches used by model.active_blocks='all' do not "
+        "build it; set model.active_blocks='one', or extend "
+        "stack_boundary_caches to carry per-block memory.")
+    # The active block is always in memory, at distance 0. Two reasons. It is
+    # legitimate context -- this is the within-block attention a DiT already
+    # does, over the NOISY block, so it leaks nothing. And it guarantees the
+    # attention parameters are exercised on every call: block 0 has an empty
+    # left prefix and no right cache, so without this the projections receive
+    # no gradient and DDP aborts with "parameters that were not used in
+    # producing the loss".
+    parts.append(x)
+    spans.append(torch.zeros(x.shape[1], device=x.device, dtype=torch.long))
+    return torch.cat(parts, dim=1), torch.cat(spans, dim=0)
 
   def prepare_right_cache(self, clean_suffix_ids: torch.Tensor):
     """Prepare the fixed C-a cache used by subsequent active-block calls."""

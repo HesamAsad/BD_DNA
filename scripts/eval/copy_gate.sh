@@ -63,6 +63,25 @@ NUM_WORKERS=${NUM_WORKERS:-2}
 # uses flex. The recurrent backbones ignore this, so it is safe to always
 # pass it and it keeps SSM and Transformer ladders on one code path.
 ATTN=${ATTN:-flex}
+# Hybrid knobs. ATTN_EVERY=0 is a pure SSM (the baseline). >0 inserts a
+# MemoryAttention layer every N layers, retrieving from every ATTN_STRIDE-th
+# hidden state of the committed context. Stride is the memory/reach dial:
+# stride 1 retains everything and is the best case for the mechanism; larger
+# strides recover the linear-scaling advantage but may drop the exact token a
+# copy needs.
+ATTN_EVERY=${ATTN_EVERY:-0}
+ATTN_STRIDE=${ATTN_STRIDE:-1}
+# ZERO_INIT=1 makes the hybrid a strict addition at init but starves the
+# attention projections of step-0 gradient; LOCALITY>0 starts the distance
+# bias decaying so attention begins local instead of averaging the whole
+# memory. Both address the measured 2026-09-05 failure where the hybrid lost
+# the sanity rung to a plain SSM (0.053 vs 0.505).
+ZERO_INIT=${ZERO_INIT:-1}
+LOCALITY=${LOCALITY:-0.0}
+# active_blocks='one' is REQUIRED with attention: the 'all' path folds caches
+# through stack_boundary_caches, which carries no memory. Default follows
+# whether attention is on so the two cannot be mismatched by accident.
+ACTIVE_BLOCKS=${ACTIVE_BLOCKS:-$( [ "${ATTN_EVERY:-0}" = "0" ] && echo all || echo one )}
 GLOBAL_BATCH=${GLOBAL_BATCH:-32}
 MICRO_BATCH=${MICRO_BATCH:-4}
 WALL=${WALL:-12:00}
@@ -118,6 +137,23 @@ export XDG_CACHE_HOME=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/xdg
 export TRITON_CACHE_DIR=/lustre/scratch126/cellgen/lotfollahi/ha11/cache/triton
 export TOKENIZERS_PARALLELISM=false USE_TF=0 TF_CPP_MIN_LOG_LEVEL=3
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# Two arms of a sweep share a dataset name, so launching them together had
+# both find it missing and both build into the same .tmp directory -- one
+# renamed it away while the other was still reading. mkdir is atomic, so it
+# serialises the build: the loser waits for the winner instead of racing it.
+# NOTE the backslashes: this text is written through an unquoted heredoc, so
+# anything meant to run in the JOB must escape its $.
+DATASET="$CACHE/${NAME}_train_bs${LENGTH}_wrapped_specialFalse.dat"
+LOCK="$CACHE/${NAME}.buildlock"
+if [ ! -d "\$DATASET" ]; then
+  if mkdir "\$LOCK" 2>/dev/null; then
+    trap 'rmdir "\$LOCK" 2>/dev/null' EXIT
+  else
+    echo "another job is building ${NAME}; waiting"
+    n=0
+    while [ ! -d "\$DATASET" ] && [ "\$n" -lt 240 ]; do sleep 15; n=\$((n+1)); done
+  fi
+fi
 if [ ! -d "$CACHE/${NAME}_train_bs${LENGTH}_wrapped_specialFalse.dat" ]; then
   echo "building $NAME"
   $PYTHON -u scripts/eval/gen_synthetic_duplication.py \\
@@ -130,6 +166,8 @@ $PYTHON -u main.py mode=train \\
   data.dna_num_files=null \\
   model.length=$LENGTH block_size=$BLOCK_SIZE \\
   model.attn_backend=$ATTN \\
+  ++model.ssm_attn_every=$ATTN_EVERY ++model.ssm_attn_stride=$ATTN_STRIDE \\
+  ++model.ssm_attn_zero_init=$ZERO_INIT ++model.ssm_attn_locality=$LOCALITY ++model.active_blocks=$ACTIVE_BLOCKS \\
   loader.global_batch_size=$GLOBAL_BATCH \\
   loader.eval_global_batch_size=$GLOBAL_BATCH \\
   loader.batch_size=$MICRO_BATCH loader.eval_batch_size=$MICRO_BATCH \\
