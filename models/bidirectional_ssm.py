@@ -373,6 +373,37 @@ class MemoryAttention(nn.Module):
   constant, which gives up part of the linear-scaling advantage the generation
   sweep measured (0.72 GB flat with a 4.7 MiB cache, against the DiT's 1.37 GB
   and 468 MiB). `stride` is the dial between the two.
+
+  *** THIS DOES NOT WORK. TWO MEASURED ATTEMPTS, BOTH NEGATIVE. ***
+
+  Matched to a plain SSM in every respect but the mixer (L=4096,
+  active_blocks=one, same data and seed), recovered on the copy gate:
+
+      offset          plain SSM   hybrid v1   hybrid v2 (init fix)
+         256              0.628       0.053                0.053
+         512              0.054       0.053                  --
+        1024              0.054       0.053                  --
+
+  v2 added non-zero out_proj init (so q/kv get step-0 gradient), a locality
+  prior on the distance bias, and stride 16. Over 30,000 steps it oscillated
+  around zero (+0.005, -0.007, +0.000, -0.006, +0.018) and never began a
+  transition, while the plain SSM had crossed 25% by step 20,926. So attention
+  here does not merely fail to help -- it loses the sanity rung the bare SSM
+  passes.
+
+  LEADING STRUCTURAL DIAGNOSIS, untested. In the DiT attention IS the mixer, so
+  token-level detail stays available at every layer. Here the SSM builds every
+  representation and attention is a residual bolt-on at 3 of 12 layers that
+  retrieves from SSM-PRODUCED hidden states -- exactly what the fixed-size
+  recurrent mechanism has already compressed. If the state at position p no
+  longer distinguishes which nucleotide sat there, attending to it cannot
+  recover that nucleotide: the graft asks attention to un-compress what the
+  compression discarded. The concept is not refuted -- the DiT solves the same
+  copy task in 543 steps -- but this arrangement of it is.
+
+  The predicted alternative is a change to WHAT memory stores, not a
+  hyperparameter: hold the token embeddings (layer-0 input, before any SSM
+  mixing) instead of deep hidden states. One copy-gate ladder would test it.
   """
 
   _MAX_BUCKET = 32
