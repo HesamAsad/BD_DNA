@@ -51,7 +51,10 @@ from pathlib import Path
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[3]
-OUTPUTS = ("RNA_SEQ", "ATAC", "DNASE", "CAGE", "CHIP_HISTONE", "SPLICE_SITES")
+# PROCAP joins CAGE as a transcription-initiation readout: there is NO TSS
+# OutputType, so these two are the TSS proxies Score 2 has to work from.
+OUTPUTS = ("RNA_SEQ", "ATAC", "DNASE", "CAGE", "CHIP_HISTONE",
+           "SPLICE_SITES", "PROCAP")
 ORDER = ("real", "ca", "mismatch", "denovo", "dinuc")
 
 
@@ -83,6 +86,182 @@ def identity(a: str, b: str) -> float:
   return sum(x == y for x, y in zip(a[:n], b[:n])) / max(n, 1)
 
 
+# ---------------------------------------------------------------- Score 2
+def peak_positions(values, lo, hi, z=3.0, min_sep=50):
+  """Positions of prominent local maxima inside [lo, hi), in bin units.
+
+  A peak is a bin exceeding mean + z*std of the window, kept only if it is the
+  largest within +-min_sep bins. Deliberately simple: the comparison below is
+  real-vs-reconstructed under the SAME detector, so detector bias cancels.
+  """
+  v = values[lo:hi].mean(axis=1) if values.ndim > 1 else values[lo:hi]
+  if v.size == 0:
+    return np.array([], dtype=int)
+  thresh = v.mean() + z * v.std()
+  cand = np.flatnonzero(v > thresh)
+  keep = []
+  for c in cand[np.argsort(-v[cand])]:
+    if all(abs(c - k) >= min_sep for k in keep):
+      keep.append(int(c))
+  return np.array(sorted(keep), dtype=int)
+
+
+def placement_score(pred, ref, left_nt, gap_nt, length, ccres, start):
+  """Score 2: are regulatory elements placed at the right distances?
+
+  Two complementary readouts, both restricted to the masked interior:
+
+  (a) PEAK GEOMETRY -- a symmetric Chamfer distance between the transcription
+      -initiation peak sets of AG(reconstructed) and AG(real). This asks
+      whether the model put initiation signal WHERE the real locus has it, not
+      merely whether the average level matches, which is what track-MSE
+      measures and why the spec lists placement separately.
+
+  (b) cCRE-ANCHORED OFFSET -- for each ENCODE cCRE that falls in the interior,
+      the distance from that element to the nearest initiation peak, in the
+      reconstruction versus in the real locus. `ccres_in_gap` is emitted by
+      task2_generate and was previously never read.
+  """
+  out = {}
+  for name in ("CAGE", "PROCAP"):
+    if name not in ref or name not in pred or ref[name].shape != pred[name].shape:
+      continue
+    stride = max(length // ref[name].shape[0], 1)
+    lo, hi = left_nt // stride, (left_nt + gap_nt) // stride
+    if hi <= lo:
+      continue
+    pr = peak_positions(pred[name], lo, hi)
+    rf = peak_positions(ref[name], lo, hi)
+    out[f"npeak_{name}_pred"] = int(pr.size)
+    out[f"npeak_{name}_real"] = int(rf.size)
+    if pr.size and rf.size:
+      d1 = np.abs(pr[:, None] - rf[None, :]).min(axis=1).mean()
+      d2 = np.abs(rf[:, None] - pr[None, :]).min(axis=1).mean()
+      out[f"chamfer_{name}_nt"] = float(0.5 * (d1 + d2) * stride)
+    elif pr.size or rf.size:
+      out[f"chamfer_{name}_nt"] = float(gap_nt)   # one side empty: worst case
+    if ccres:
+      errs = []
+      for c in ccres:
+        mid = ((c["start"] + c["end"]) // 2 - start) // stride - lo
+        if not (0 <= mid < hi - lo):
+          continue
+        dp = float(np.abs(pr - mid).min()) * stride if pr.size else gap_nt
+        dr = float(np.abs(rf - mid).min()) * stride if rf.size else gap_nt
+        errs.append(abs(dp - dr))
+      if errs:
+        out[f"ccre_offset_err_{name}_nt"] = float(np.mean(errs))
+        out["n_ccre_scored"] = len(errs)
+  return out
+
+
+# ---------------------------------------------------------------- Score 3b
+_ONEHOT = {c: i for i, c in enumerate("ACGT")}
+
+
+def _encode(seq):
+  a = np.zeros((len(seq), 4), dtype=np.float32)
+  for i, ch in enumerate(seq):
+    j = _ONEHOT.get(ch)
+    if j is not None:
+      a[i, j] = 1.0
+  return a
+
+
+def load_motifs(path, top=None):
+  """JASPAR/MEME PFMs -> list of (name, log-odds matrix [w,4])."""
+  from Bio import motifs as biomotifs
+  with open(path) as handle:
+    parsed = biomotifs.parse(handle, "minimal")
+  out = []
+  for m in parsed:
+    pssm = m.pssm
+    mat = np.array([[pssm[b][i] for b in "ACGT"] for i in range(m.length)],
+                   dtype=np.float32)
+    mat[~np.isfinite(mat)] = -10.0
+    out.append((m.name or m.matrix_id, mat))
+  return out[:top] if top else out
+
+
+def motif_hits(seq, motifs_, z=4.0):
+  """Hit COUNT per motif via a vectorised sliding-window log-odds scan.
+
+  Biopython's own search loops in Python and is far too slow at this scale
+  (879 motifs x ~600 sequences), so the window sum is done with
+  sliding_window_view instead.
+  """
+  if len(seq) < 30:
+    return {}
+  x = _encode(seq)
+  counts = {}
+  for name, mat in motifs_:
+    w = mat.shape[0]
+    if w > x.shape[0]:
+      continue
+    win = np.lib.stride_tricks.sliding_window_view(x, (w, 4)).squeeze(1)
+    scores = np.einsum("nwc,wc->n", win, mat)
+    thr = scores.mean() + z * (scores.std() or 1.0)
+    counts[name] = int((scores > thr).sum())
+  return counts
+
+
+def motif_recovery(gen, real, motifs_):
+  """Cosine similarity and L1 distance between motif-hit profiles."""
+  if not motifs_ or not real:
+    return {}
+  g, r = motif_hits(gen, motifs_), motif_hits(real, motifs_)
+  keys = sorted(set(g) | set(r))
+  if not keys:
+    return {}
+  a = np.array([g.get(k, 0) for k in keys], dtype=np.float64)
+  b = np.array([r.get(k, 0) for k in keys], dtype=np.float64)
+  na, nb = np.linalg.norm(a), np.linalg.norm(b)
+  return {
+    "motif_cosine": float(a @ b / (na * nb)) if na and nb else 0.0,
+    "motif_l1_per_motif": float(np.abs(a - b).sum() / len(keys)),
+    "motif_hits_gen": int(a.sum()), "motif_hits_real": int(b.sum()),
+  }
+
+
+# Distance bins, in nt from the RIGHT edge of the masked interior. These span
+# the measured range regime (effective range 1-2 kb) with headroom.
+DIST_EDGES = (0, 64, 128, 256, 512, 1024, 2048, 4096)
+
+
+def positional_mse(pred, ref, left_nt, gap_nt, length):
+  """Per-position squared error inside the interior, binned by distance to the
+  RIGHT flank.
+
+  WHY THIS EXISTS. task2_generate always centres the gap so the interior abuts
+  the right flank, and only the gap WIDTH varies -- so a width ladder confounds
+  "how wide is the hole" with "how far is this nucleotide from the committed
+  suffix". Binning positions inside ONE gap by their distance to the right edge
+  separates them: width is held fixed and distance varies within a single
+  sequence. `ca - denovo` per bin is the bidirectional range curve.
+  """
+  out = {}
+  for name, r in ref.items():
+    if name not in pred or pred[name].shape != r.shape:
+      continue
+    a = pred[name]
+    stride = max(length // r.shape[0], 1)
+    lo, hi = left_nt // stride, (left_nt + gap_nt) // stride
+    if hi <= lo:
+      continue
+    # standardise with the REAL locus's per-track statistics, as elsewhere
+    mu = r.mean(axis=0, keepdims=True)
+    sd = np.maximum(r.std(axis=0, keepdims=True), 1e-6)
+    err = (((a[lo:hi] - mu) / sd - (r[lo:hi] - mu) / sd) ** 2).mean(axis=1)
+    # distance in nt from each position to the right edge of the interior
+    dist = (np.arange(hi - lo)[::-1] + 1) * stride
+    for i, edge in enumerate(DIST_EDGES):
+      top = DIST_EDGES[i + 1] if i + 1 < len(DIST_EDGES) else None
+      sel = (dist > edge) & ((dist <= top) if top else True)
+      if sel.any():
+        out[f"posmse_{name}_{edge}"] = float(err[sel].mean())
+  return out
+
+
 def main():
   ap = argparse.ArgumentParser(
     description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -91,12 +270,23 @@ def main():
   ap.add_argument("--out", type=Path,
                   default=REPO / "results/aglonggen/task2_scores.json")
   ap.add_argument("--ontology", default="UBERON:0002048")
+  ap.add_argument("--label", default=None,
+                  help="arm identifier carried into the scores payload; without "
+                       "it a two-arm comparison cannot say which row is which")
+  ap.add_argument("--jaspar", default=str(REPO / "data/jaspar/JASPAR2024_CORE_vertebrates_nr_pfms_meme.txt"),
+                  help="motif PFMs for Score 3b; pass '' to skip motif scoring")
+  ap.add_argument("--motif-top", type=int, default=0,
+                  help="use only the first N motifs (0 = all 879)")
   ap.add_argument("--skip-oracle", action="store_true",
                   help="sequence-level scores only; no API calls")
   args = ap.parse_args()
 
   payload = json.loads(args.gen.read_text())
   records = payload["records"]
+  motifs_ = []
+  if args.jaspar and Path(args.jaspar).exists():
+    motifs_ = load_motifs(args.jaspar, args.motif_top or None)
+    print(f"loaded {len(motifs_)} motifs for Score 3b from {args.jaspar}")
   print(f"{len(records)} records from {args.gen}")
 
   # the real interior per locus, to score sequence recovery against
@@ -146,6 +336,8 @@ def main():
                 "gc": gc(r["interior"]),
                 "gc_abs_err": abs(gc(r["interior"]) - gc(truth)) if truth else None,
                 "identity": identity(r["interior"], truth) if truth else None})
+    if motifs_ and truth:
+      row.update(motif_recovery(r["interior"], truth, motifs_))
     if not args.skip_oracle:
       ref_rec = next(x for x in records
                      if (x["chrom"], x["start"], x["gap_nt"]) == key
@@ -162,13 +354,21 @@ def main():
         av, bv = a.ravel(), b.ravel()
         if av.std() > 1e-8 and bv.std() > 1e-8:
           row[f"r_{name}"] = float(np.corrcoef(av, bv)[0, 1])
+      row.update(positional_mse(pred, ref, r["left_nt"], r["gap_nt"],
+                                payload.get("length", 16384)))
+      row.update(placement_score(pred, ref, r["left_nt"], r["gap_nt"],
+                                 payload.get("length", 16384),
+                                 r.get("ccres_in_gap") or [], r["start"]))
       if (i + 1) % 25 == 0:
         print(f"  scored {i+1}/{len(records)}", flush=True)
     rows.append(row)
 
   args.out.parent.mkdir(parents=True, exist_ok=True)
   args.out.write_text(json.dumps(
-    {"gen": str(args.gen), "n_records": len(rows), "rows": rows}, indent=2))
+    {"gen": str(args.gen), "label": args.label,
+     "checkpoint": payload.get("checkpoint"),
+     "provenance": payload.get("provenance"),
+     "n_records": len(rows), "rows": rows}, indent=2))
   print(f"\nwrote {args.out}")
 
   gaps = sorted({r["gap_nt"] for r in rows})

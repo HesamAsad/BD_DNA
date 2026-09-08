@@ -80,6 +80,43 @@ def dinuc_shuffle(seq: str, rng) -> str:
   return out + seq[len(out):] if len(out) < len(seq) else out
 
 
+# The four classes the AG-LongGen note names. Restricting to them keeps the
+# masked interior on the elements the benchmark is about, rather than on the
+# CA/TF classes that dominate the registry by count.
+CCRE_CLASSES = ("PLS", "pELS", "dELS", "CA-CTCF")
+
+
+def load_ccres(path: Path, classes=CCRE_CLASSES):
+  """chrom -> sorted list of (start, end, class, id). Handles .gz."""
+  import gzip
+  from collections import defaultdict
+  keep, out = set(classes), defaultdict(list)
+  opener = gzip.open if str(path).endswith(".gz") else open
+  with opener(path, "rt") as handle:
+    for line in handle:
+      f = line.rstrip("\n").split("\t")
+      if len(f) < 10 or f[9] not in keep:
+        continue
+      out[f[0]].append((int(f[1]), int(f[2]), f[9], f[3]))
+  for c in out:
+    out[c].sort()
+  return out
+
+
+def ccres_in(ccres, chrom, start, end):
+  """Elements overlapping [start, end) on chrom."""
+  import bisect
+  rows = ccres.get(chrom) or []
+  i = bisect.bisect_left(rows, (start - 5000, 0, "", ""))
+  hit = []
+  for s, e, cls, eid in rows[i:]:
+    if s >= end:
+      break
+    if e > start:
+      hit.append({"start": s, "end": e, "class": cls, "id": eid})
+  return hit
+
+
 def load_intervals(bed: Path, chroms, split):
   rows = []
   for line in bed.read_text().splitlines():
@@ -109,6 +146,13 @@ def main():
   ap.add_argument("--gap-blocks", type=int, nargs="+", default=[1, 2, 4, 8],
                   help="interior span in blocks of block_size")
   ap.add_argument("--n-loci", type=int, default=24)
+  ap.add_argument("--ccre-bed", default=str(REPO / "data/encode/GRCh38-cCREs.ENCFF420VPZ.bed.gz"),
+                  help="ENCODE SCREEN registry; the benchmark requires the "
+                       "masked interior to contain real regulatory elements")
+  ap.add_argument("--require-ccre", type=int, default=1,
+                  help="minimum cCREs the masked interior must contain. 0 "
+                       "reproduces the earlier arbitrary-locus sampling, which "
+                       "masked regions with no functional content at all.")
   ap.add_argument("--num-steps", type=int, default=64)
   ap.add_argument("--refine-passes", type=int, default=0,
                   help="0 (DEFAULT, and the only setting that should be "
@@ -118,6 +162,10 @@ def main():
                        "denovo went from 12%% to 83%% of loci failing. See "
                        "Diffusion.sample_infill_refined.")
   ap.add_argument("--seed", type=int, default=0)
+  ap.add_argument("--reverse-off", action="store_true",
+                  help="rebuild a bissm checkpoint as a UnidirectionalSSM "
+                       "(weights are shared, so this is a WEIGHT-MATCHED causal "
+                       "arm, not a separately-trained one). Runs denovo only.")
   ap.add_argument("--out", type=Path,
                   default=REPO / "results/aglonggen/task2_gen.json")
   args = ap.parse_args()
@@ -128,10 +176,20 @@ def main():
 
   device = torch.device("cuda")
   model, tokenizer, config, step = load_checkpoint_model(
-    args.checkpoint, LENGTH, args.n_loci, device)
-  if str(config.algo.backbone) != "bissm":
-    raise ValueError("Task 2 infilling requires backbone=bissm; only the "
-                     "bidirectional arm can consume a right flank")
+    args.checkpoint, LENGTH, args.n_loci, device, reverse_off=args.reverse_off)
+  # bissm runs the full ca/denovo/mismatch contrast. A CAUSAL arm can only run
+  # `denovo`, and that is exactly the spec's decisive contrast -- the same loci
+  # under a forward-only and a bidirectional model. --reverse-off rebuilds a
+  # bissm checkpoint AS a UnidirectionalSSM, so the causal arm is weight-matched
+  # rather than a separately-trained run.
+  backbone = str(config.algo.backbone)
+  if backbone not in ("bissm", "ussm"):
+    raise ValueError(f"Task 2 infilling needs backbone bissm or ussm, got {backbone}")
+  causal = backbone == "ussm"
+  conditions = ("denovo",) if causal else CONDITIONS
+  if causal:
+    print("CAUSAL arm: only the denovo condition is defined (no right flank)",
+          flush=True)
   block = int(config.block_size)
   if LENGTH % block:
     raise ValueError(f"{LENGTH} must divide by block_size={block}")
@@ -143,18 +201,41 @@ def main():
     sys.exit(f"no {args.split} intervals for chroms={chroms}")
   rng = np.random.default_rng(args.seed)
 
-  # fixed, released locus list: contiguous ACGT windows, no assembly gaps
+  ccres = {}
+  if args.require_ccre > 0:
+    ccres = load_ccres(Path(args.ccre_bed))
+    print(f"loaded cCREs on {len(ccres)} chromosomes "
+          f"({sum(len(v) for v in ccres.values()):,} elements, "
+          f"classes {'/'.join(CCRE_CLASSES)})", flush=True)
+
+  # Fixed, released locus list: contiguous ACGT windows whose CENTRE -- the span
+  # that will be masked at the widest gap -- carries real regulatory elements.
+  # Sampling for clean ACGT alone masks arbitrary sequence, which is not the
+  # benchmark's task and cannot test regulatory reconstruction.
+  widest = max(args.gap_blocks) * 256
   loci = []
   tried = 0
-  while len(loci) < args.n_loci and tried < 40 * args.n_loci:
+  while len(loci) < args.n_loci and tried < 400 * args.n_loci:
     tried += 1
     c, s, e = intervals[int(rng.integers(len(intervals)))]
     if e - s < LENGTH or c not in genome:
       continue
     start = int(rng.integers(s, max(s + 1, e - LENGTH)))
     seq = str(genome[c][start:start + LENGTH]).upper()
-    if len(seq) == LENGTH and seq.count("N") == 0:
-      loci.append({"chrom": c, "start": start, "seq": seq})
+    if len(seq) != LENGTH or seq.count("N"):
+      continue
+    mid = start + LENGTH // 2
+    hits = ccres_in(ccres, c, mid - widest // 2, mid + widest // 2) if ccres else []
+    if args.require_ccre > 0 and len(hits) < args.require_ccre:
+      continue
+    loci.append({"chrom": c, "start": start, "seq": seq, "ccres": hits})
+  if len(loci) < args.n_loci:
+    print(f"warning: only {len(loci)} loci met the cCRE requirement "
+          f"in {tried} tries")
+  if ccres:
+    n = [len(l["ccres"]) for l in loci]
+    print(f"cCREs in the widest masked span: min {min(n)} median "
+          f"{sorted(n)[len(n)//2]} max {max(n)}", flush=True)
   if len(loci) < args.n_loci:
     print(f"warning: only {len(loci)} clean loci found")
 
@@ -181,7 +262,7 @@ def main():
     right_mm = torch.roll(right, shifts=1, dims=0)
     print(f"gap {gap_nt} nt  left {left_nt}  right {right_nt}", flush=True)
 
-    for cond in CONDITIONS:
+    for cond in conditions:
       if cond == "ca":
         r = right
       elif cond == "mismatch":
@@ -200,11 +281,13 @@ def main():
       # only the generated interior differs
       recon = torch.cat((full[:, :left_nt + gap_nt], right), dim=1)
       for i, l in enumerate(loci):
+        gs, ge = l["start"] + left_nt, l["start"] + left_nt + gap_nt
         records.append({
           "chrom": l["chrom"], "start": l["start"], "gap_nt": gap_nt,
           "left_nt": left_nt, "condition": cond,
           "interior": decode(recon[i, left_nt:left_nt + gap_nt]),
           "sequence": decode(recon[i]),
+          "ccres_in_gap": ccres_in(ccres, l["chrom"], gs, ge) if ccres else [],
         })
       print(f"  {cond}: {len(loci)} sequences", flush=True)
 
@@ -222,8 +305,21 @@ def main():
         })
 
   args.out.parent.mkdir(parents=True, exist_ok=True)
+  # PROVENANCE. right_flank_probability is the field whose absence let an
+  # rf=0.0 checkpoint be interpreted as "the suffix carries no information"
+  # through an entire Task 2 campaign. Record it, and the whole model/algo
+  # block, so a result can never again be read without knowing how it trained.
+  prov = {
+    "right_flank_probability": float(config.model.get("right_flank_probability", 0.0)),
+    "time_conditioning": bool(config.algo.get("time_conditioning", False)),
+    "var_min": bool(config.algo.get("var_min", False)),
+    "backbone": str(config.algo.backbone),
+    "trained_length": int(config.model.length),
+  }
+  print("provenance:", json.dumps(prov), flush=True)
   args.out.write_text(json.dumps({
     "checkpoint": str(args.checkpoint), "global_step": step,
+    "provenance": prov,
     "length": LENGTH, "block_size": block, "num_steps": args.num_steps,
     "refine_passes": args.refine_passes, "split": args.split, "chroms": sorted(chroms) if chroms else "all",
     "n_loci": len(loci), "records": records}, indent=2))

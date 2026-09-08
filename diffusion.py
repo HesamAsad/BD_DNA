@@ -1586,8 +1586,23 @@ class Diffusion(L.LightningModule):
     padding nor observed target tokens can accidentally enter a boundary
     cache.
     """
-    if self.config.algo.backbone != 'bissm':
-      raise ValueError("sample_infill_ca requires algo.backbone=bissm")
+    # A UNIDIRECTIONAL backbone may run this ONLY with an empty right context.
+    # That is the `denovo` condition, and allowing it is what makes the spec's
+    # decisive contrast possible: the same loci scored by a causal model and a
+    # bidirectional one. UnidirectionalSSM refuses a populated right cache
+    # outright (models/unidirectional_ssm.py:84), so a non-empty suffix here
+    # would fail later and less clearly -- reject it up front instead.
+    backbone_name = str(self.config.algo.backbone)
+    causal_only = backbone_name != 'bissm'
+    if causal_only:
+      if backbone_name != 'ussm':
+        raise ValueError(
+          f"sample_infill_ca supports backbone=bissm, or backbone=ussm with an "
+          f"empty right_context; got {backbone_name}")
+      if right_context.shape[-1] != 0:
+        raise ValueError(
+          "backbone=ussm cannot consume a right flank; pass a zero-width "
+          "right_context to run the de-novo (left-only) condition")
     if left_context.ndim != 2 or right_context.ndim != 2:
       raise ValueError("left_context and right_context must be [batch, length]")
     if left_context.shape[0] != right_context.shape[0]:
@@ -1602,8 +1617,12 @@ class Diffusion(L.LightningModule):
     self.backbone.reset_kv_cache(eval_batch_size=batch_size)
     self.backbone._sampling_left_cache = self.backbone.prefill_left(
       left_context, detach=True)
-    self.backbone.prepare_right_cache(right_context)
-    fixed_right = self.backbone._sampling_right_cache.clone()
+    # The right-cache machinery exists only on the bidirectional backbone; on a
+    # causal one there is nothing to prefill, clone, or check for mutation.
+    fixed_right = None
+    if not causal_only:
+      self.backbone.prepare_right_cache(right_context)
+      fixed_right = self.backbone._sampling_right_cache.clone()
 
     generated_blocks = []
     dt = 1.0 / num_steps
@@ -1632,11 +1651,12 @@ class Diffusion(L.LightningModule):
           "check the noise schedule")
       generated_blocks.append(active)
       # Committing the clean active block must not mutate the fixed right cache.
-      for actual, expected in zip(
-          self.backbone._sampling_right_cache.states, fixed_right.states):
-        if not torch.equal(actual.conv, expected.conv) \
-            or not torch.equal(actual.ssm, expected.ssm):
-          raise RuntimeError("The fixed C-a right cache was mutated")
+      if fixed_right is not None:
+        for actual, expected in zip(
+            self.backbone._sampling_right_cache.states, fixed_right.states):
+          if not torch.equal(actual.conv, expected.conv) \
+              or not torch.equal(actual.ssm, expected.ssm):
+            raise RuntimeError("The fixed C-a right cache was mutated")
 
     gap = torch.cat(generated_blocks, dim=1)
     return torch.cat((left_context, gap, right_context), dim=1)
