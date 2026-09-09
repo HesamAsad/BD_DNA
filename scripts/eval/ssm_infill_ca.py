@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import os
 import sys
 import tempfile
@@ -263,7 +264,16 @@ def main():
              "cache. value_curve isolates the data's correlation scale, "
              "realized_profile the model's transmission range."),
   }
+  # summary.json stays for the readers that hardcode it (generation_curves.py:90,
+  # inference_curves.py:108). But a caller that loops arms into ONE --output-dir
+  # silently overwrites: job 135664 scored rf10 then rf00 into results/infill_ca
+  # and the rf10 measurement -- the whole point of the run -- survived only as
+  # text in its stdout. Same fixed-filename clobber that cost 68 of 69 generation
+  # runs. So ALSO write a label-stamped copy, which no later arm can take.
   _atomic_json(args.output_dir / "summary.json", summary)
+  if args.label:
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(args.label))
+    _atomic_json(args.output_dir / f"summary_{safe}.json", summary)
 
   print(f"\nde-novo {nelbo['de_novo']:.5f}   full-suffix {nelbo[headline]:.5f}"
         f"   delta {delta:+.5f} nats/nt  ({delta*block:.3f} nats/block)")

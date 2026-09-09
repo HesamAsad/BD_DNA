@@ -137,6 +137,8 @@ def main():
   ap.add_argument("--checkpoint", type=Path, required=True)
   ap.add_argument("--fasta", default=str(REPO / "data/hg38/hg38.ml.fa"))
   ap.add_argument("--bed", default=str(REPO / "data/hg38/human-sequences.bed"))
+  ap.add_argument("--allow-contaminated-split", action="store_true",
+                  help="opt out of the train/valid chromosome-overlap refusal")
   ap.add_argument("--split", default="valid",
                   help="bed split to draw loci from; 'valid' is the only "
                        "uncontaminated option for current checkpoints")
@@ -146,6 +148,13 @@ def main():
   ap.add_argument("--gap-blocks", type=int, nargs="+", default=[1, 2, 4, 8],
                   help="interior span in blocks of block_size")
   ap.add_argument("--n-loci", type=int, default=24)
+  # n_loci was ALSO the model batch size (it is passed straight to
+  # load_checkpoint_model as eval_batch_size), so --n-loci 1000 tried to push
+  # 1000 x 16,384 tokens through the backbone at once and died with
+  # "CUDA error: an illegal memory access was encountered". Loci count and
+  # batch size are now separate; generation chunks over loci.
+  ap.add_argument("--batch-size", type=int, default=0,
+                  help="model batch; 0 = min(n_loci, 32)")
   ap.add_argument("--ccre-bed", default=str(REPO / "data/encode/GRCh38-cCREs.ENCFF420VPZ.bed.gz"),
                   help="ENCODE SCREEN registry; the benchmark requires the "
                        "masked interior to contain real regulatory elements")
@@ -175,8 +184,10 @@ def main():
   import pyfaidx
 
   device = torch.device("cuda")
+  batch_size = args.batch_size if args.batch_size > 0 else min(args.n_loci, 32)
   model, tokenizer, config, step = load_checkpoint_model(
-    args.checkpoint, LENGTH, args.n_loci, device, reverse_off=args.reverse_off)
+    args.checkpoint, LENGTH, batch_size, device, reverse_off=args.reverse_off)
+  print(f"loci={args.n_loci} model batch={batch_size}", flush=True)
   # bissm runs the full ca/denovo/mismatch contrast. A CAUSAL arm can only run
   # `denovo`, and that is exactly the spec's decisive contrast -- the same loci
   # under a forward-only and a bidirectional model. --reverse-off rebuilds a
@@ -196,6 +207,27 @@ def main():
 
   genome = pyfaidx.Fasta(args.fasta)
   chroms = set(args.chroms.split(",")) if args.chroms else None
+  # CONTAMINATION GUARD. --bed defaults to data/hg38/human-sequences.bed, whose
+  # "valid" split shares 15 chromosomes with its own train split (1,405 valid
+  # intervals sit on chromosomes the model trained on). Drawing Task 2 loci from
+  # there measures memorisation, not infilling. The clean bed
+  # (data/hg38/clean/human-sequences-no89.bed) holds chr8+chr9 out wholesale.
+  # Refuse rather than warn: a warning in a long log is exactly how the previous
+  # contamination survived several rounds of review.
+  _tr, _va = set(), set()
+  for _ln in open(args.bed):
+    _f = _ln.split()
+    if len(_f) >= 4:
+      (_tr if _f[3] == "train" else _va if _f[3] == "valid" else set()).add(_f[0])
+  _shared = sorted(_tr & _va)
+  if args.split == "valid" and _shared and not args.allow_contaminated_split:
+    sys.exit(
+      f"REFUSING: {args.bed} puts {len(_shared)} chromosome(s) in BOTH train and "
+      f"valid ({','.join(_shared[:6])}{'...' if len(_shared) > 6 else ''}).\n"
+      f"  Task 2 loci drawn from there overlap training data.\n"
+      f"  Use --bed data/hg38/clean/human-sequences-no89.bed (valid = chr8+chr9 "
+      f"only), or pass --allow-contaminated-split if you truly intend this.")
+
   intervals = load_intervals(Path(args.bed), chroms, args.split)
   if not intervals:
     sys.exit(f"no {args.split} intervals for chroms={chroms}")
@@ -264,22 +296,38 @@ def main():
 
     for cond in conditions:
       if cond == "ca":
-        r = right
+        r_all = right
       elif cond == "mismatch":
-        r = right_mm
+        r_all = right_mm
       else:
-        r = right[:, :0]                     # empty suffix -> left-only
-      torch.manual_seed(args.seed)
-      with torch.inference_mode():
-        if args.refine_passes > 0:
-          full = model.sample_infill_refined(
-            left, r, gap_nt, args.num_steps, passes=args.refine_passes)
-        else:
-          full = model.sample_infill_ca(left, r, gap_nt, args.num_steps)
+        r_all = right[:, :0]                 # empty suffix -> left-only
+      # CHUNKED over loci. right_mm is rolled over the FULL set before slicing,
+      # so a row still gets another locus's suffix regardless of chunk boundaries
+      # (rolling inside a chunk would hand a 1-row chunk its own suffix back).
+      # The seed is reset per chunk with a chunk-dependent but CONDITION-INDEPENDENT
+      # value, so ca/denovo/mismatch still see identical noise for the same loci --
+      # that pairing is what makes the contrast valid.
+      parts = []
+      for lo in range(0, len(loci), batch_size):
+        hi = min(lo + batch_size, len(loci))
+        torch.manual_seed(args.seed * 100003 + lo)
+        r_chunk = r_all[lo:hi] if r_all.shape[-1] else r_all[:hi - lo, :0]
+        with torch.inference_mode():
+          if args.refine_passes > 0:
+            out = model.sample_infill_refined(
+              left[lo:hi], r_chunk, gap_nt, args.num_steps,
+              passes=args.refine_passes)
+          else:
+            out = model.sample_infill_ca(
+              left[lo:hi], r_chunk, gap_nt, args.num_steps)
+        parts.append(out[:, :left_nt + gap_nt])
+        if len(loci) > 200 and (hi % (batch_size * 5) == 0 or hi == len(loci)):
+          print(f"    {cond}: {hi}/{len(loci)}", flush=True)
+      full = torch.cat(parts, dim=0)
       # the returned tail is whatever suffix was fed; splice the REAL right
       # flank back so every condition is scored on the same 16,384 window and
       # only the generated interior differs
-      recon = torch.cat((full[:, :left_nt + gap_nt], right), dim=1)
+      recon = torch.cat((full, right), dim=1)
       for i, l in enumerate(loci):
         gs, ge = l["start"] + left_nt, l["start"] + left_nt + gap_nt
         records.append({
@@ -309,13 +357,41 @@ def main():
   # rf=0.0 checkpoint be interpreted as "the suffix carries no information"
   # through an entire Task 2 campaign. Record it, and the whole model/algo
   # block, so a result can never again be read without knowing how it trained.
+  # PROVENANCE MUST COME FROM THE CHECKPOINT, NOT THE RUNTIME CONFIG.
+  # load_checkpoint_model (score_mavedb.py:60) deliberately sets
+  # `config.model.right_flank_probability = 0.0` for inference -- correct, since
+  # sample_infill_ca supplies the right cache explicitly rather than letting a
+  # Bernoulli gate drop it -- and it sets config.model.length to the GENERATION
+  # length. Reading either back as provenance reports the inference setting as
+  # though it were the training setting. Measured 2026-09-08: a checkpoint
+  # trained at rf=0.5, length 8192 was recorded as rf=0.0, trained_length=16384.
+  # rf=0.0 is precisely the value that signalled the original untrained-flank
+  # catastrophe, so this field was not merely wrong, it was maximally misleading.
+  _hp = torch.load(args.checkpoint, map_location="cpu",
+                   weights_only=False).get("hyper_parameters", {})
+  _tc = _hp.get("config", {})
+  _tm, _ta = _tc.get("model", {}), _tc.get("algo", {})
+  def _g(d, k, default=None):
+    return d.get(k, default) if hasattr(d, "get") else default
   prov = {
-    "right_flank_probability": float(config.model.get("right_flank_probability", 0.0)),
-    "time_conditioning": bool(config.algo.get("time_conditioning", False)),
-    "var_min": bool(config.algo.get("var_min", False)),
+    # what the model was TRAINED with (from the checkpoint's own hyper_parameters)
+    "right_flank_probability": _g(_tm, "right_flank_probability"),
+    "time_conditioning": _g(_ta, "time_conditioning"),
+    "var_min": _g(_ta, "var_min"),
+    "trained_length": _g(_tm, "length"),
+    "trained_block_size": _g(_tc, "block_size"),
+    "train_data": _g(_tc.get("data", {}) if hasattr(_tc, "get") else {}, "train"),
+    # what THIS generation run used
     "backbone": str(config.algo.backbone),
-    "trained_length": int(config.model.length),
+    "generation_length": LENGTH,
+    "inference_right_flank_probability": float(
+      config.model.get("right_flank_probability", 0.0)),
   }
+  if not prov["right_flank_probability"]:
+    print("WARNING: checkpoint trained with right_flank_probability="
+          f"{prov['right_flank_probability']!r} -- the suffix pathway was never "
+          "trained, so any ca-vs-mismatch contrast measures an untrained input "
+          "slot. See the 2026-09-07 root cause.", flush=True)
   print("provenance:", json.dumps(prov), flush=True)
   args.out.write_text(json.dumps({
     "checkpoint": str(args.checkpoint), "global_step": step,

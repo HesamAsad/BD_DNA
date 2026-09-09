@@ -143,6 +143,7 @@ PY
   LOG="logs/eval/ppl_ssm_${ARM}_${RUN_TAG}.log"
   "$PYTHON" -u main.py mode=ppl_eval \
     "${MODEL_ARGS[@]}" \
+    ${EXTRA_ARGS:-} \
     "${DATA_ARGS[@]}" \
     data.dna_num_files="$DNA_NUM_FILES" \
     data.dna_max_rows="$DNA_MAX_ROWS" \

@@ -47,6 +47,24 @@ echo "[`date`] DNA BD3-LM smoke test | host=$(hostname) | LSF=${LSB_JOBID:-local
 "$PYTHON" -c "import sys,torch; ok=torch.cuda.is_available(); print('torch',torch.__version__,'| cuda',ok,'| devices',torch.cuda.device_count()); sys.exit(0 if ok else 3)" \
   || { echo 'FATAL: torch sees no GPU. Use a +cu124 build matching the node driver (e.g. torch 2.6.0+cu124); a +cu126 build reports cuda=False on these nodes.'; exit 3; }
 
+
+# --- PREFLIGHT: the train cache must already exist -----------------------------
+# carbon-eukaryote10b_train_bs1024_wrapped_specialFalse.dat was deleted on
+# 2026-09-08 to recover quota. dataloader.py:504-508 does NOT fail when a cache
+# is missing -- it logs "Generating new data at:" and rebuilds, here a 10B-token
+# corpus, inside the training job. The validation twin survives, so validation
+# loads normally and only the train split rebuilds, which makes it easy to miss
+# in the log. Rebuilding inside a training job is what filled the quota in the
+# first place, so refuse instead.
+_CACHE=/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/data_cache/carbon/carbon-eukaryote10b_train_bs1024_wrapped_specialFalse.dat
+if [ ! -d "$_CACHE" ]; then
+  echo "FATAL: train cache missing: $_CACHE" >&2
+  echo "       Running anyway would silently rebuild the 10B-token corpus inside" >&2
+  echo "       this job. Rebuild it deliberately, or point at the subsampled" >&2
+  echo "       cache (dna_num_files=1 dna_max_rows=20000), which is present." >&2
+  exit 2
+fi
+
 "$PYTHON" -u main.py \
     model=small \
     algo=bd3lm \

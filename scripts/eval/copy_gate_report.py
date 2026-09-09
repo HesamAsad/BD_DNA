@@ -37,33 +37,51 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 FLOOR = math.log(4)          # 1.3863 nats, uniform over {A,C,G,T}
 PASS = 0.50                  # fraction of the floor that counts as learning
+# On the BACKWARD task only half the positions are reachable from the left, so a
+# left-only model lands near 0.50 -- exactly the forward threshold. Using 0.50
+# there would certify the failure the task exists to detect. Read backward runs
+# against ~0.5 (left-only) and ~1.0 (uses the right cache).
+PASS_BACKWARD = 0.75
+
+
+def _series(run_dir: Path):
+  """Every (step, val/nll) pair under this run, merged across ALL versions.
+
+  WHY MERGED. Taking only the largest metrics.csv was wrong as soon as a run
+  resumed: Lightning opens a NEW version_N on every process start, so after the
+  2026-09-08 quota kill version_0 held steps 0-2,366 and version_1 held the
+  continuation. Reading one file in isolation either loses the early history
+  (breaking steps-to-milestone) or reports a stale best from an aborted stub.
+
+  Duplicate steps keep the LOWEST value: a resumed run re-validates at the step
+  it restarts from, and the two readings disagree slightly.
+  """
+  pairs = {}
+  for path in sorted(glob.glob(str(run_dir / "**" / "metrics.csv"), recursive=True)):
+    try:
+      rows = list(csv.DictReader(open(path)))
+    except OSError:
+      continue
+    for row in rows:
+      value, step = row.get("val/nll"), row.get("step")
+      if not value or not step:
+        continue
+      try:
+        v, st = float(value), int(float(step))
+      except ValueError:
+        continue
+      if st not in pairs or v < pairs[st]:
+        pairs[st] = v
+  return sorted(pairs.items())
 
 
 def best_nll(run_dir: Path):
-  """Lowest val/nll across every metrics.csv under this run.
-
-  Takes the LARGEST metrics file when several exist: a restarted run leaves a
-  short aborted version_0 beside the real version_1, and picking the first by
-  name silently reports the stub. That mistake produced a nonsense arm ordering
-  earlier in this project.
-  """
-  best, steps, seen = None, None, 0
-  files = sorted(glob.glob(str(run_dir / "**" / "metrics.csv"), recursive=True),
-                 key=lambda p: Path(p).stat().st_size, reverse=True)
-  for path in files[:1]:
-    for row in csv.DictReader(open(path)):
-      value = row.get("val/nll")
-      if not value:
-        continue
-      seen += 1
-      try:
-        v = float(value)
-      except ValueError:
-        continue
-      if best is None or v < best:
-        best, steps = v, row.get("step")
-  return best, steps, seen
-
+  """Lowest val/nll across every metrics.csv under this run, and its step."""
+  series = _series(run_dir)
+  if not series:
+    return None, None, 0
+  step, best = min(series, key=lambda kv: kv[1])
+  return best, step, len(series)
 
 
 def milestones(run_dir: Path, marks=(0.25, 0.50, 0.75)):
@@ -88,11 +106,15 @@ def milestones(run_dir: Path, marks=(0.25, 0.50, 0.75)):
   candidate that halves the steps needed at a given distance is real progress
   even when it flips no pass/fail bit.
   """
-  files = sorted(glob.glob(str(run_dir / "**" / "metrics.csv"), recursive=True),
-                 key=lambda p: Path(p).stat().st_size, reverse=True)
   hit = {m: None for m in marks}
-  if not files:
-    return hit
+  best = None
+  for st, v in _series(run_dir):
+    best = v if best is None else min(best, v)
+    rec = 1.0 - best / FLOOR
+    for m in marks:
+      if hit[m] is None and rec >= m:
+        hit[m] = st
+  return hit
   best = None
   for row in csv.DictReader(open(files[0])):
     v, st = row.get("val/nll"), row.get("step")
@@ -131,10 +153,22 @@ def main():
     description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   ap.add_argument("--tag", action="append", required=True, help="repeatable")
   ap.add_argument("--root", type=Path, default=REPO / "results" / "copy_gate")
+  # Referenced by the threshold choice below but never defined until
+  # 2026-09-08, so every invocation died with AttributeError. Defaults to
+  # auto: a tag containing "backward" is read against the 0.75 bar.
+  ap.add_argument("--direction", choices=("auto", "forward", "backward"),
+                  default="auto")
   args = ap.parse_args()
+  if args.direction == "auto":
+    args.direction = ("backward"
+                      if any("backward" in t for t in args.tag)
+                      else "forward")
 
+  thresh = PASS_BACKWARD if args.direction == "backward" else PASS
+  if args.direction == "backward":
+    print("BACKWARD task: left-only ceiling is ~0.50, bidirectional ~1.00.")
   print(f"uniform floor = ln4 = {FLOOR:.4f} nats;  "
-        f"recovered = 1 - nll/ln4;  PASS at {PASS:.2f}\n")
+        f"recovered = 1 - nll/ln4;  PASS at {thresh:.2f}\n")
   ranges = {}
   for tag in args.tag:
     root = args.root / tag
@@ -154,8 +188,8 @@ def main():
               f"{detail or f'no val/nll yet ({seen} rows)'}")
         continue
       rec = 1.0 - nll / FLOOR
-      verdict = "PASS" if rec > PASS else "fail"
-      if rec > PASS:
+      verdict = "PASS" if rec > thresh else "fail"
+      if rec > thresh:
         passed.append(D)
       ms = milestones(d)
       reach = " ".join(f"{int(m*100)}%@{ms[m]:,}" for m in sorted(ms) if ms[m])
@@ -172,7 +206,7 @@ def main():
               f"reading anything into the long offsets.")
       else:
         print(f"\n  copy range: {max(passed)} nt "
-              f"(largest offset recovered above {PASS:.0%})")
+              f"(largest offset recovered above {thresh:.0%})")
     else:
       print("\n  copy range: NONE -- not even the shortest offset was learned")
     # The scaling of transition onset with distance is the real measurement.

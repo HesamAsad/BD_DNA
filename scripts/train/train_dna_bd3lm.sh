@@ -51,6 +51,24 @@ nvidia-smi --query-gpu=index,name,memory.total --format=csv
 # ~70GB/GPU. (BATCH=128 OOMs the 141GB H200.) To push memory use further, try
 # BATCH=96 with loader.global_batch_size=384 (accumulate=1, ~100GB, but a
 # smaller effective batch).
+
+# --- PREFLIGHT: the train cache must already exist -----------------------------
+# carbon-eukaryote10b_train_bs1024_wrapped_specialFalse.dat was deleted on
+# 2026-09-08 to recover quota. dataloader.py:504-508 does NOT fail when a cache
+# is missing -- it logs "Generating new data at:" and rebuilds, here a 10B-token
+# corpus, inside the training job. The validation twin survives, so validation
+# loads normally and only the train split rebuilds, which makes it easy to miss
+# in the log. Rebuilding inside a training job is what filled the quota in the
+# first place, so refuse instead.
+_CACHE=/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/data_cache/carbon/carbon-eukaryote10b_train_bs1024_wrapped_specialFalse.dat
+if [ ! -d "$_CACHE" ]; then
+  echo "FATAL: train cache missing: $_CACHE" >&2
+  echo "       Running anyway would silently rebuild the 10B-token corpus inside" >&2
+  echo "       this job. Rebuild it deliberately, or point at the subsampled" >&2
+  echo "       cache (dna_num_files=1 dna_max_rows=20000), which is present." >&2
+  exit 2
+fi
+
 "$PYTHON" -u main.py \
     model=small \
     algo=bd3lm \

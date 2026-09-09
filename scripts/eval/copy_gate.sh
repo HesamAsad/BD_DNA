@@ -39,7 +39,9 @@ cd "$REPO"
 PYTHON=${PYTHON:-/software/cellgen/team361/ha11/envs/nichejepa/bin/python}
 
 # --- what to test -----------------------------------------------------------
-MODEL=${MODEL:-small}
+MODEL=${MODEL:-small_bissm}   # small.yaml (DiT) has no right_flank_probability;
+                              # overriding it there fails, and omitting it silently
+                              # gives rf=0.0 via diffusion.py:1241 .get(...,0.0)
 # Use the dedicated configs (bd3lm_bissm / bd3lm_ussm): they set
 # cross_attn=False, which the recurrent backbones REQUIRE. Passing
 # `algo=bd3lm algo.backbone=bissm` leaves cross_attn=True and every run dies
@@ -58,6 +60,12 @@ MAX_STEPS=${MAX_STEPS:-3000}
 N_TRAIN=${N_TRAIN:-2048}
 N_VAL=${N_VAL:-256}
 NUM_WORKERS=${NUM_WORKERS:-2}
+# DIRECTION=backward builds x[:D]=x[D:2D], whose target half is reachable ONLY
+# from the right cache. It needs L=2D exactly (any longer makes the pattern
+# periodic and reopens a leftward route), and RIGHT_FLANK_PROBABILITY>0 or the
+# model is never given the cache the task requires.
+DIRECTION=${DIRECTION:-forward}
+RIGHT_FLANK_PROBABILITY=${RIGHT_FLANK_PROBABILITY:-0.0}
 # The DiT needs an attention backend and rejects the config default
 # (flash_attn) on the block-diffusion path; every working arm in this repo
 # uses flex. The recurrent backbones ignore this, so it is safe to always
@@ -101,13 +109,27 @@ done
 
 echo "copy gate | tag=$TAG model=$MODEL algo=$ALGO backbone=${BACKBONE:-<from algo config>}"
 echo "  offsets: $OFFSETS   L=$LENGTH block=$BLOCK_SIZE steps=$MAX_STEPS"
+echo "  direction=$DIRECTION  right_flank_probability=$RIGHT_FLANK_PROBABILITY"
+if [ "$DIRECTION" = "backward" ] && [ "$RIGHT_FLANK_PROBABILITY" = "0.0" ]; then
+  echo "ERROR: backward needs RIGHT_FLANK_PROBABILITY>0; the task is unsolvable" >&2
+  echo "       without a right cache and the run would only measure the floor." >&2
+  exit 2
+fi
 echo "  results -> $OUT"
 
 for D in $OFFSETS; do
-  if [ "$D" -ge $((LENGTH / 2)) ]; then
-    echo "  skip D=$D: needs LENGTH > 2*D for a duplicated tail"; continue
+  # Per-iteration length. Do NOT mutate LENGTH: the backward override below
+  # would then leak into the next offset's skip test and silently drop rungs.
+  if [ "$DIRECTION" = "backward" ]; then
+    L=$((2 * D))               # the builder enforces L=2D; longer makes the
+                               # pattern periodic and reopens a leftward route
+  else
+    L=$LENGTH
+    if [ "$D" -ge $((L / 2)) ]; then
+      echo "  skip D=$D: needs LENGTH > 2*D for a duplicated tail"; continue
+    fi
   fi
-  NAME="copyD${D}L${LENGTH}"
+  NAME="copyD${D}L${L}${DIRECTION:+_$DIRECTION}"
   # The dataset is built INSIDE the job, not here. Building on the head node
   # is OOM-killed at the default 8,192 sequences of 16,384 nt, and the failure
   # is easy to miss: it lands in a `|| continue` and the loop marches on having
@@ -143,7 +165,12 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # serialises the build: the loser waits for the winner instead of racing it.
 # NOTE the backslashes: this text is written through an unquoted heredoc, so
 # anything meant to run in the JOB must escape its $.
-DATASET="$CACHE/${NAME}_train_bs${LENGTH}_wrapped_specialFalse.dat"
+# ${L}, not ${LENGTH}: backward rungs override the length per offset, so the
+# global would name a bs8192 cache that never exists. The lock branch was then
+# entered unconditionally and a concurrent resubmit slept the full 60 min
+# waiting for a dataset under the wrong name. Same LENGTH-vs-L trap as the
+# skip test above.
+DATASET="$CACHE/${NAME}_train_bs${L}_wrapped_specialFalse.dat"
 LOCK="$CACHE/${NAME}.buildlock"
 if [ ! -d "\$DATASET" ]; then
   if mkdir "\$LOCK" 2>/dev/null; then
@@ -154,17 +181,19 @@ if [ ! -d "\$DATASET" ]; then
     while [ ! -d "\$DATASET" ] && [ "\$n" -lt 240 ]; do sleep 15; n=\$((n+1)); done
   fi
 fi
-if [ ! -d "$CACHE/${NAME}_train_bs${LENGTH}_wrapped_specialFalse.dat" ]; then
+if [ ! -d "$CACHE/${NAME}_train_bs${L}_wrapped_specialFalse.dat" ]; then
   echo "building $NAME"
   $PYTHON -u scripts/eval/gen_synthetic_duplication.py \\
-    --offset $D --length $LENGTH --name $NAME --cache_dir $CACHE \\
+    --offset $D --length $L --name $NAME --cache_dir $CACHE \\
+    --direction $DIRECTION \\
     --n_train $N_TRAIN --n_val $N_VAL || { echo "BUILD FAILED D=$D"; exit 1; }
 fi
 $PYTHON -u main.py mode=train \\
   model=$MODEL algo=$ALGO ${BACKBONE:+algo.backbone=$BACKBONE} \\
   data=carbon-prokaryote data.train=$NAME data.valid=$NAME \\
   data.dna_num_files=null \\
-  model.length=$LENGTH block_size=$BLOCK_SIZE \\
+  model.length=$L block_size=$BLOCK_SIZE \\
+  model.right_flank_probability=$RIGHT_FLANK_PROBABILITY \\
   model.attn_backend=$ATTN \\
   ++model.ssm_attn_every=$ATTN_EVERY ++model.ssm_attn_stride=$ATTN_STRIDE \\
   ++model.ssm_attn_zero_init=$ZERO_INIT ++model.ssm_attn_locality=$LOCALITY ++model.active_blocks=$ACTIVE_BLOCKS \\
