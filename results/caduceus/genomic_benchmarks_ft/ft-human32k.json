@@ -1,0 +1,105 @@
+{
+  "backbone": "bissm",
+  "backbone_lr": 1e-05,
+  "caduceus_ph_mean_published": 0.8660000000000001,
+  "checkpoint": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/outputs/carbon-prokaryote/2026.08.19/dna-bd3lm-bi-mamba2-lr3e-4-b20.95-wd0.1-rf0.0-a16.0-dt0.1-N64-L32768-human-lr32768v3-114552/checkpoints/1-2000.ckpt",
+  "checkpoint_global_step": 2000,
+  "epochs": 4,
+  "head_lr": 0.001,
+  "label": "ft-human32k",
+  "mean_accuracy": 0.8308419341198133,
+  "note": "Published values are transcribed from arXiv:2403.03234, not reproduced here. Caduceus is 131k-context and RC-equivariant; this is 8k-context and not RC-equivariant, so a residual gap is expected even with the protocol matched.",
+  "pooling": "mean",
+  "pretraining_data": "human-lr32768v3",
+  "protocol": "full fine-tune, matching Caduceus Table 3",
+  "tasks": [
+    {
+      "accuracy": 0.7892561983471075,
+      "best_epoch": 1,
+      "caduceus_ph_published": 0.754,
+      "delta": 0.03525619834710747,
+      "minutes": 3.5718573848406474,
+      "num_classes": 2,
+      "task": "dummy_mouse_enhancers_ensembl",
+      "val_accuracy": 0.7916666666666666,
+      "window": 4864
+    },
+    {
+      "accuracy": 0.8955,
+      "best_epoch": 1,
+      "caduceus_ph_published": 0.915,
+      "delta": -0.019500000000000073,
+      "minutes": 17.819587298234303,
+      "num_classes": 2,
+      "task": "demo_coding_vs_intergenomic_seqs",
+      "val_accuracy": 0.904,
+      "window": 256
+    },
+    {
+      "accuracy": 0.954375,
+      "best_epoch": 2,
+      "caduceus_ph_published": 0.973,
+      "delta": -0.018625000000000003,
+      "minutes": 17.77707056204478,
+      "num_classes": 2,
+      "task": "demo_human_or_worm",
+      "val_accuracy": 0.965,
+      "window": 256
+    },
+    {
+      "accuracy": 0.727979274611399,
+      "best_epoch": 1,
+      "caduceus_ph_published": 0.747,
+      "delta": -0.019020725388601,
+      "minutes": 19.53741405804952,
+      "num_classes": 2,
+      "task": "human_enhancers_cohn",
+      "val_accuracy": 0.732,
+      "window": 512
+    },
+    {
+      "accuracy": 0.819125,
+      "best_epoch": 3,
+      "caduceus_ph_published": 0.893,
+      "delta": -0.07387500000000002,
+      "minutes": 19.346857130527496,
+      "num_classes": 2,
+      "task": "human_enhancers_ensembl",
+      "val_accuracy": 0.806,
+      "window": 768
+    },
+    {
+      "accuracy": 0.812125,
+      "best_epoch": 3,
+      "caduceus_ph_published": 0.872,
+      "delta": -0.05987500000000001,
+      "minutes": 21.253667402267457,
+      "num_classes": 3,
+      "task": "human_ensembl_regulatory",
+      "val_accuracy": 0.8085,
+      "window": 1024
+    },
+    {
+      "accuracy": 0.935875,
+      "best_epoch": 3,
+      "caduceus_ph_published": 0.946,
+      "delta": -0.01012499999999994,
+      "minutes": 18.44067860841751,
+      "num_classes": 2,
+      "task": "human_nontata_promoters",
+      "val_accuracy": 0.9385,
+      "window": 256
+    },
+    {
+      "accuracy": 0.7125,
+      "best_epoch": 1,
+      "caduceus_ph_published": 0.828,
+      "delta": -0.11549999999999994,
+      "minutes": 19.295085688432057,
+      "num_classes": 2,
+      "task": "human_ocr_ensembl",
+      "val_accuracy": 0.7165,
+      "window": 768
+    }
+  ]
+}

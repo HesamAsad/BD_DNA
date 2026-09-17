@@ -1,0 +1,118 @@
+{
+  "assays": [
+    {
+      "abs_spearman": 0.08653565826407333,
+      "n": 1521,
+      "score_set_urn": "urn:mavedb:00000122-0-1",
+      "spearman": 0.08653565826407333,
+      "target": "argR",
+      "title": "argR combined scores"
+    },
+    {
+      "abs_spearman": 0.046056645289027406,
+      "n": 1481,
+      "score_set_urn": "urn:mavedb:00000160-0-1",
+      "spearman": 0.046056645289027406,
+      "target": "cspA",
+      "title": "cspA combined scores"
+    },
+    {
+      "abs_spearman": 0.0023515775091716685,
+      "n": 1499,
+      "score_set_urn": "urn:mavedb:00000161-0-1",
+      "spearman": 0.0023515775091716685,
+      "target": "cspA (G17A)",
+      "title": "cspA (G17A) combined scores"
+    },
+    {
+      "abs_spearman": 0.014756845669709188,
+      "n": 1500,
+      "score_set_urn": "urn:mavedb:00000162-0-1",
+      "spearman": -0.014756845669709188,
+      "target": "cspA (L43S)",
+      "title": "cspA (L43S) combined scores"
+    },
+    {
+      "abs_spearman": 0.5234422499220382,
+      "n": 2079,
+      "score_set_urn": "urn:mavedb:00000213-0-1",
+      "spearman": 0.5234422499220382,
+      "target": "sucB",
+      "title": "sucB combined scores"
+    },
+    {
+      "abs_spearman": 0.0054547337420545764,
+      "n": 2244,
+      "score_set_urn": "urn:mavedb:00000214-0-1",
+      "spearman": -0.0054547337420545764,
+      "target": "nusA",
+      "title": "nusA combined scores"
+    },
+    {
+      "abs_spearman": 0.3731627520700455,
+      "n": 1070,
+      "score_set_urn": "urn:mavedb:00000230-0-1",
+      "spearman": 0.3731627520700455,
+      "target": "sucB",
+      "title": "sucB combined scores"
+    },
+    {
+      "abs_spearman": 0.03977933841991729,
+      "n": 2165,
+      "score_set_urn": "urn:mavedb:00000233-0-1",
+      "spearman": -0.03977933841991729,
+      "target": "FecA",
+      "title": "FecA combined scores"
+    },
+    {
+      "abs_spearman": 0.08076949938376796,
+      "n": 2593,
+      "score_set_urn": "urn:mavedb:00000282-0-1",
+      "spearman": -0.08076949938376796,
+      "target": "yaiA",
+      "title": "yaiA combined scores"
+    },
+    {
+      "abs_spearman": 0.016746269938249837,
+      "n": 2526,
+      "score_set_urn": "urn:mavedb:00000369-0-1",
+      "spearman": 0.016746269938249837,
+      "target": "exbD",
+      "title": "exbD combined scores"
+    },
+    {
+      "abs_spearman": 0.30660381662386316,
+      "n": 1115,
+      "score_set_urn": "urn:mavedb:00000383-0-1",
+      "spearman": 0.30660381662386316,
+      "target": "sucB",
+      "title": "sucB combined scores"
+    },
+    {
+      "abs_spearman": 0.02854200926724377,
+      "n": 1457,
+      "score_set_urn": "urn:mavedb:00000630-0-1",
+      "spearman": -0.02854200926724377,
+      "target": "CspA",
+      "title": "CspA combined scores"
+    }
+  ],
+  "backbone": "bissm",
+  "block_size": 128,
+  "checkpoint": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/outputs/carbon-prokaryote/bissm-blocksweep-20260813-v1/blk128/checkpoints/0-8000.ckpt",
+  "checkpoint_global_step": 8000,
+  "epsilon": 0.001,
+  "headline_metric": "macro mean absolute per-assay Spearman",
+  "label": "bissm-blk128",
+  "macro_abs_spearman": 0.1270167830082635,
+  "mc_samples": 128,
+  "model_length": 512,
+  "num_assays": 12,
+  "num_variants": 21250,
+  "parameterization": "subs",
+  "pooled_abs_spearman": 0.14311639066896162,
+  "pooled_spearman": 0.14311639066896162,
+  "requested_mc_samples": 128,
+  "score_definition": "paired NELBO(WT) - paired NELBO(mutant)",
+  "seed": 2
+}

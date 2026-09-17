@@ -1,0 +1,28 @@
+{
+  "assays": [
+    {
+      "abs_spearman": 0.5714285714285715,
+      "n": 8,
+      "score_set_urn": "urn:mavedb:00000122-0-1",
+      "spearman": -0.5714285714285715,
+      "target": "argR",
+      "title": "argR combined scores"
+    }
+  ],
+  "backbone": "bissm",
+  "block_size": 256,
+  "checkpoint": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/outputs/carbon-prokaryote/2026.08.03/162751/checkpoints/0-8000-v1.ckpt",
+  "checkpoint_global_step": 8000,
+  "epsilon": 0.001,
+  "headline_metric": "macro mean absolute per-assay Spearman",
+  "label": "bissm_smoke",
+  "macro_abs_spearman": 0.5714285714285715,
+  "mc_samples": 1,
+  "model_length": 256,
+  "num_assays": 1,
+  "num_variants": 8,
+  "pooled_abs_spearman": 0.5714285714285715,
+  "pooled_spearman": -0.5714285714285715,
+  "score_definition": "NELBO(WT) - NELBO(mutant)",
+  "seed": 1
+}

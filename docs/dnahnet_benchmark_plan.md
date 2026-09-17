@@ -8,8 +8,12 @@ protocol-aligned rather than data- or compute-matched unless explicitly stated.
 
 ## Headline deliverables
 
-1. MaveDB E. coli K-12 variant-effect prediction: absolute Spearman correlation
-   from WT-versus-mutant likelihood differences.
+1. MaveDB E. coli K-12 variant-effect prediction: **signed** macro per-assay
+   Spearman from WT-versus-mutant scores. Absolute Spearman is still reported
+   for comparability with runs predating 2026-09-13, but it is not the headline:
+   it credits an anti-correlated assay as skill, and all 12 assays share one
+   direction, so taking `abs()` inflates the block-diffusion arms about 1.5x
+   against 1.13x for the autoregressive ones -- it NARROWS a real gap.
 2. DEG gene essentiality: AUROC from WT-versus-15-bp-stop likelihood
    differences in 8,192-nt gene-centred windows. Protocol, assumptions,
    baselines and cost are in `docs/deg_benchmark_plan.md`; the harness is
@@ -83,8 +87,40 @@ The scorer pads each short coding target to one 256-nt diffusion block with
 `N`, excludes padding and the repository's ignored first position from the
 score, and evaluates `NELBO(WT) - NELBO(mutant)`. WT and mutant share the same
 time and corruption mask for each Monte Carlo sample. It reports per-assay
-Spearman, macro mean absolute Spearman (headline), and pooled Spearman so the
-paper's otherwise unspecified aggregation choice remains auditable.
+Spearman, macro mean **signed** Spearman (headline), macro mean absolute
+Spearman (legacy), the count of anti-correlated assays, and pooled Spearman, so
+the paper's otherwise unspecified aggregation choice remains auditable.
+
+**Scoring modes.** `--score-mode` selects the estimator, and the choice matters
+more than any model difference measured here:
+
+- `nelbo` (default): the training objective's paired Monte Carlo bound. The
+  harness default is now **128** samples, not 8. The measured curve on BiSSM-BD
+  is 0.0966 (8) -> 0.1242 (32) -> 0.1318 (64) -> 0.1360 (128), so the old
+  default understated every block-diffusion arm by about 0.04, roughly a third
+  of its signal. Costs ~3h21m per run at L=512.
+- `pll`: deterministic pseudo-log-likelihood, one masked position at a time.
+- `infill_nt` / `infill_codon`: **Score I**, the masked infilling preference.
+  Mask what the variant changed, one forward pass, read which spelling the model
+  prefers. Deterministic, no Monte Carlo, and no length confound because only
+  the changed positions contribute. `infill_codon` marginalises to amino acids,
+  so a synonymous change contributes exactly zero.
+- `state_displacement`: Score II's cheap premise test -- how far the variant
+  moves the SSM recurrent summary. Uses `prefill_right`, deliberately: the
+  mutations sit a median 171 nt from the 3' end, which a left prefill would
+  attenuate by ~2^-37 and report as a null.
+
+**What the numbers must be read against.** A zero-parameter baseline that counts
+amino-acid events in `hgvs_pro` reaches macro signed rho **+0.30931** and points
+the right way on 12 of 12 assays -- above every model in this repo and above
+dnaHNet's published 0.3266. Counting non-synonymous codon changes reaches
+**+0.337**. Measured on the 19,349 length-preserving pairs, the median variant
+changes 13 nucleotides across 11 codons but only **1** amino acid, leaving a
+median of 10 synonymous codon changes, so nucleotide-level scoring is diluted
+roughly 10:1 by changes the assay cannot see. Every run now emits the protein
+baseline into its own `summary.json`, and `partial_corr.py` controls for it.
+uSSM-AR keeps +0.20548 of its +0.21644 partial rho once both counting families
+are removed, which is the evidence that its signal is not merely a count.
 
 Run at least two independent seeds, then average their per-variant likelihood
 differences and record the between-seed agreement:

@@ -1,0 +1,121 @@
+{
+  "assays": [
+    {
+      "abs_spearman": 0.053843920093447926,
+      "n": 1521,
+      "score_set_urn": "urn:mavedb:00000122-0-1",
+      "spearman": 0.053843920093447926,
+      "target": "argR",
+      "title": "argR combined scores"
+    },
+    {
+      "abs_spearman": 0.039101604235404305,
+      "n": 1481,
+      "score_set_urn": "urn:mavedb:00000160-0-1",
+      "spearman": 0.039101604235404305,
+      "target": "cspA",
+      "title": "cspA combined scores"
+    },
+    {
+      "abs_spearman": 0.026564237306401863,
+      "n": 1499,
+      "score_set_urn": "urn:mavedb:00000161-0-1",
+      "spearman": -0.026564237306401863,
+      "target": "cspA (G17A)",
+      "title": "cspA (G17A) combined scores"
+    },
+    {
+      "abs_spearman": 0.04600666222518322,
+      "n": 1500,
+      "score_set_urn": "urn:mavedb:00000162-0-1",
+      "spearman": -0.04600666222518322,
+      "target": "cspA (L43S)",
+      "title": "cspA (L43S) combined scores"
+    },
+    {
+      "abs_spearman": 0.4743202284828849,
+      "n": 2079,
+      "score_set_urn": "urn:mavedb:00000213-0-1",
+      "spearman": 0.4743202284828849,
+      "target": "sucB",
+      "title": "sucB combined scores"
+    },
+    {
+      "abs_spearman": 0.0036292157200274967,
+      "n": 2244,
+      "score_set_urn": "urn:mavedb:00000214-0-1",
+      "spearman": 0.0036292157200274967,
+      "target": "nusA",
+      "title": "nusA combined scores"
+    },
+    {
+      "abs_spearman": 0.33196274514456825,
+      "n": 1070,
+      "score_set_urn": "urn:mavedb:00000230-0-1",
+      "spearman": 0.33196274514456825,
+      "target": "sucB",
+      "title": "sucB combined scores"
+    },
+    {
+      "abs_spearman": 0.0926739435886807,
+      "n": 2165,
+      "score_set_urn": "urn:mavedb:00000233-0-1",
+      "spearman": -0.0926739435886807,
+      "target": "FecA",
+      "title": "FecA combined scores"
+    },
+    {
+      "abs_spearman": 0.05725352711123146,
+      "n": 2593,
+      "score_set_urn": "urn:mavedb:00000282-0-1",
+      "spearman": -0.05725352711123146,
+      "target": "yaiA",
+      "title": "yaiA combined scores"
+    },
+    {
+      "abs_spearman": 0.060820235225003516,
+      "n": 2526,
+      "score_set_urn": "urn:mavedb:00000369-0-1",
+      "spearman": 0.060820235225003516,
+      "target": "exbD",
+      "title": "exbD combined scores"
+    },
+    {
+      "abs_spearman": 0.2858156122304199,
+      "n": 1115,
+      "score_set_urn": "urn:mavedb:00000383-0-1",
+      "spearman": 0.2858156122304199,
+      "target": "sucB",
+      "title": "sucB combined scores"
+    },
+    {
+      "abs_spearman": 0.014771956861867639,
+      "n": 1457,
+      "score_set_urn": "urn:mavedb:00000630-0-1",
+      "spearman": 0.014771956861867639,
+      "target": "CspA",
+      "title": "CspA combined scores"
+    }
+  ],
+  "headline_metric": "macro mean absolute per-assay Spearman",
+  "label": "Transformer",
+  "macro_abs_spearman": 0.12389699068542677,
+  "num_assays": 12,
+  "num_independent_runs": 2,
+  "num_variants": 21250,
+  "pooled_abs_spearman": 0.04549502926770435,
+  "pooled_spearman": 0.04549502926770435,
+  "prediction_runs": [
+    "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/results/dnahnet/mavedb/transformer-98851/predictions.csv",
+    "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/results/dnahnet/mavedb/transformer_seed2-98857/predictions.csv"
+  ],
+  "run_agreements": [
+    {
+      "left_run": 0,
+      "mean_absolute_score_delta": 4.329342912167398,
+      "prediction_spearman": 0.4783659488219268,
+      "right_run": 1
+    }
+  ],
+  "score_definition": "mean of paired NELBO(WT) - NELBO(mutant) runs"
+}

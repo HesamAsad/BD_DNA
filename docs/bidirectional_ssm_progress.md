@@ -340,7 +340,7 @@ Every arm below is now scored on raw (non-EMA) weights from the fixed-budget
 
 | arm | val NLL | PPL | MaveDB signed rho | MaveDB abs rho | neg assays | wall clock (fit / train-only) | LSF |
 |---|---:|---:|---:|---:|---:|---:|---|
-| uSSM-AR | **1.19305** | 3.2971 | **+0.26410** | 0.29781 | 2/12 | 2h33m / 2h17m | 105320 |
+| uSSM-AR | **1.19305** | 3.2971 | **+0.26410** | 0.29777 | 2/12 | 2h33m / 2h17m | 105320 |
 | Transformer-AR | 1.19864 | 3.3156 | +0.18803 | 0.22017 | 2/12 | 2h11m / -- | 20260808-v1 |
 | Transformer-BD | **1.24653** | 3.4782 | **+0.09056** | 0.14123 | 6/12 | 3h37m / 3h26m | 103661 |
 | BiSSM-BD | 1.24749 | 3.4816 | +0.08519 | 0.13330 | 5/12 | 5h41m / 4h53m | 103297 |
@@ -355,8 +355,18 @@ direction (BLOSUM62 exchangeability positive in all 12, z = +3.9 to +10.4), so t
 should not be discarded. Absolute inflates the BD arms ~1.5x and the AR arms only 1.13x,
 so the AR-over-BD gap is WIDER than the abs column suggests.
 
+> **uSSM-AR's MaveDB figure is 0.29777, not the 0.29781 earlier revisions quoted.**
+> The exact-AR path draws no random numbers, so its "two-seed ensemble" averaged
+> nothing: three of the four stored runs are byte-identical at 0.29777 and the
+> fourth (`ussm-ar-bf16-mc32-seed2`) is a non-reproducible artifact scoring
+> 0.29785. See `results/dnahnet/mavedb/ussm-ar-bf16-mc32-seed2/QUARANTINE.md`.
+> The change is 4e-5 and moves no conclusion, but the "seed spread" it implied
+> was not seed variance.
+
+
+
 **A zero-parameter feature beats every model we have.** Counting variant events parsed
-from `hgvs_pro` scores 0.30931 -- above uSSM-AR's 0.29781, below dnaHNet's 0.3266. The
+from `hgvs_pro` scores 0.30931 -- above uSSM-AR's 0.29777, below dnaHNet's 0.3266. The
 benchmark is substantially measuring how many mutations a variant carries. Any MaveDB
 number must be reported next to this baseline. (An earlier internal figure of 0.3649 was
 a mis-parse: the regex `[A-Z][a-z]{2}\d+` produces only three distinct values across all
@@ -368,7 +378,7 @@ dnaHNet's smallest budget". That is the 6ND *reference* value and it is true onl
 uSSM-AR, which actually sits at 2.652e18 (0.33x of dnaHNet's 8e18). The real values run
 from 2.652e18 (uSSM-AR) to 8.194e18 (Transformer-BD), and Transformer-BD therefore
 *exceeds* dnaHNet's smallest budget of 8e18 while scoring 0.14123 against their 0.2601.
-The compute-efficiency claim belongs to uSSM-AR alone: 0.29781 at a third of that
+The compute-efficiency claim belongs to uSSM-AR alone: 0.29777 at a third of that
 budget. uSSM-AR is also the only arm using dnaHNet's exact estimator, so it is the only
 directly comparable row.
 
@@ -410,7 +420,7 @@ unaffected.
 MaveDB is MC-32, two seeds ensembled per-variant before Spearman, matching the
 recorded protocol. Every retrained checkpoint reproduces its published MaveDB
 number to within 0.003 (BiSSM 0.13330 vs 0.13174, Transformer 0.14123 vs
-0.13907, uSSM-BD 0.10891 vs 0.11145, uSSM-AR 0.29781 vs 0.29870), so none of
+0.13907, uSSM-BD 0.10891 vs 0.11145, uSSM-AR 0.29777 vs 0.29870), so none of
 the four confounds touched variant effect -- they were a likelihood-measurement
 problem. Note MC count matters more than the fixes did: at MC-8 uSSM-BD scored
 0.069 against 0.095 at MC-32.

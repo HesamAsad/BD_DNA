@@ -3,7 +3,17 @@
 .hf_cache
 test/
 outputs/
-results/
+# Results: the JSON summaries ARE the evidence for every reported number and are
+# small (1.9 MB total), so they are tracked. The per-variant predictions.csv
+# files are 524 MB across 63 MaveDB runs and stay out; anyone can regenerate
+# them with scripts/eval/dnahnet/mavedb_score.sh.
+# The `!results/**/` line re-includes DIRECTORIES so git can descend into them --
+# without it a negation on a file below an ignored directory has no effect.
+results/**
+!results/**/
+!results/caduceus/genomic_benchmarks_ft/*.json
+!results/dnahnet/mavedb/*/summary.json
+results/dnahnet/mavedb/*/predictions.csv
 wandb/
 watch_folder/
 notes.md

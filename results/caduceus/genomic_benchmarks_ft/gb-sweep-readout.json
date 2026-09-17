@@ -1,0 +1,651 @@
+{
+  "args": {
+    "backbone_lr": 1e-05,
+    "batch_size": 128,
+    "checkpoint": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/outputs/carbon-prokaryote/2026.08.18/dna-bd3lm-bi-mamba2-lr3e-4-b20.95-wd0.1-rf0.0-a16.0-dt0.1-N64-L8192-human-lr8192v2-114010/checkpoints/1-8000.ckpt",
+    "clip": 1.0,
+    "clip_mode": "per-group",
+    "dropout": 0.0,
+    "epochs": 10,
+    "eval_batch_size": 32,
+    "evals_per_epoch": 4,
+    "head_layernorm": true,
+    "head_lr": 0.001,
+    "head_warmup_steps": 200,
+    "honour_no_weight_decay": false,
+    "label": "gb-sweep-readout",
+    "layer": -1,
+    "log_length": false,
+    "max_test": 8000,
+    "max_train": 20000,
+    "output_dir": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/results/caduceus/genomic_benchmarks_ft",
+    "pad_multiple": 8,
+    "pad_side": "right",
+    "pad_to": "batch",
+    "pad_token": "N",
+    "patience": 8,
+    "pooling": "mean",
+    "preset": "v2",
+    "rc_aug": 0.0,
+    "rc_average": "prob",
+    "rc_tta": false,
+    "scheduler": "cosine",
+    "seed": 0,
+    "seed_list": [
+      0
+    ],
+    "seeds": "0",
+    "slow_encode": false,
+    "stratified_val": true,
+    "sweep": "layer=6,9,12;pooling=mean,max,meanmax",
+    "sweep_seeds": 1,
+    "tasks": "human_ocr_ensembl,human_enhancers_ensembl,human_ensembl_regulatory,human_enhancers_cohn",
+    "val_fraction": 0.1,
+    "warmup_frac": 0.05,
+    "weight_decay": 0.1,
+    "window": "auto",
+    "window_cap": 8192,
+    "window_from": "full"
+  },
+  "backbone": "bissm",
+  "caduceus_no_equiv_mean_published": 0.82825,
+  "caduceus_ph_mean_published": 0.835,
+  "caduceus_ps_mean_published": 0.8340000000000001,
+  "checkpoint": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/outputs/carbon-prokaryote/2026.08.18/dna-bd3lm-bi-mamba2-lr3e-4-b20.95-wd0.1-rf0.0-a16.0-dt0.1-N64-L8192-human-lr8192v2-114010/checkpoints/1-8000.ckpt",
+  "checkpoint_global_step": 8000,
+  "delta_ph": -0.07796842616580313,
+  "delta_ps": -0.07696842616580324,
+  "label": "gb-sweep-readout",
+  "mean_accuracy": 0.7570315738341968,
+  "note": "Published values are transcribed from arXiv:2403.03234 Table 1, not reproduced here. The GenomicBenchmarks row of that table is a 470K-parameter, 1k-context model (App. D.1; the released wrapper loads caduceus-ph_seqlen-1k_d_model-118_n_layer-4), so we are comparing a ~100.7M-parameter 8k-context model against one 214x smaller -- the capacity advantage is OURS and no gap is 'expected' from scale or context. Quote the comparison against Caduceus-PS (0.8690 mean), the stronger of their two variants, not Caduceus-Ph (0.8660). Their own 'w/o equivariance' column (0.8618) is the same backbone class as ours, which bounds everything reverse-complement handling can buy on this suite at +0.004 (Ph) to +0.007 (PS).",
+  "preset": "v2",
+  "pretraining_data": "human-lr8192v2",
+  "protocol": "full fine-tune, Caduceus Table 1 protocol",
+  "tasks": [
+    {
+      "accuracy": 0.69825,
+      "accuracy_per_seed": [
+        0.69825
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        4
+      ],
+      "best_step": [
+        700
+      ],
+      "caduceus_no_equiv_published": 0.818,
+      "caduceus_ph_published": 0.828,
+      "caduceus_ps_published": 0.818,
+      "config": {
+        "backbone_lr": 1e-05,
+        "batch_size": 128,
+        "dropout": 0.0,
+        "epochs": 10,
+        "head_lr": 0.001,
+        "head_warmup_steps": 200,
+        "layer": 6,
+        "pooling": "mean",
+        "rc_aug": 0.0,
+        "warmup_frac": 0.05,
+        "weight_decay": 0.1
+      },
+      "delta_ph": -0.12974999999999992,
+      "delta_ps": -0.11974999999999991,
+      "max_length": 593,
+      "median_length": 315.0,
+      "minutes": 32.93714685440064,
+      "n_test_full": 34952,
+      "n_test_used": 8000,
+      "n_train_full": 139804,
+      "n_train_used": 20000,
+      "num_classes": 2,
+      "pad_fraction": 0.0244,
+      "seeds": [
+        0
+      ],
+      "sweep": [
+        {
+          "config": {
+            "layer": 6,
+            "pooling": "mean"
+          },
+          "val_mean": 0.7265,
+          "val_per_seed": [
+            0.7265
+          ]
+        },
+        {
+          "config": {
+            "layer": 6,
+            "pooling": "max"
+          },
+          "val_mean": 0.6885,
+          "val_per_seed": [
+            0.6885
+          ]
+        },
+        {
+          "config": {
+            "layer": 6,
+            "pooling": "meanmax"
+          },
+          "val_mean": 0.7195,
+          "val_per_seed": [
+            0.7195
+          ]
+        },
+        {
+          "config": {
+            "layer": 9,
+            "pooling": "mean"
+          },
+          "val_mean": 0.7265,
+          "val_per_seed": [
+            0.7265
+          ]
+        },
+        {
+          "config": {
+            "layer": 9,
+            "pooling": "max"
+          },
+          "val_mean": 0.688,
+          "val_per_seed": [
+            0.688
+          ]
+        },
+        {
+          "config": {
+            "layer": 9,
+            "pooling": "meanmax"
+          },
+          "val_mean": 0.718,
+          "val_per_seed": [
+            0.718
+          ]
+        },
+        {
+          "config": {
+            "layer": 12,
+            "pooling": "mean"
+          },
+          "val_mean": 0.7095,
+          "val_per_seed": [
+            0.7095
+          ]
+        },
+        {
+          "config": {
+            "layer": 12,
+            "pooling": "max"
+          },
+          "val_mean": 0.6895,
+          "val_per_seed": [
+            0.6895
+          ]
+        },
+        {
+          "config": {
+            "layer": 12,
+            "pooling": "meanmax"
+          },
+          "val_mean": 0.699,
+          "val_per_seed": [
+            0.699
+          ]
+        }
+      ],
+      "task": "human_ocr_ensembl",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_fraction": 0.1431,
+      "val_accuracy": 0.7235,
+      "val_per_seed": [
+        0.7235
+      ],
+      "window": 768
+    },
+    {
+      "accuracy": 0.829,
+      "accuracy_per_seed": [
+        0.829
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        5
+      ],
+      "best_step": [
+        735
+      ],
+      "caduceus_no_equiv_published": 0.883,
+      "caduceus_ph_published": 0.893,
+      "caduceus_ps_published": 0.9,
+      "config": {
+        "backbone_lr": 1e-05,
+        "batch_size": 128,
+        "dropout": 0.0,
+        "epochs": 10,
+        "head_lr": 0.001,
+        "head_warmup_steps": 200,
+        "layer": 12,
+        "pooling": "meanmax",
+        "rc_aug": 0.0,
+        "warmup_frac": 0.05,
+        "weight_decay": 0.1
+      },
+      "delta_ph": -0.06400000000000006,
+      "delta_ps": -0.07100000000000006,
+      "max_length": 573,
+      "median_length": 269.0,
+      "minutes": 35.64139095942179,
+      "n_test_full": 30970,
+      "n_test_used": 8000,
+      "n_train_full": 123872,
+      "n_train_used": 20000,
+      "num_classes": 2,
+      "pad_fraction": 0.0323,
+      "seeds": [
+        0
+      ],
+      "sweep": [
+        {
+          "config": {
+            "layer": 6,
+            "pooling": "mean"
+          },
+          "val_mean": 0.822,
+          "val_per_seed": [
+            0.822
+          ]
+        },
+        {
+          "config": {
+            "layer": 6,
+            "pooling": "max"
+          },
+          "val_mean": 0.8315,
+          "val_per_seed": [
+            0.8315
+          ]
+        },
+        {
+          "config": {
+            "layer": 6,
+            "pooling": "meanmax"
+          },
+          "val_mean": 0.838,
+          "val_per_seed": [
+            0.838
+          ]
+        },
+        {
+          "config": {
+            "layer": 9,
+            "pooling": "mean"
+          },
+          "val_mean": 0.8325,
+          "val_per_seed": [
+            0.8325
+          ]
+        },
+        {
+          "config": {
+            "layer": 9,
+            "pooling": "max"
+          },
+          "val_mean": 0.8255,
+          "val_per_seed": [
+            0.8255
+          ]
+        },
+        {
+          "config": {
+            "layer": 9,
+            "pooling": "meanmax"
+          },
+          "val_mean": 0.844,
+          "val_per_seed": [
+            0.844
+          ]
+        },
+        {
+          "config": {
+            "layer": 12,
+            "pooling": "mean"
+          },
+          "val_mean": 0.8295,
+          "val_per_seed": [
+            0.8295
+          ]
+        },
+        {
+          "config": {
+            "layer": 12,
+            "pooling": "max"
+          },
+          "val_mean": 0.8345,
+          "val_per_seed": [
+            0.8345
+          ]
+        },
+        {
+          "config": {
+            "layer": 12,
+            "pooling": "meanmax"
+          },
+          "val_mean": 0.845,
+          "val_per_seed": [
+            0.845
+          ]
+        }
+      ],
+      "task": "human_enhancers_ensembl",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_fraction": 0.1615,
+      "val_accuracy": 0.841,
+      "val_per_seed": [
+        0.841
+      ],
+      "window": 768
+    },
+    {
+      "accuracy": 0.765125,
+      "accuracy_per_seed": [
+        0.765125
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        5
+      ],
+      "best_step": [
+        805
+      ],
+      "caduceus_no_equiv_published": 0.871,
+      "caduceus_ph_published": 0.872,
+      "caduceus_ps_published": 0.873,
+      "config": {
+        "backbone_lr": 1e-05,
+        "batch_size": 128,
+        "dropout": 0.0,
+        "epochs": 10,
+        "head_lr": 0.001,
+        "head_warmup_steps": 200,
+        "layer": 12,
+        "pooling": "meanmax",
+        "rc_aug": 0.0,
+        "warmup_frac": 0.05,
+        "weight_decay": 0.1
+      },
+      "delta_ph": -0.10687499999999994,
+      "delta_ps": -0.10787499999999994,
+      "max_length": 802,
+      "median_length": 401.0,
+      "minutes": 56.86089482307434,
+      "n_test_full": 57713,
+      "n_test_used": 8000,
+      "n_train_full": 231348,
+      "n_train_used": 20000,
+      "num_classes": 3,
+      "pad_fraction": 0.0215,
+      "seeds": [
+        0
+      ],
+      "sweep": [
+        {
+          "config": {
+            "layer": 6,
+            "pooling": "mean"
+          },
+          "val_mean": 0.7785,
+          "val_per_seed": [
+            0.7785
+          ]
+        },
+        {
+          "config": {
+            "layer": 6,
+            "pooling": "max"
+          },
+          "val_mean": 0.7875,
+          "val_per_seed": [
+            0.7875
+          ]
+        },
+        {
+          "config": {
+            "layer": 6,
+            "pooling": "meanmax"
+          },
+          "val_mean": 0.7895,
+          "val_per_seed": [
+            0.7895
+          ]
+        },
+        {
+          "config": {
+            "layer": 9,
+            "pooling": "mean"
+          },
+          "val_mean": 0.7955,
+          "val_per_seed": [
+            0.7955
+          ]
+        },
+        {
+          "config": {
+            "layer": 9,
+            "pooling": "max"
+          },
+          "val_mean": 0.7955,
+          "val_per_seed": [
+            0.7955
+          ]
+        },
+        {
+          "config": {
+            "layer": 9,
+            "pooling": "meanmax"
+          },
+          "val_mean": 0.7975,
+          "val_per_seed": [
+            0.7975
+          ]
+        },
+        {
+          "config": {
+            "layer": 12,
+            "pooling": "mean"
+          },
+          "val_mean": 0.798,
+          "val_per_seed": [
+            0.798
+          ]
+        },
+        {
+          "config": {
+            "layer": 12,
+            "pooling": "max"
+          },
+          "val_mean": 0.8015,
+          "val_per_seed": [
+            0.8015
+          ]
+        },
+        {
+          "config": {
+            "layer": 12,
+            "pooling": "meanmax"
+          },
+          "val_mean": 0.808,
+          "val_per_seed": [
+            0.808
+          ]
+        }
+      ],
+      "task": "human_ensembl_regulatory",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_fraction": 0.0864,
+      "val_accuracy": 0.8085,
+      "val_per_seed": [
+        0.8085
+      ],
+      "window": 1024
+    },
+    {
+      "accuracy": 0.7357512953367875,
+      "accuracy_per_seed": [
+        0.7357512953367875
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        2
+      ],
+      "best_step": [
+        420
+      ],
+      "caduceus_no_equiv_published": 0.741,
+      "caduceus_ph_published": 0.747,
+      "caduceus_ps_published": 0.745,
+      "config": {
+        "backbone_lr": 1e-05,
+        "batch_size": 128,
+        "dropout": 0.0,
+        "epochs": 10,
+        "head_lr": 0.001,
+        "head_warmup_steps": 200,
+        "layer": 12,
+        "pooling": "mean",
+        "rc_aug": 0.0,
+        "warmup_frac": 0.05,
+        "weight_decay": 0.1
+      },
+      "delta_ph": -0.011248704663212483,
+      "delta_ps": -0.009248704663212481,
+      "max_length": 500,
+      "median_length": 500.0,
+      "minutes": 38.51399825414022,
+      "n_test_full": 6948,
+      "n_test_used": 6948,
+      "n_train_full": 20843,
+      "n_train_used": 20000,
+      "num_classes": 2,
+      "pad_fraction": 0.0079,
+      "seeds": [
+        0
+      ],
+      "sweep": [
+        {
+          "config": {
+            "layer": 6,
+            "pooling": "mean"
+          },
+          "val_mean": 0.735,
+          "val_per_seed": [
+            0.735
+          ]
+        },
+        {
+          "config": {
+            "layer": 6,
+            "pooling": "max"
+          },
+          "val_mean": 0.7215,
+          "val_per_seed": [
+            0.7215
+          ]
+        },
+        {
+          "config": {
+            "layer": 6,
+            "pooling": "meanmax"
+          },
+          "val_mean": 0.7375,
+          "val_per_seed": [
+            0.7375
+          ]
+        },
+        {
+          "config": {
+            "layer": 9,
+            "pooling": "mean"
+          },
+          "val_mean": 0.7445,
+          "val_per_seed": [
+            0.7445
+          ]
+        },
+        {
+          "config": {
+            "layer": 9,
+            "pooling": "max"
+          },
+          "val_mean": 0.7225,
+          "val_per_seed": [
+            0.7225
+          ]
+        },
+        {
+          "config": {
+            "layer": 9,
+            "pooling": "meanmax"
+          },
+          "val_mean": 0.7345,
+          "val_per_seed": [
+            0.7345
+          ]
+        },
+        {
+          "config": {
+            "layer": 12,
+            "pooling": "mean"
+          },
+          "val_mean": 0.748,
+          "val_per_seed": [
+            0.748
+          ]
+        },
+        {
+          "config": {
+            "layer": 12,
+            "pooling": "max"
+          },
+          "val_mean": 0.7305,
+          "val_per_seed": [
+            0.7305
+          ]
+        },
+        {
+          "config": {
+            "layer": 12,
+            "pooling": "meanmax"
+          },
+          "val_mean": 0.7425,
+          "val_per_seed": [
+            0.7425
+          ]
+        }
+      ],
+      "task": "human_enhancers_cohn",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_fraction": 0.9596,
+      "val_accuracy": 0.748,
+      "val_per_seed": [
+        0.748
+      ],
+      "window": 512
+    }
+  ],
+  "test_split_policy": "The test split is held behind HeldOutTest and evaluated exactly once per seed, from the restored best-validation weights. Sweeps select on validation only and assert zero test accesses; per-task 'test_evaluations' records the count."
+}
