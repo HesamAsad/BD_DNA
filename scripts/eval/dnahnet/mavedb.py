@@ -265,7 +265,19 @@ def summarize_predictions(records: Iterable[Mapping]) -> dict:
   for record in all_records:
     groups.setdefault(record["score_set_urn"], []).append(record)
   assays = []
+  dropped = 0
   for urn, rows in groups.items():
+    # DROP non-finite predictions; do not rank them. `rankdata` assigns NaN the
+    # LARGEST rank, so a refused variant silently became a "highest predicted
+    # fitness" row. Measured when Score I landed on 2026-09-13: one assay's
+    # correlation read -0.22227 with 39 NaN rows ranked, against -0.14113 with
+    # them excluded -- a 0.08 distortion from rows the scorer had explicitly
+    # declined to score. Score I returns NaN for the 8.95% of pairs that change
+    # length, which is the honest refusal; ranking it was not.
+    rows = [r for r in rows if math.isfinite(float(r["predicted_fitness"]))]
+    dropped += len(groups[urn]) - len(rows)
+    if not rows:
+      continue
     correlation = spearmanr(
       [float(row["predicted_fitness"]) for row in rows],
       [float(row["experimental_score"]) for row in rows])
@@ -278,16 +290,202 @@ def summarize_predictions(records: Iterable[Mapping]) -> dict:
       "abs_spearman": abs(correlation),
     })
   assays.sort(key=lambda row: row["score_set_urn"])
+  finite_records = [r for r in all_records
+                    if math.isfinite(float(r["predicted_fitness"]))]
   pooled = spearmanr(
-    [float(row["predicted_fitness"]) for row in all_records],
-    [float(row["experimental_score"]) for row in all_records])
+    [float(row["predicted_fitness"]) for row in finite_records],
+    [float(row["experimental_score"]) for row in finite_records])
   finite_abs = [row["abs_spearman"] for row in assays
                 if math.isfinite(row["abs_spearman"])]
+  finite_signed = [row["spearman"] for row in assays
+                   if math.isfinite(row["spearman"])]
   return {
     "num_assays": len(assays),
     "num_variants": len(all_records),
+    # Reported, never silent: a score mode that declines some variants must say
+    # how many, or the headline is computed on a different set than it claims.
+    "num_unscored_variants": dropped,
+    "num_scored_variants": len(all_records) - dropped,
+    # SIGNED is the primary metric. The decision to make it primary was recorded
+    # on 2026-08-14 -- all 12 assays share one direction, so discarding the sign
+    # credits anti-correlation as skill -- but only the prose was updated; this
+    # function kept returning `macro_abs_spearman` alone for another month.
+    # Taking the absolute value inflates the block-diffusion arms about 1.5x and
+    # the autoregressive arms 1.13x, so it NARROWS a real gap. Both are emitted;
+    # quote the signed one.
+    "macro_signed_spearman": float(np.mean(finite_signed)) if finite_signed
+                             else float("nan"),
+    "num_negative_assays": sum(1 for r in finite_signed if r < 0),
     "macro_abs_spearman": float(np.mean(finite_abs)),
     "pooled_spearman": pooled,
     "pooled_abs_spearman": abs(pooled),
     "assays": assays,
   }
+
+
+# --------------------------------------------------------------------------
+# Stratified reporting: what this benchmark is actually measuring
+# --------------------------------------------------------------------------
+
+# BLOSUM62, embedded rather than imported so this module keeps its no-biopython,
+# no-scipy property. Upper triangle by row, standard 20 AA order plus '*'.
+_B62_ORDER = "ARNDCQEGHILKMFPSTWYV*"
+_B62_ROWS = (
+  "  4  -1  -2  -2   0  -1  -1   0  -2  -1  -1  -1  -1  -2  -1   1   0  -3  -2   0  -4",
+  " -1   5   0  -2  -3   1   0  -2   0  -3  -2   2  -1  -3  -2  -1  -1  -3  -2  -3  -4",
+  " -2   0   6   1  -3   0   0   0   1  -3  -3   0  -2  -3  -2   1   0  -4  -2  -3  -4",
+  " -2  -2   1   6  -3   0   2  -1  -1  -3  -4  -1  -3  -3  -1   0  -1  -4  -3  -3  -4",
+  "  0  -3  -3  -3   9  -3  -4  -3  -3  -1  -1  -3  -1  -2  -3  -1  -1  -2  -2  -1  -4",
+  " -1   1   0   0  -3   5   2  -2   0  -3  -2   1   0  -3  -1   0  -1  -2  -1  -2  -4",
+  " -1   0   0   2  -4   2   5  -2   0  -3  -3   1  -2  -3  -1   0  -1  -3  -2  -2  -4",
+  "  0  -2   0  -1  -3  -2  -2   6  -2  -4  -4  -2  -3  -3  -2   0  -2  -2  -3  -3  -4",
+  " -2   0   1  -1  -3   0   0  -2   8  -3  -3  -1  -2  -1  -2  -1  -2  -2   2  -3  -4",
+  " -1  -3  -3  -3  -1  -3  -3  -4  -3   4   2  -3   1   0  -3  -2  -1  -3  -1   3  -4",
+  " -1  -2  -3  -4  -1  -2  -3  -4  -3   2   4  -2   2   0  -3  -2  -1  -2  -1   1  -4",
+  " -1   2   0  -1  -3   1   1  -2  -1  -3  -2   5  -1  -3  -1   0  -1  -3  -2  -2  -4",
+  " -1  -1  -2  -3  -1   0  -2  -3  -2   1   2  -1   5   0  -2  -1  -1  -1  -1   1  -4",
+  " -2  -3  -3  -3  -2  -3  -3  -3  -1   0   0  -3   0   6  -4  -2  -2   1   3  -1  -4",
+  " -1  -2  -2  -1  -3  -1  -1  -2  -2  -3  -3  -1  -2  -4   7  -1  -1  -4  -3  -2  -4",
+  "  1  -1   1   0  -1   0   0   0  -1  -2  -2   0  -1  -2  -1   4   1  -3  -2  -2  -4",
+  "  0  -1   0  -1  -1  -1  -1  -2  -2  -1  -1  -1  -1  -2  -1   1   5  -2  -2   0  -4",
+  " -3  -3  -4  -4  -2  -2  -3  -2  -2  -3  -2  -3  -1   1  -4  -3  -2  11   2  -3  -4",
+  " -2  -2  -2  -3  -2  -1  -2  -3   2  -1  -1  -2  -1   3  -3  -2  -2   2   7  -1  -4",
+  "  0  -3  -3  -3  -1  -2  -2  -3  -3   3   1  -2   1  -1  -2  -2   0  -3  -1   4  -4",
+  " -4  -4  -4  -4  -4  -4  -4  -4  -4  -4  -4  -4  -4  -4  -4  -4  -4  -4  -4  -4   1",
+)
+
+
+def _b62():
+  table = {}
+  for i, row in enumerate(_B62_ROWS):
+    vals = [int(v) for v in row.split()]
+    for j, v in enumerate(vals):
+      table[(_B62_ORDER[i], _B62_ORDER[j])] = v
+  return table
+
+
+BLOSUM62 = _b62()
+
+_THREE_TO_ONE = {
+  "Ala": "A", "Arg": "R", "Asn": "N", "Asp": "D", "Cys": "C", "Gln": "Q",
+  "Glu": "E", "Gly": "G", "His": "H", "Ile": "I", "Leu": "L", "Lys": "K",
+  "Met": "M", "Phe": "F", "Pro": "P", "Ser": "S", "Thr": "T", "Trp": "W",
+  "Tyr": "Y", "Val": "V", "Ter": "*",
+}
+_SUB = re.compile(r"^([A-Z][a-z]{2})(\d+)([A-Z][a-z]{2})$")
+
+
+def protein_substitutions(hgvs_pro):
+  """[(wt_aa, mut_aa), ...] for simple substitutions; None if unparseable."""
+  text = (hgvs_pro or "").strip()
+  if text in {"", "NA", "p.=", "p.(=)"}:
+    return []
+  body = text[2:] if text.startswith("p.") else text
+  out = []
+  for event in body.strip("[]").split(";"):
+    event = event.strip()
+    if not event:
+      continue
+    match = _SUB.match(event)
+    if match is None:
+      return None
+    wt, _, mut = match.groups()
+    if wt not in _THREE_TO_ONE or mut not in _THREE_TO_ONE:
+      return None
+    out.append((_THREE_TO_ONE[wt], _THREE_TO_ONE[mut]))
+  return out
+
+
+def stratified_summary(records):
+  """Per-stratum Spearman plus the BLOSUM62 baseline. Reported on every run.
+
+  WHY THIS IS MANDATORY OUTPUT. The 21,250 variants carry exactly 0, 1 or 2
+  non-synonymous changes, and the mean fitness of the 1-change group sits well
+  above the 2-change group -- so the pooled macro Spearman is substantially a
+  1-vs-2 mutation detector. Measured on this data: restricting to the nsyn == 1
+  stratum (13,838 variants) costs uSSM-AR 14% of its score but costs every
+  block-diffusion arm 53-59% of theirs, and in that stratum a zero-parameter
+  BLOSUM62 lookup reaches +0.2384 -- positive on 12 of 12 assays, above
+  uSSM-AR's 0.2279 and 4.5x above the best BD estimator's 0.0506.
+
+  That stratum is where the benchmark genuinely asks "what does one amino-acid
+  substitution do", so it is the number that says whether a model understands
+  coding sequence. The pooled figure is kept for comparability with dnaHNet's
+  published 0.3266, but it should never be quoted without this beside it.
+  """
+  usable, unparsed = [], 0
+  for record in records:
+    subs = protein_substitutions(record.get("hgvs_pro"))
+    if subs is None:
+      unparsed += 1
+      continue
+    usable.append((record, subs))
+
+  def macro(rows, score_of):
+    groups = {}
+    for record, subs in rows:
+      value = score_of(record, subs)
+      if value is None or not math.isfinite(value):
+        continue
+      groups.setdefault(record["score_set_urn"], []).append(
+        (value, float(record["experimental_score"])))
+    per = [spearmanr([a for a, _ in v], [b for _, b in v])
+           for v in groups.values() if len(v) >= 10]
+    per = [r for r in per if math.isfinite(r)]
+    if not per:
+      return float("nan"), 0, 0
+    return (float(np.mean(per)), len(per), sum(1 for r in per if r > 0))
+
+  out = {"unparseable_hgvs_pro": unparsed}
+  for name, keep in (("nsyn_eq_1", lambda n: n == 1),
+                     ("nsyn_ge_2", lambda n: n >= 2),
+                     ("all", lambda n: True)):
+    rows = [(r, s) for r, s in usable if keep(len(s))]
+    value, n_assays, n_pos = macro(
+      rows, lambda r, s: float(r["predicted_fitness"]))
+    out[name] = {"macro_signed_spearman": value, "n_variants": len(rows),
+                 "n_assays": n_assays, "n_assays_positive": n_pos}
+  single = [(r, s) for r, s in usable if len(s) == 1]
+  value, n_assays, n_pos = macro(
+    single, lambda r, s: float(BLOSUM62.get(s[0], float("nan"))))
+  out["blosum62_baseline_nsyn_eq_1"] = {
+    "macro_signed_spearman": value, "n_variants": len(single),
+    "n_assays": n_assays, "n_assays_positive": n_pos,
+    "note": "zero parameters, no DNA; the bar the nsyn==1 stratum must clear",
+  }
+  return out
+
+
+def protein_event_baseline(records):
+  """Zero-parameter baseline: count amino-acid events in `hgvs_pro`.
+
+  THIS BEATS EVERY MODEL IN THE REPO and is the reason the benchmark's headline
+  number must be read carefully. Macro signed Spearman +0.30931 against fitness,
+  pointing the right way on 12 of 12 assays, versus uSSM-AR's +0.26402 (and
+  dnaHNet's published 0.3266). It takes only three distinct values across all
+  21,250 variants -- {0: 66, 1: 15739, 2: 5445} -- so it says little more than
+  "wild type, single mutant, or double mutant".
+
+  `partial_corr.py`'s docstring has claimed since 2026-08-17 that this baseline
+  is "computed here"; it was not. What that script actually computed was the
+  NUCLEOTIDE edit count, a much weaker +0.159, and it then used that as the
+  control -- so the partial correlations were controlling for the wrong
+  confound. Controlling for this one as well costs uSSM-AR only 5% of its
+  partial rho (+0.21644 -> +0.20548), which is the evidence that its signal is
+  not merely a mutation count.
+
+  Returns the score convention "higher = fitter", i.e. the NEGATED count, so the
+  correlation is positive like a model's.
+  """
+  scores = []
+  for record in records:
+    protein = (record.get("hgvs_pro") or "").strip()
+    if protein in {"", "NA", "p.=", "p.(=)"}:
+      count = 0
+    else:
+      body = protein[2:] if protein.startswith("p.") else protein
+      count = len([e for e in body.strip("[]").split(";") if e.strip()])
+    row = dict(record)
+    row["predicted_fitness"] = float(-count)
+    scores.append(row)
+  return summarize_predictions(scores)

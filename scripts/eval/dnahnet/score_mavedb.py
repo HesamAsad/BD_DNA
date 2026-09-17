@@ -28,9 +28,12 @@ sys.path.insert(0, str(REPO))
 import dataloader  # noqa: E402
 import diffusion  # noqa: E402
 from scripts.eval.dnahnet.mavedb import (  # noqa: E402
+  protein_event_baseline,
   read_jsonl_gz,
+  stratified_summary,
   summarize_predictions,
 )
+from scripts.eval.provenance import stamp  # noqa: E402
 
 
 DEFAULT_DATA = REPO / "data_cache/dnahnet/mavedb_ecoli_k12_21250.jsonl.gz"
@@ -217,6 +220,199 @@ def _pll_totals(model, x0, token_mask, chunk_size=128):
   return totals
 
 
+# --------------------------------------------------------------------------
+# Score I: context compatibility (masked infilling preference)
+# --------------------------------------------------------------------------
+
+_BASES = "TCAG"
+_AA_TABLE = ("FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG")
+GENETIC_CODE = {
+  b1 + b2 + b3: _AA_TABLE[i * 16 + j * 4 + k]
+  for i, b1 in enumerate(_BASES)
+  for j, b2 in enumerate(_BASES)
+  for k, b3 in enumerate(_BASES)
+}
+
+
+def variant_positions(wt: str, mut: str):
+  """Differing nucleotide indices, or None if the pair changes length.
+
+  MEASURED, not assumed: only 91.05% of the 21,250 pairs preserve length. The
+  other 8.95% are protein-level delins, for which "the mutated position" is not
+  well defined, so they are excluded from Score I and reported separately rather
+  than silently mis-scored.
+  """
+  if len(wt) != len(mut):
+    return None
+  return [i for i, (a, b) in enumerate(zip(wt, mut)) if a != b]
+
+
+def _infill_logprobs(model, ids, mask_positions):
+  """log p(. | everything unmasked) at each masked position. One forward pass.
+
+  `ids` is [length]; `mask_positions` a LongTensor of indices to mask. Returns
+  [len(mask_positions), vocab] log-probabilities. Deterministic -- no Monte
+  Carlo, no seed. Both the wild-type and the mutant read-outs come from THIS
+  single pass, so their difference carries exactly zero sampling variance.
+  """
+  noisy = ids.clone()
+  noisy[mask_positions] = model.mask_index
+  model_input = noisy.unsqueeze(0)
+  if model.cross_attn:
+    model_input = torch.cat((model_input, ids.unsqueeze(0)), dim=-1)
+  sigma = torch.zeros(1, 1, device=ids.device, dtype=torch.float32)
+  log_scores = model.forward(model_input, sigma=sigma)
+  return log_scores[0, mask_positions]
+
+
+def score_infill(model, wt_ids, mut_ids, wt_string, mut_string, unit="codon",
+                 offset=0):
+  """Score I. Returns (score, n_units, n_synonymous_units) or (nan, 0, 0).
+
+  Higher = the model prefers the MUTANT, matching `predicted_fitness`'s existing
+  sign convention (`wt_loss - mut_loss`), so nothing downstream changes.
+
+  `unit="nt"` masks exactly the differing nucleotides and contrasts the two
+  base sequences. `unit="codon"` masks every codon containing a difference and
+  contrasts AMINO ACIDS, summing each codon's probability over its synonymous
+  spellings before taking the log.
+
+  WHY THE CODON FORM IS THE POINT HERE, measured on this dataset: the median
+  variant changes 13 nucleotides across 11 codons but only **1** amino acid
+  (max 2), leaving a median of **10 synonymous codon changes** per variant.
+  Nucleotide-level scoring therefore spends roughly 91% of its signal on changes
+  the assay cannot see. The counting evidence is stark -- macro per-assay
+  Spearman against fitness is +0.337 for the non-synonymous codon count but only
+  +0.093 for the synonymous count and +0.170 for the raw nucleotide count. A
+  synonymous codon contributes EXACTLY zero to the codon score, by construction,
+  because its wild-type and mutant amino acids are the same.
+
+  APPROXIMATION, stated rather than buried: the model emits independent
+  per-position marginals, so a codon's probability is taken as the product of
+  its three positional probabilities. That is the standard masked-marginal
+  factorisation (Salazar et al. 2020, and ESM-1v's variant scoring), not an
+  exact joint over the codon -- the masked positions are masked jointly but read
+  independently.
+  """
+  positions = variant_positions(wt_string, mut_string)
+  if positions is None:
+    return float("nan"), 0, 0
+  if not positions:
+    return 0.0, 0, 0          # identity variant: exactly zero, as for NELBO/PLL
+
+  if unit not in ("nt", "codon", "codon_nsyn"):
+    raise ValueError(f"unit must be nt|codon|codon_nsyn, got {unit!r}")
+  if unit == "nt":
+    index = torch.tensor([p + offset for p in positions], device=wt_ids.device)
+    logp = _infill_logprobs(model, wt_ids, index).double()
+    arange = torch.arange(index.numel(), device=wt_ids.device)
+    total = float((logp[arange, mut_ids[index]] - logp[arange, wt_ids[index]]).sum())
+    del arange
+    return total, len(positions), 0
+
+  codons = sorted({i // 3 for i in positions})
+  if unit == "codon_nsyn":
+    # Mask ONLY the codons whose amino acid actually changes, leaving the
+    # synonymous ones as observed clean context.
+    #
+    # WHY. The plain `codon` mode masks every differing codon -- a median of 33
+    # nt, 18.1% of a 204-nt fragment -- then reads independent per-position
+    # marginals out of a context it has just destroyed, in order to score a
+    # median of TEN synonymous codon changes that carry no fitness signal at
+    # all. Restricting the mask to the non-synonymous codons (median 3 nt, 1.5%
+    # of the fragment) is an 11x reduction in context destruction and scores
+    # only what the assay can see. Measured motivation: on the 13,838 variants
+    # with exactly one amino-acid change -- the stratum where this benchmark is
+    # genuinely "predict the effect of one substitution" -- a zero-parameter
+    # BLOSUM62 lookup reaches +0.2384 (positive on 12/12 assays) while Score I
+    # codon reaches 0.0031 and Score I nt reaches 0.0506.
+    #
+    # Note this is NOT the same as normalising by the number of changed
+    # positions, which was measured HARMFUL (-0.021 on Score I nt). The gain is
+    # in shrinking the scored SET, not in rescaling the sum.
+    keep = []
+    for codon in codons:
+      start = 3 * codon
+      wt_aa = GENETIC_CODE.get(wt_string[start:start + 3].upper())
+      mut_aa = GENETIC_CODE.get(mut_string[start:start + 3].upper())
+      if wt_aa is None or mut_aa is None or wt_aa != mut_aa:
+        keep.append(codon)          # non-synonymous, or untranslatable
+    synonymous_skipped = len(codons) - len(keep)
+    if not keep:
+      # Every change was synonymous: exactly zero, as in the `codon` mode.
+      return 0.0, len(codons), synonymous_skipped
+    codons = keep
+  span = torch.tensor([3 * c + k + offset for c in codons for k in range(3)],
+                      device=wt_ids.device)
+  logp = _infill_logprobs(model, wt_ids, span).double()
+  total, synonymous, skipped = 0.0, 0, 0
+  for slot, codon in enumerate(codons):
+    rows = logp[3 * slot:3 * slot + 3]                       # [3, vocab]
+    start = 3 * codon
+    wt_aa = GENETIC_CODE.get(wt_string[start:start + 3].upper())
+    mut_aa = GENETIC_CODE.get(mut_string[start:start + 3].upper())
+    if wt_aa is None or mut_aa is None:
+      # Untranslatable (an N in the codon). Count it -- a partial sum over
+      # fewer codons is not comparable to a full one, and silently returning
+      # the partial total would place the variant mid-ranking as though the
+      # model were indifferent. Refused below instead.
+      skipped += 1
+      continue
+    if wt_aa == mut_aa:
+      synonymous += 1
+      continue                 # contributes exactly 0; skip the arithmetic
+    buckets = {}
+    for triplet, amino in GENETIC_CODE.items():
+      if amino not in (wt_aa, mut_aa):
+        continue
+      ids = [model.tokenizer.convert_tokens_to_ids(b) for b in triplet]
+      buckets.setdefault(amino, []).append(
+        rows[0, ids[0]] + rows[1, ids[1]] + rows[2, ids[2]])
+    if wt_aa not in buckets or mut_aa not in buckets:
+      skipped += 1
+      continue
+    total += float(torch.logsumexp(torch.stack(buckets[mut_aa]), 0)
+                   - torch.logsumexp(torch.stack(buckets[wt_aa]), 0))
+  if skipped:
+    # Refuse rather than return an incomplete sum. `summarize_predictions` drops
+    # non-finite predictions and reports the count, so a refusal is visible;
+    # a partial total would not be.
+    return float("nan"), len(codons), synonymous
+  return total, len(codons), synonymous
+
+
+def score_state_displacement(model, wt_ids, mut_ids, direction="right"):
+  """Score II's cheap premise test: how far does the variant move the state?
+
+  Compares the SSM recurrent summary after scanning wild-type against mutant.
+  Returns 0.5 * (1 - cos) in [0, 1]; higher = larger displacement.
+
+  DIRECTION MATTERS, AND THE OBVIOUS CHOICE IS THE WRONG ONE. `prefill_left`
+  leaves its state at the 3' end, but the mutations in this benchmark sit at the
+  5' end -- median 6% into the fragment, a median of 171 nt upstream of that
+  state, with only 1.0% within 20 nt of it. At the measured 4.66 nt per-head
+  half-life, a perturbation 171 nt back survives as roughly 2^-37 of itself. A
+  left-prefill test would therefore return ~0 for almost every variant, and a
+  null result would say nothing about whether the state carries functional
+  information -- it would only restate the decay rate.
+
+  `prefill_right` flips its input, so its final state sits at position 0, about
+  12 nt from the median mutation: roughly 2^-2.6, or ~17%, survives. That is the
+  direction that can actually see these variants. Both are computed so the
+  asymmetry is measured rather than argued.
+  """
+  prefill = (model.backbone.prefill_right if direction == "right"
+             else model.backbone.prefill_left)
+  with model._model_autocast_context():
+    wt = prefill(wt_ids.unsqueeze(0), detach=True)
+    mut = prefill(mut_ids.unsqueeze(0), detach=True)
+  index = len(wt.states) - 1
+  a = wt.states[index].ssm.flatten(1).float()
+  b = mut.states[index].ssm.flatten(1).float()
+  cosine = torch.nn.functional.cosine_similarity(a, b, dim=-1)
+  return float(0.5 * (1.0 - cosine).item())
+
+
 def _exact_ar_losses(model, x0):
   """Per-position exact next-token NLL, aligned to ``x0`` positions.
 
@@ -245,6 +441,7 @@ def score_batch(
     generator: torch.Generator,
     score_mode: str = "nelbo",
     prefixes=None,
+    infill_pad_side: str = "right",
 ):
   x0_cpu, token_mask_cpu = build_pair_tensors(
     records, tokenizer, model_length, prefixes)
@@ -256,7 +453,65 @@ def score_batch(
   totals = torch.zeros(x0.shape[0], dtype=torch.float64, device=model.device)
 
   is_ar = str(model.parameterization) == "ar"
-  if score_mode == "pll" and not is_ar:
+  infill = None
+  if score_mode.startswith("infill") or score_mode == "state_displacement":
+    if is_ar:
+      raise ValueError(
+        f"--score-mode {score_mode} reads DOWNSTREAM context, which an "
+        f"autoregressive model cannot see. Use --score-mode nelbo for AR "
+        f"checkpoints; the contrast between the two is the point, not a "
+        f"limitation to work round.")
+    if score_mode == "state_displacement":
+      # prefill_right is the direction that can see these variants, and only a
+      # bidirectional backbone has an honest one. UnidirectionalSSM subclasses
+      # BidirectionalSSM, so this would otherwise run out of distribution rather
+      # than fail -- the same shape of bug that reached the Caduceus readout.
+      if str(model.config.algo.backbone) != "bissm":
+        raise ValueError(
+          f"state displacement uses the reverse-scan summary; backbone is "
+          f"{model.config.algo.backbone!r}, not 'bissm'")
+    elif int(model.config.model.length) != int(model.config.block_size):
+      raise ValueError(
+        f"Score I requires one block so the clean stream cannot leak the "
+        f"answer: model.length ({model.config.model.length}) must equal "
+        f"block_size ({model.config.block_size})")
+    if score_mode == "state_displacement":
+      infill = []
+      for i in range(len(records)):
+        right = score_state_displacement(model, x0[2 * i], x0[2 * i + 1],
+                                         "right")
+        left = score_state_displacement(model, x0[2 * i], x0[2 * i + 1], "left")
+        # Negated: `predicted_fitness` is higher = FITTER throughout this
+        # harness, and a large displacement means a disruptive variant.
+        infill.append((-right, left, right))
+      objective = "state_displacement_right"
+    else:
+      unit = {"infill_codon": "codon",
+              "infill_nsyn": "codon_nsyn"}.get(score_mode, "nt")
+      # PADDING SIDE. MaveDB fragments are 132-216 nt padded to a 256-nt block,
+      # i.e. 15.6-48.4% filler, and the three 132-nt assays that carry the
+      # ENTIRE block-diffusion macro number are the most padded at 48.4%. The
+      # in-block reverse scan runs right-to-left, so with the default right
+      # padding it consumes up to 124 N tokens -- a symbol it barely saw in DNA
+      # pretraining -- before reaching any real base. The forward scan and the
+      # AR baseline are structurally immune. A recovered probe measured Score I
+      # swinging 6.64 (N pad) / 5.20 (real genomic pad) / 4.35 (shuffled pad) on
+      # one variant, so what fills the block demonstrably matters; which side it
+      # sits on is the cheap half of that question.
+      infill = []
+      for i, record in enumerate(records):
+        wt_row, mut_row = x0[2 * i], x0[2 * i + 1]
+        shift = 0
+        if infill_pad_side == "left":
+          real = int(token_mask[2 * i].sum())
+          shift = wt_row.shape[0] - real
+          wt_row = torch.roll(wt_row, shift, dims=0)
+          mut_row = torch.roll(mut_row, shift, dims=0)
+        infill.append(score_infill(
+          model, wt_row, mut_row,
+          record["wt_sequence"], record["mut_sequence"], unit, offset=shift))
+      objective = f"infill_preference_{unit}"
+  elif score_mode == "pll" and not is_ar:
     totals = _pll_totals(model, x0, token_mask)
     objective = "pseudo_log_likelihood"
   elif is_ar:
@@ -277,7 +532,7 @@ def score_batch(
     totals /= mc_samples
 
   totals = totals.cpu()
-  if score_mode != "pll" or is_ar:
+  if infill is None and (score_mode != "pll" or is_ar):
     objective = "exact_ar_nll" if is_ar else "paired_diffusion_nelbo"
   scored = []
   for index, record in enumerate(records):
@@ -286,6 +541,30 @@ def score_batch(
     wt_tokens = int(token_mask_cpu[2 * index].sum())
     mut_tokens = int(token_mask_cpu[2 * index + 1].sum())
     scored_record = dict(record)
+    if infill is not None:
+      # Score I reports a preference, not a likelihood: there is no per-sequence
+      # loss to divide by length, and that is the point -- only the changed
+      # codons contribute, so the length confound that `partial_corr.py` exists
+      # to strip is absent by construction rather than removed afterwards.
+      value, units, synonymous = infill[index]
+      scored_record.update({
+        "loss_type": objective,
+        "predicted_fitness": value,
+        "predicted_fitness_per_nt": value,
+        "wt_loss": float("nan"), "mut_loss": float("nan"),
+        "wt_nelbo": float("nan"), "mut_nelbo": float("nan"),
+        "wt_loss_per_nt": float("nan"), "mut_loss_per_nt": float("nan"),
+        "wt_nelbo_per_nt": float("nan"), "mut_nelbo_per_nt": float("nan"),
+        "wt_scored_tokens": wt_tokens, "mut_scored_tokens": mut_tokens,
+        "infill_units": units,
+        "infill_synonymous_units": synonymous,
+        # For state_displacement these two carry the left/right displacements
+        # so the decay asymmetry is recoverable from the CSV.
+        "state_displacement_left": units if objective.startswith("state") else "",
+        "state_displacement_right": synonymous if objective.startswith("state") else "",
+      })
+      scored.append(scored_record)
+      continue
     scored_record.update({
       "loss_type": objective,
       "wt_loss": wt_loss,
@@ -321,7 +600,9 @@ def _atomic_csv(path: Path, records):
   fields = [
     "score_set_urn", "score_set_title", "target", "accession",
     "hgvs_nt", "hgvs_pro", "experimental_score", "predicted_fitness",
-    "predicted_fitness_per_nt", "loss_type", "wt_loss", "mut_loss",
+    "predicted_fitness_per_nt", "loss_type", "infill_units",
+    "infill_synonymous_units", "state_displacement_left",
+    "state_displacement_right", "wt_loss", "mut_loss",
     "wt_loss_per_nt", "mut_loss_per_nt", "wt_nelbo", "mut_nelbo",
     "wt_nelbo_per_nt", "mut_nelbo_per_nt", "wt_scored_tokens",
     "mut_scored_tokens", "license", "source_url",
@@ -356,11 +637,31 @@ def main():
          "and the DiT cross-block mask is live. Requires --model-length to be "
          "prefix length + one block.")
   parser.add_argument(
-    "--score-mode", choices=("nelbo", "pll"), default="nelbo",
+    "--score-mode",
+    choices=("nelbo", "pll", "infill_nt", "infill_codon", "infill_nsyn",
+             "state_displacement"), default="nelbo",
     help="nelbo: the training objective's paired Monte Carlo NELBO (a bound). "
          "pll: deterministic pseudo-log-likelihood, sum_i log p(x_i | x_{-i}), "
          "exact per term and directly comparable in spirit to an exact "
-         "likelihood. Ignored for AR checkpoints, which already have one.")
+         "likelihood. Ignored for AR checkpoints, which already have one. "
+         "infill_nt / infill_codon: Score I, the masked infilling preference -- "
+         "mask what the variant changed and ask which spelling the model would "
+         "write. One forward pass, deterministic, no Monte Carlo, and no length "
+         "confound. infill_codon marginalises to amino acids, which makes "
+         "synonymous changes contribute exactly zero; on this dataset the "
+         "median variant carries 10 synonymous codon changes against 1 "
+         "non-synonymous, so that is the dominant systematic error in "
+         "nucleotide scoring rather than a niche correction. "
+         "infill_nsyn masks ONLY the non-synonymous codons, leaving the "
+         "synonymous ones as clean context -- an 11x reduction in how much of "
+         "the fragment is destroyed before the marginals are read. BD only.")
+  parser.add_argument(
+    "--infill-pad-side", choices=("right", "left"), default="right",
+    help="which side the N filler sits on for Score I. 'right' is the historical "
+         "behaviour and makes the in-block REVERSE scan enter through up to 124 "
+         "N tokens on the 132-nt assays; 'left' moves the filler to the forward "
+         "scan's entry instead. Neither is free -- the point is to measure which "
+         "costs less.")
   parser.add_argument(
     "--reverse-off", action="store_true",
     help="Ablate the in-block reverse scan: load a bissm checkpoint into the "
@@ -381,6 +682,20 @@ def main():
   device = torch.device("cuda")
   if not torch.cuda.is_available():
     raise RuntimeError("MaveDB checkpoint scoring requires a CUDA GPU")
+  # Read the TRAINING config off the checkpoint BEFORE load_checkpoint_model
+  # rewrites it for inference. That function sets right_flank_probability=0 and
+  # model.length to the scoring length -- both correct for scoring, both fatal
+  # if read back later as provenance.
+  _raw = torch.load(args.checkpoint, map_location="cpu", weights_only=False,
+                    mmap=True)
+  _trained = OmegaConf.create(
+    _raw.get("hyper_parameters", {}).get("config", {}))
+  trained_right_flank = float(
+    OmegaConf.select(_trained, "model.right_flank_probability", default=float("nan")))
+  trained_length = int(
+    OmegaConf.select(_trained, "model.length", default=-1))
+  del _raw, _trained
+
   model, tokenizer, config, global_step = load_checkpoint_model(
     args.checkpoint, args.model_length, args.batch_size * 2, device,
     reverse_off=args.reverse_off)
@@ -401,6 +716,7 @@ def main():
         mc_samples=args.mc_samples,
         score_mode=args.score_mode,
         prefixes=prefixes,
+        infill_pad_side=args.infill_pad_side,
         epsilon=args.epsilon,
         generator=generator))
       print(
@@ -425,10 +741,32 @@ def main():
     "epsilon": args.epsilon,
     "seed": args.seed,
     "score_definition": (
-      "exact NLL(WT) - exact NLL(mutant)"
-      if is_ar else "paired NELBO(WT) - paired NELBO(mutant)"),
-    "headline_metric": "macro mean absolute per-assay Spearman",
+      "exact NLL(WT) - exact NLL(mutant)" if is_ar else
+      "log q(mutant) - log q(WT) at the masked variant site, one forward pass"
+      if str(args.score_mode).startswith("infill") else
+      "paired NELBO(WT) - paired NELBO(mutant)"),
+    # The right-flank gate is forced to 0 for scoring (load_checkpoint_model),
+    # so the RUNTIME value says nothing about training. Record what the
+    # CHECKPOINT was trained with, read before that override -- reporting the
+    # inference setting as the training setting is exactly how an rf=0.0
+    # checkpoint was read as "the suffix carries no information" for a whole
+    # campaign.
+    "trained_right_flank_probability": trained_right_flank,
+    "trained_model_length": trained_length,
+    # The zero-parameter baseline this benchmark has to be read against: it
+    # scores +0.30931 and beats every model here.
+    "protein_event_baseline": {
+      k: v for k, v in protein_event_baseline(records).items() if k != "assays"},
+    # The stratum where this benchmark genuinely asks "what does ONE amino-acid
+    # substitution do", with the zero-parameter BLOSUM62 bar beside it. The
+    # pooled macro number is substantially a 1-vs-2 mutation detector and must
+    # not be quoted without this.
+    "stratified": stratified_summary(scored),
+    "headline_metric": "macro mean SIGNED per-assay Spearman "
+                       "(macro_abs_spearman retained for comparability with "
+                       "runs predating 2026-09-13)",
   })
+  stamp(summary, args)
   args.output_dir.mkdir(parents=True, exist_ok=True)
   _atomic_csv(args.output_dir / "predictions.csv", scored)
   _atomic_json(args.output_dir / "summary.json", summary)
