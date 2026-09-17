@@ -8,7 +8,15 @@
 #BSUB -R "select[mem>128000 && hname!='farm-gpu0504']"
 #BSUB -R "rusage[mem=128000]"
 #BSUB -M 128000
-#BSUB -gpu "num=1:mode=exclusive_process:gmodel=NVIDIAH200"
+# GPU MODEL: unconstrained, deliberately, since 2026-09-13. This line used to
+# read `...:gmodel=NVIDIAH200`, which made every GenomicBenchmarks evaluation
+# queue behind the `iclr_2026` advance reservation on the farm-gpu050x hosts
+# (window 8/22-9/30) while nine non-H200 hosts sat completely idle. Nothing on
+# this path needs an H200: measured host peak across the historical
+# gb_ft_*/gb_probe_*.out logs is 2.4-2.7 GB for the fine-tune and 0.3-6.5 GB for
+# the probe, against 80 GB of device. Put the constraint back only for a job
+# whose memory you have actually measured as needing it.
+#BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -cwd /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms
 #BSUB -o /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/logs/gb_ft_%J.out
 #BSUB -e /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/logs/gb_ft_%J.err
@@ -82,8 +90,40 @@ EXTRA=(--preset "$PRESET" --seeds "$SEEDS")
 [ -n "${HEAD_LR:-}" ]           && EXTRA+=(--head-lr "$HEAD_LR")
 [ -n "${WEIGHT_DECAY:-}" ]      && EXTRA+=(--weight-decay "$WEIGHT_DECAY")
 [ -n "${DROPOUT:-}" ]           && EXTRA+=(--dropout "$DROPOUT")
+# Validation hygiene. cohn carves a 10% val slice = 2,084 rows, SE ~0.0095,
+# and best-of-4-epoch selection on that is a coin flip -- measured as the cause
+# of the persistent cohn val->test drop (there is NO train/test distribution
+# shift: a 1..4-mer domain classifier scores AUC 0.494).
+[ -n "${STRATIFIED_VAL:-}" ]   && EXTRA+=(--stratified-val)
+[ -n "${VAL_FRACTION:-}" ]     && EXTRA+=(--val-fraction "$VAL_FRACTION")
+[ -n "${EVALS_PER_EPOCH:-}" ]  && EXTRA+=(--evals-per-epoch "$EVALS_PER_EPOCH")
+# RC_TTA averages the two strands at SCORING time. It measured -0.0027 alone,
+# but that was WITHOUT rc_aug: evaluate() notes the RC view is uncalibrated
+# because the model never saw RC. With RC_AUG=0.5 the fine-tune HAS seen both
+# strands, so train and eval finally match -- worth retesting together.
+[ -n "${RC_AVERAGE:-}" ]       && EXTRA+=(--rc-average "$RC_AVERAGE")
+[ "${PAD_INVARIANT:-0}" = "1" ] && EXTRA+=(--pad-invariant)
+[ -n "${SCAN_PATH:-}" ]        && EXTRA+=(--scan-path "$SCAN_PATH")
 [ -n "${POOLING:-}" ]           && EXTRA+=(--pooling "$POOLING")
 [ -n "${LAYER:-}" ]             && EXTRA+=(--layer "$LAYER")
+[ -n "${SIGMA:-}" ]             && EXTRA+=(--sigma "$SIGMA")
+# These two had NO hook, so `bsub -env "...,SCHEDULER=cosine"` was accepted and
+# silently ignored -- the same shape as the DATA_TRAIN and GB_MAX_TRAIN bugs
+# this harness has already been bitten by. It matters here because
+# build_schedule returns a constant 1.0 when scheduler='none', making
+# warmup_frac inert: every legacy (batch 16) run records warmup_frac 0.05 and
+# received no warmup at all, so the backbone_lr ceiling was never established
+# with warmup.
+[ -n "${SCHEDULER:-}" ]        && EXTRA+=(--scheduler "$SCHEDULER")
+[ -n "${WARMUP_FRAC:-}" ]      && EXTRA+=(--warmup-frac "$WARMUP_FRAC")
+# EPOCHS and EPOCHS_OVERRIDE both emit --epochs. Setting both silently emitted
+# "--epochs A --epochs B" and argparse kept B -- a confusion hazard with no
+# warning, so refuse it outright rather than pick one.
+if [ -n "${EPOCHS:-}" ] && [ -n "${EPOCHS_OVERRIDE:-}" ]; then
+  echo "ERROR: set EPOCHS or EPOCHS_OVERRIDE, not both (got $EPOCHS / $EPOCHS_OVERRIDE)" >&2
+  exit 2
+fi
+[ -n "${EPOCHS_OVERRIDE:-}" ]  && EXTRA+=(--epochs "$EPOCHS_OVERRIDE")
 [ -n "${PAD_TO:-}" ]            && EXTRA+=(--pad-to "$PAD_TO")
 # The checkpoint never saw [PAD] in DNA pretraining, so its embedding is
 # still at init: a true PAD may be WORSE than the N nucleotide, not better.
@@ -92,6 +132,7 @@ EXTRA=(--preset "$PRESET" --seeds "$SEEDS")
 [ -n "${PAD_SIDE:-}" ]          && EXTRA+=(--pad-side "$PAD_SIDE")
 [ -n "${GB_WINDOW_FROM:-}" ]    && EXTRA+=(--window-from "$GB_WINDOW_FROM")
 [ "${LOG_LENGTH:-0}" = "1" ]    && EXTRA+=(--log-length)
+[ -n "${LENGTH_BINS:-}" ]       && EXTRA+=(--length-bins "$LENGTH_BINS")
 [ "${RC_TTA:-0}" = "1" ]        && EXTRA+=(--rc-tta)
 [ -n "${RC_AUG:-}" ]            && EXTRA+=(--rc-aug "$RC_AUG")
 [ -n "$SWEEP" ]                 && EXTRA+=(--sweep "$SWEEP")

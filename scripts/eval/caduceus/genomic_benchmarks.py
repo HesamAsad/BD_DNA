@@ -42,7 +42,8 @@ sys.path.insert(0, str(REPO))
 
 from scripts.eval.provenance import (  # noqa: E402
   assert_full_coverage, provenance)
-from scripts.eval.caduceus.embed import embed_sequences  # noqa: E402
+from scripts.eval.caduceus.embed import (  # noqa: E402
+  embed_sequences, embed_sequences_recurrent, RECURRENT_REDUCTIONS, POOLINGS)
 from scripts.eval.dnahnet.score_mavedb import load_checkpoint_model  # noqa: E402
 
 for _name, _resolver in (("cwd", os.getcwd),
@@ -66,6 +67,46 @@ TASKS = [
   ("human_ocr_ensembl", 0.828),
 ]
 PUBLISHED = dict(TASKS)
+
+# Two of the eight official tasks leak train sequence into test. Measured
+# 2026-09-13 directly against the upstream coordinate CSVs on
+# ML-Bioinfo-CEITEC/genomic_benchmarks@main (and confirmed byte-identical in the
+# Zenodo "version 1" release of May 2025, so there is no corrected upstream):
+#
+#   human_enhancers_ensembl  HARD. 75.5% of POSITIVE test windows are exact
+#     coordinate duplicates of train windows (11,694/15,485); positives also hold
+#     37.7% duplicate rows within train. Negatives are clean (0 duplicates, 0
+#     overlap). 37.8% of the whole test split. Cause: FANTOM5 enhancers reached
+#     through Ensembl repeat the same region once per CAGE peak, and were never
+#     deduplicated before the split. Flat across every length bucket (34-40%), so
+#     it is not a short-sequence collision artifact.
+#
+#   human_nontata_promoters  SOFT, and invisible to an exact-match audit: 0.00%
+#     exact duplicates, but 99.2% of NEGATIVE test windows share >=50% of their
+#     sequence with a train negative -- median 94.8% identity at a median 13 nt
+#     offset. The same 251-nt windows, jittered. 47.5% of the whole test split.
+#
+# Everything else measured clean: human_ensembl_regulatory 0.00%, dummy_mouse
+# 0.41%, demo_coding 0.66%, cohn 0.68%, ocr_ensembl 0.81% (any-overlap);
+# demo_human_or_worm's worm class is 7.3% at >=50%, worth a footnote.
+#
+# This is COMMON-MODE -- Caduceus, HyenaDNA and the CNN baseline train and test
+# on these same splits -- so arm-vs-arm comparison survives and the two tasks
+# must NOT be dropped from the headline, or the number stops being comparable to
+# anything published. Report both means. On our own 5-seed result the leak
+# inflates every absolute mean by ~0.019 (ours 0.8669 over 8 tasks, 0.8477 over
+# the clean 6) while moving the gap to Caduceus-PS only from -0.0021 to -0.0035.
+LEAKY_TASKS = {
+  "human_enhancers_ensembl": "75.5% of positive test windows duplicate train",
+  "human_nontata_promoters": "99.2% of negative test windows >=50% identical",
+}
+
+
+def leak_free_mean(rows, key="accuracy"):
+  """Mean over the tasks with no measured train/test overlap. See LEAKY_TASKS."""
+  clean = [r[key] for r in rows
+           if key in r and r.get("task") not in LEAKY_TASKS]
+  return float(np.mean(clean)) if clean else float("nan")
 
 # The full Table 1 of arXiv:2403.03234, every column. Kept here so a run can
 # print itself against the strongest published variant rather than the softest.
@@ -120,18 +161,33 @@ def task_stats(name):
   the TRAIN labels only -- the old code read `yte.max()` to size the head, which
   is harmless but means the test split is touched before training, and the point
   of the rewrite is that the test split is touchable exactly once.
+
+  **`max_length` is TRAIN-ONLY, deliberately.** Until 2026-09-13 it was
+  `max(train_lengths.max(), test_lengths.max())`, justified in a comment as "a
+  shape constraint, not a measurement". That justification does not survive
+  contact with the claim `finetune.py` makes a few lines later
+  (`guard.require(0)  # nothing above this line has seen the test split`), which
+  it falsified: every run sized its input window using a number read off the
+  test split. Measured before changing it, the read was numerically inert on
+  7/8 tasks (`train_max == test_max`) and absorbed by the block-size rounding on
+  the eighth (`dummy_mouse_enhancers_ensembl`, train 4707 vs test 4776, both
+  round to 4864 at block 256), so no published SSM result moves. It did set the
+  window on the AR arms, where `block_size == 1` makes `window == max_length`
+  exactly: four `*_dummy_mouse_enhancers_ensembl.json` files record
+  `"window": 4776`, a number no train sequence can produce.
+
+  Consequence for a caller: a test sequence longer than the train maximum now
+  raises at encode time instead of being silently accommodated. That is the
+  intended behaviour -- it is a loud request for an explicit `--window`, not a
+  number to be inferred from held-out data.
   """
   data, train_key, test_key = _open_task(name)
   train, test = data[train_key], data[test_key]
   train_lengths = np.asarray([len(s) for s in train[_sequence_column(train)]])
-  test_lengths = np.asarray([len(s) for s in test[_sequence_column(test)]])
   labels = np.asarray(train["label"])
   return {
     "n_train_full": len(train), "n_test_full": len(test),
-    # The window has to cover the test split too or encoding raises, so this is
-    # the one number that reads the test side -- a shape constraint, not a
-    # measurement. Everything a model could be selected on comes from train.
-    "max_length": int(max(train_lengths.max(), test_lengths.max())),
+    "max_length": int(train_lengths.max()),
     "median_length": float(np.median(train_lengths)),
     "mean_length": float(train_lengths.mean()),
     "num_classes": int(labels.max()) + 1,
@@ -202,7 +258,31 @@ def main():
                       default=REPO / "results" / "caduceus" / "genomic_benchmarks")
   parser.add_argument("--tasks", default="all",
                       help="comma-separated task names, or 'all'")
-  parser.add_argument("--pooling", default="mean")
+  parser.add_argument("--pooling", default="mean", choices=POOLINGS,
+                      help="pooled readout only. `choices` is new as of "
+                           "2026-09-13: without it an unrecognised value fell "
+                           "through `pool`'s final branch and silently returned "
+                           "a 2x-wide meanmax vector.")
+  parser.add_argument(
+    "--readout", default="pooled", choices=("pooled", "recurrent"),
+    help="'pooled' (C) mean/max-pools the per-position hidden states -- the "
+         "historical behaviour. 'recurrent' (A) reads the fixed-size SSM "
+         "recurrent state from prefill_left + prefill_right instead, which is "
+         "this architecture's actual whole-sequence summary. Comparing the two "
+         "measures how much of the task-relevant signal the fixed-size state "
+         "manages to concentrate.")
+  parser.add_argument("--recurrent-layers", default="last",
+                      choices=("last", "all"))
+  parser.add_argument("--recurrent-reduce", default="headmean",
+                      choices=RECURRENT_REDUCTIONS,
+                      help="'headmean' averages the headdim axis: 1536 features "
+                           "per layer per direction instead of 98,304. 'raw' "
+                           "keeps the full state and is only sane on the large "
+                           "tasks (dummy_mouse has 968 training rows).")
+  parser.add_argument("--sigma", type=float, default=0.0,
+                      help="conditioning timestep for the pooled readout; the "
+                           "input stays clean. No effect on --readout recurrent, "
+                           "which is timestep-free by construction.")
   parser.add_argument(
     "--window", default="auto",
     help="embedding window in nt: an integer, or 'auto' to size it per task "
@@ -256,12 +336,25 @@ def main():
       # Cover the longest sequence in the task, rounded up to a multiple of the
       # block size so the window is a whole number of trained blocks.
       block = int(trained.block_size)
-      longest = max(max(len(s) for s in xtr), max(len(s) for s in xte))
+      # TRAIN only. This used to be `max(train_longest, test_longest)`; sizing
+      # the input window off the held-out split is a read of test-set structure
+      # that nothing in the output recorded. Measured inert on all 8 tasks at
+      # block 256 -- train and test share a maximum on 7, and the rounding
+      # absorbs the eighth -- so no published probe number moves.
+      longest = max(len(s) for s in xtr)
       window = min(-(-longest // block) * block, args.window_cap)
-    etr = embed_sequences(model, tokenizer, xtr, window, args.pooling,
-                          args.batch_size, 0.0, args.seed, device)
-    ete = embed_sequences(model, tokenizer, xte, window, args.pooling,
-                          args.batch_size, 0.0, args.seed, device)
+    if args.readout == "recurrent":
+      def embed(sequences):
+        return embed_sequences_recurrent(
+          model, tokenizer, sequences, window, args.batch_size,
+          args.recurrent_layers, args.recurrent_reduce, device)
+    else:
+      def embed(sequences):
+        return embed_sequences(model, tokenizer, sequences, window,
+                               args.pooling, args.batch_size, 0.0, args.seed,
+                               device, sigma=args.sigma)
+    etr = embed(xtr)
+    ete = embed(xte)
     accuracy, c = probe(etr, ytr, ete, yte, args.seed)
     reference = PUBLISHED.get(name)
     delta = accuracy - reference if reference else float("nan")
@@ -274,6 +367,13 @@ def main():
                  # rather than only inferable from suspiciously round numbers.
                  "n_train_full": n_train_full, "n_test_full": n_test_full,
                  "train_fraction": len(xtr) / max(n_train_full, 1),
+                 "readout": args.readout,
+                 "recurrent_layers": (args.recurrent_layers
+                                      if args.readout == "recurrent" else None),
+                 "recurrent_reduce": (args.recurrent_reduce
+                                      if args.readout == "recurrent" else None),
+                 "pooling": args.pooling if args.readout == "pooled" else None,
+                 "sigma": args.sigma if args.readout == "pooled" else None,
                  "dim": int(etr.shape[1])})
 
   scored = [r for r in rows if "accuracy" in r]

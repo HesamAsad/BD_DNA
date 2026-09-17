@@ -321,15 +321,25 @@ class BiMambaLayer(nn.Module):
       x: torch.Tensor,
       left_state: Mamba2State,
       right_state: Mamba2State,
+      mask: torch.Tensor | None = None,
   ) -> torch.Tensor:
+    """`mask` ([batch, length] bool, True at real tokens) makes the scan exactly
+    padding-invariant; see `Mamba2Segment.scan_bidirectional`. `None` leaves
+    every existing caller bit-for-bit unchanged."""
     normalized = self.mixer_norm(x)
     # The paper uses a direct sum: no zero-initialized route gate that can
     # silently disable either context direction.
     if self.bidirectional_impl == "fused":
       # Same sum, but the input projection and the output projection are run
       # once instead of once per direction; see `scan_bidirectional`.
-      mixed = self.mixer.scan_bidirectional(normalized, left_state, right_state)
+      mixed = self.mixer.scan_bidirectional(
+        normalized, left_state, right_state, mask=mask)
     else:
+      if mask is not None:
+        raise NotImplementedError(
+          "padding-invariant masking is implemented for "
+          "bidirectional_impl='fused' only; the 'split' path would need the "
+          "same dt/xBC masking applied inside scan_segment")
       forward, _ = self.mixer.scan_segment(normalized, left_state)
       reverse, _ = self.mixer.scan_segment(
         torch.flip(normalized, dims=(1,)), right_state)

@@ -8,7 +8,9 @@
 #BSUB -R "select[mem>64000 && hname!='farm-gpu0504']"
 #BSUB -R "rusage[mem=64000]"
 #BSUB -M 64000
-#BSUB -gpu "num=1:mode=exclusive_process:gmodel=NVIDIAH200"
+# Unconstrained GPU model -- see the note in finetune.sh. A smoke test is the
+# last thing that should queue behind an advance reservation.
+#BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -cwd /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms
 #BSUB -o /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/logs/gb_smoke_probe_%J.out
 #BSUB -e /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/logs/gb_smoke_probe_%J.err

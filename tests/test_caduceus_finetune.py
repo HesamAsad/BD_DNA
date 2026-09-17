@@ -9,6 +9,8 @@ model selection. (c) is exercised end-to-end against a real (tiny)
 that runs.
 """
 
+import pathlib
+
 import numpy as np
 import pytest
 import torch
@@ -17,6 +19,7 @@ from omegaconf import OmegaConf
 import dataloader
 from models.bidirectional_ssm import BidirectionalSSM
 from scripts.eval.caduceus import finetune as ft
+from scripts.eval.caduceus import genomic_benchmarks as gb
 from scripts.eval.dnahnet.score_mavedb import encode_dna
 
 VOCAB = 13
@@ -380,13 +383,9 @@ def _args(**overrides):
 
 
 def _base_config(args, **overrides):
-  config = {k: getattr(args, k) for k in (
-    "epochs", "batch_size", "eval_batch_size", "backbone_lr", "head_lr",
-    "weight_decay", "dropout", "clip", "clip_mode", "scheduler", "warmup_frac",
-    "head_warmup_steps", "honour_no_weight_decay", "pooling", "layer",
-    "head_layernorm", "log_length", "pad_to", "stratified_val",
-    "evals_per_epoch", "patience", "rc_tta", "rc_average", "rc_aug")}
-  config["block_size"] = 8
+  # Delegate, never duplicate: this list used to be a verbatim copy of the one
+  # in finetune.py, and the copies drifted the first time a knob was added.
+  config = ft.base_config_from(args, block_size=8)
   config.update(overrides)
   return config
 
@@ -575,3 +574,404 @@ def test_log_length_widens_the_head_by_one():
   assert extended.head.in_features == 17
   assert ft.Classifier(model.backbone, 16, 2,
                        pooling="meanmax").head.in_features == 32
+
+
+# --------------------------------------------------------------------------
+# 9. Readout (A): the recurrent summary
+# --------------------------------------------------------------------------
+
+def _recurrent(model, sequences, window, **kwargs):
+  from scripts.eval.caduceus.embed import embed_sequences_recurrent
+  return embed_sequences_recurrent(
+    model, model.tokenizer, sequences, window, batch_size=8, **kwargs)
+
+
+def test_recurrent_summary_width_is_nheads_times_dstate_per_layer_per_direction():
+  """headmean is a deliberate 64x narrowing; assert the arithmetic, not a guess."""
+  model = _tiny_model()
+  mixer = model.backbone.layers[0].mixer
+  per_layer = mixer.nheads * mixer.d_state
+  features = _recurrent(model, ["ACGTACGT"], 8)
+  # last layer only, two directions
+  assert features.shape == (1, 2 * per_layer)
+  every = _recurrent(model, ["ACGTACGT"], 8, layers="all")
+  assert every.shape == (1, 2 * len(model.backbone.layers) * per_layer)
+  raw = _recurrent(model, ["ACGTACGT"], 8, reduce="raw")
+  assert raw.shape == (1, 2 * mixer.nheads * mixer.headdim * mixer.d_state)
+  # The narrowing is the whole point: raw is headdim times wider.
+  assert raw.shape[1] == features.shape[1] * mixer.headdim
+
+
+def test_recurrent_summary_is_invariant_to_the_window_ceiling():
+  """Grouping by exact length makes the task window irrelevant, which is the point.
+
+  An earlier design padded every sequence up to the task window and tried to
+  bound the damage by putting the filler on each direction's leading edge. That
+  only ATTENUATES it -- leading context decays as exp(A*dt*distance) and never
+  reaches zero -- and on this toy model the two-sided trick bought a factor of
+  1.85, not the orders of magnitude the production timescales would need to make
+  65% filler safe. Grouping by length removes the filler instead, so `length`
+  degrades to a ceiling and cannot influence a feature at all.
+  """
+  model = _tiny_model()
+  sequence = ["ACGTTGCA"]
+  assert np.allclose(_recurrent(model, sequence, 8),
+                     _recurrent(model, sequence, 4096), atol=0), (
+    "the window ceiling changed the summary, so something is still padding to it")
+
+
+def test_recurrent_summary_keeps_rows_aligned_with_their_sequences():
+  """Grouping reorders; the scatter back must undo it exactly.
+
+  This is the dangerous failure mode of length-grouping: a wrong scatter pairs
+  every feature with another sequence's label, which no accuracy check would
+  report as an error -- it would just look like the readout does not work.
+  """
+  sequences = ["ACGT", "ACGTTGCAACGT", "TTTT", "GGCATTACGATC", "AC"]
+  model = _tiny_model()
+  together = _recurrent(model, sequences, 4096)
+  assert together.shape[0] == len(sequences)
+  for index, sequence in enumerate(sequences):
+    alone = _recurrent(model, [sequence], 4096)
+    assert np.allclose(together[index], alone[0], atol=0), (
+      f"row {index} ({sequence!r}) does not match that sequence embedded alone")
+
+
+def test_recurrent_summary_rejects_a_sequence_over_the_ceiling():
+  model = _tiny_model()
+  with pytest.raises(ValueError, match="exceeds the window"):
+    _recurrent(model, ["A" * 64], 32)
+
+
+def test_recurrent_summary_matches_a_hand_rolled_scan_clean_loop():
+  """prefill_left's final state is the state the layer loop ends on."""
+  model = _tiny_model()
+  backbone = model.backbone.double().eval()
+  encoder = ft.Encoder(model.tokenizer, 8)
+  ids, _ = encoder.encode(["ACGTTGCA"], torch.device("cpu"))
+  with torch.no_grad():
+    cache = backbone.prefill_left(ids)
+    h = backbone.token_embedding(ids)
+    manual = []
+    for layer in backbone.layers:
+      h, state = layer.scan_clean(h, None)
+      manual.append(state)
+  for index, state in enumerate(manual):
+    assert torch.allclose(cache.states[index].ssm, state.ssm, atol=1e-10), index
+    assert torch.allclose(cache.states[index].conv, state.conv, atol=1e-10)
+
+
+def test_recurrent_summary_refuses_a_unidirectional_checkpoint():
+  """Half of (A) is the reverse direction; a uni checkpoint has no honest one.
+
+  UnidirectionalSSM subclasses BidirectionalSSM, so a reverse prefill would have
+  silently succeeded out of distribution -- the exact bug shape that reached the
+  pooled readout twice.
+  """
+  from scripts.eval.caduceus.embed import recurrent_summary
+  model = _tiny_model()
+
+  class FakeUni(type(model.backbone)):
+    pass
+  FakeUni.__name__ = "UnidirectionalSSM"
+  model.backbone.__class__ = FakeUni
+  ids = torch.zeros((1, 8), dtype=torch.long)
+  with pytest.raises(TypeError, match="unidirectional"):
+    recurrent_summary(model, ids, ids)
+
+
+def test_window_from_subset_and_the_real_task_stats_are_exercised(monkeypatch):
+  """The coverage gap the leakage audit found.
+
+  `--window-from subset` is the argparse DEFAULT and is the one branch that read
+  `xte` directly, yet every test passed `window_from="full"` explicitly, and
+  `task_stats` was monkeypatched out everywhere -- so the line whose own comment
+  called itself "the one number that reads the test side" had no test at all.
+  Both are now covered, and `task_stats` is asserted to be train-only.
+  """
+  xtr = ["ACGT" * 3, "TTTT" * 2]
+  xte = ["GGCC" * 9]           # deliberately LONGER than anything in train
+  ytr, yte = np.asarray([0, 1]), np.asarray([0])
+
+  class FakeSplit:
+    def __init__(self, sequences, labels):
+      self.sequences, self.labels = sequences, labels
+      self.column_names = ["seq", "label"]
+    def __len__(self):
+      return len(self.sequences)
+    def __getitem__(self, key):
+      return self.sequences if key == "seq" else list(self.labels)
+
+  monkeypatch.setattr(
+    gb, "_open_task",
+    lambda name: ({"train": FakeSplit(xtr, ytr), "test": FakeSplit(xte, yte)},
+                  "train", "test"))
+  stats = gb.task_stats("toy")
+  assert stats["max_length"] == max(len(s) for s in xtr), (
+    "task_stats sized max_length from the test split")
+  assert stats["max_length"] < max(len(s) for s in xte), (
+    "this test is vacuous unless test is longer than train")
+
+  # And the subset branch: it still reads xte, so assert that it does so only to
+  # cover the split, never to pick a window smaller than train needs.
+  monkeypatch.setattr(
+    ft, "load_task",
+    lambda name, max_train=None, max_test=None, seed=0: (xtr, ytr, xte, yte))
+  monkeypatch.setattr(ft, "task_stats", lambda name: stats)
+  monkeypatch.setattr(ft, "reference", lambda name, column: 0.5)
+  model = _tiny_model()
+  args = _args(seed_list=[0], epochs=1, batch_size=2, eval_batch_size=2,
+               window_from="subset")
+  row = ft.run_task("toy", model, args, _base_config(args), torch.device("cpu"),
+                    None)
+  assert row["test_evaluations"] == 1
+
+
+def test_embed_lut_encoder_is_bit_identical_to_encode_dna():
+  """The fast path must be a pure speedup, on both padding sides.
+
+  `embed.py` tokenised one character at a time through the HF tokenizer until
+  2026-09-13, measured 590x slower than this table. Swapping it in is only safe
+  if it is exact, so: same ids, same mask, same UNK rejection.
+  """
+  from scripts.eval.caduceus.embed import _encode_padded
+  tokenizer = _tokenizer()
+  cpu = torch.device("cpu")
+  chunk = ["ACGTTGCA", "AC", "GGGGCCCCAAAATTTT"]
+  window = 24
+  both = _encode_padded(tokenizer, chunk, window, cpu, ("left", "right"))
+  for row, sequence in enumerate(chunk):
+    want_ids, want_mask = encode_dna(tokenizer, sequence, window)
+    got_ids, got_mask = both["right"]
+    assert got_ids[row].tolist() == want_ids, sequence
+    assert got_mask[row].tolist() == want_mask, sequence
+    # left padding is the same row rolled so the filler leads
+    keep = len(sequence)
+    left_ids, left_mask = both["left"]
+    assert left_ids[row].tolist() == want_ids[keep:] + want_ids[:keep]
+    assert left_mask[row].tolist() == want_mask[keep:] + want_mask[:keep]
+  with pytest.raises(ValueError, match="non-ACGT"):
+    _encode_padded(tokenizer, ["ACGTX"], window, cpu)
+  with pytest.raises(ValueError, match="exceeds model length"):
+    _encode_padded(tokenizer, ["A" * 99], window, cpu)
+
+
+def test_boolean_sweep_values_are_parsed_not_coerced_to_true():
+  """bool('False') is True, which made every boolean knob unsweepable.
+
+  This is why --log-length could never be swept, on the one task
+  (human_ensembl_regulatory) that gives up 71% of its label entropy to
+  sequence length alone.
+  """
+  base = {"log_length": False, "head_layernorm": False, "backbone_lr": 1e-5}
+  grid = ft.parse_sweep("log_length=False,True", base)
+  assert sorted(g["log_length"] for g in grid) == [False, True], grid
+  grid = ft.parse_sweep("head_layernorm=false,true", base)
+  assert sorted(g["head_layernorm"] for g in grid) == [False, True]
+  # and it still types non-booleans correctly
+  assert ft.parse_sweep("backbone_lr=1e-5,3e-5", base)[1]["backbone_lr"] == 3e-5
+  with pytest.raises(ValueError, match="not a boolean"):
+    ft.parse_sweep("log_length=maybe", base)
+
+
+def test_head_warmup_freeze_is_capped_so_small_tasks_still_fine_tune():
+  """Under v2 (head_warmup_steps=200) dummy_mouse has ~70 total steps, so its
+  backbone never unfroze and the 'fine-tune' was a linear probe: about -0.058
+  on that task."""
+  cfg = {"warmup_frac": 0.05, "head_warmup_steps": 200, "scheduler": "none"}
+  # build_schedule returns [backbone_fn, head_fn]
+  backbone, _head = ft.build_schedule(dict(cfg), total_steps=70)
+  live = [s for s in range(70) if backbone(s) > 0]
+  assert live, "backbone never unfroze on a 70-step run"
+  assert min(live) <= 7, f"freeze not capped: first live backbone step {min(live)}"
+  # on a long run the cap is generous enough to keep LP-FT's intent
+  big_backbone, _ = ft.build_schedule(dict(cfg), total_steps=30000)
+  assert big_backbone(100) == 0, "LP-FT should still freeze early on a long run"
+  assert big_backbone(1000) > 0
+
+
+# --------------------------------------------------------------------------
+# Train/eval consistency and wrapper plumbing.
+#
+# Added 2026-09-17 after an audit found that training encodes with
+# `Encoder.window_for(batch)` while `evaluate()` pins the width to
+# `task_window`. Those agree under pad_to="task" and DISAGREE under
+# pad_to="batch", which would score the model at a padding fraction it never
+# trained at. No reported result hit it, and these tests keep it that way.
+# --------------------------------------------------------------------------
+
+def test_train_and_eval_encode_to_the_same_width_under_pad_to_task():
+  tokenizer = _tokenizer()
+  sequences = ["ACGT" * 40, "ACGT" * 20, "ACGT" * 60]   # 160, 80, 240 nt
+  encoder = ft.Encoder(tokenizer, 256, pad_to="task", pad_multiple=8)
+  train_ids, train_mask = encoder.encode(sequences, torch.device("cpu"))
+  # `evaluate` pins the window; see its docstring.
+  eval_ids, eval_mask = encoder.encode(sequences, torch.device("cpu"),
+                                       window=encoder.task_window)
+  assert train_ids.shape == eval_ids.shape
+  assert torch.equal(train_ids, eval_ids)
+  assert torch.equal(train_mask, eval_mask)
+
+
+def test_pad_to_batch_really_does_diverge_train_from_eval():
+  """The defect the guard exists for. If this ever stops failing, drop the guard."""
+  tokenizer = _tokenizer()
+  sequences = ["ACGT" * 40, "ACGT" * 20, "ACGT" * 60]
+  encoder = ft.Encoder(tokenizer, 256, pad_to="batch", pad_multiple=8)
+  train_ids, _ = encoder.encode(sequences, torch.device("cpu"))
+  eval_ids, _ = encoder.encode(sequences, torch.device("cpu"),
+                               window=encoder.task_window)
+  assert train_ids.shape[1] == 240 and eval_ids.shape[1] == 256
+
+
+def test_wrapper_maps_no_two_env_vars_to_one_flag_except_guarded_epochs():
+  """Two env vars emitting one flag silently drops the earlier value.
+
+  `EPOCHS`/`EPOCHS_OVERRIDE` both emit --epochs and are allowed only because
+  the wrapper now refuses to run when both are set.
+  """
+  import collections
+  import re as _re
+  script = (pathlib.Path(__file__).resolve().parents[1]
+            / "scripts/eval/caduceus/finetune.sh").read_text()
+  flags = _re.findall(r"EXTRA\+=\(\s*(--[\w-]+)", script)
+  duplicated = {f for f, n in collections.Counter(flags).items() if n > 1}
+  assert duplicated == {"--epochs"}, duplicated
+  assert "set EPOCHS or EPOCHS_OVERRIDE, not both" in script
+
+
+def test_every_wrapper_hook_names_a_flag_argparse_defines():
+  import re as _re
+  root = pathlib.Path(__file__).resolve().parents[1] / "scripts/eval/caduceus"
+  script = (root / "finetune.sh").read_text()
+  source = (root / "finetune.py").read_text()
+  defined = set(_re.findall(r'add_argument\(\s*"(--[\w-]+)"', source))
+  emitted = set(_re.findall(r"EXTRA\+=\(\s*(--[\w-]+)", script))
+  assert emitted <= defined, sorted(emitted - defined)
+
+
+# --------------------------------------------------------------------------
+# Padding invariance of the bidirectional scan (--pad-invariant).
+#
+# Mean pooling already ignores pad positions, but the SCAN does not: the
+# reverse direction enters from the right end, i.e. through the pad region.
+# Measured on the real checkpoint at the human_ocr_ensembl window (57.5% pad):
+# 5.0% relative change of the pooled feature at the median length, 15.5% at
+# 150nt. `--pad-invariant` drives dt to -inf and zeroes the conv input at pads
+# so a padded forward equals an unpadded one. These tests prove both halves:
+# that it works, and that leaving it off changes nothing.
+# --------------------------------------------------------------------------
+
+def _tiny_bissm():
+  """Same shape as `_tiny_model`'s backbone, but fused so masking is available."""
+  config = OmegaConf.create({
+    "block_size": 8,
+    "algo": {"parameterization": "subs", "time_conditioning": False},
+    "model": {
+      "hidden_size": 16, "cond_dim": 8, "n_blocks": 2, "dropout": 0.0,
+      "tie_word_embeddings": True, "right_flank_probability": 0.0,
+      "ssm_state_size": 4, "ssm_conv_size": 4, "ssm_expand": 2,
+      "ssm_head_dim": 8, "ssm_chunk_size": 4, "ssm_backend": "torch",
+      "mlp_ratio": 2.0, "bidirectional_impl": "fused",
+    },
+  })
+  torch.manual_seed(7)
+  return BidirectionalSSM(config, vocab_size=VOCAB)
+
+
+@pytest.mark.parametrize("real_len,window", [(6, 24), (11, 32)])
+def test_pad_invariant_scan_matches_the_unpadded_forward(real_len, window):
+  model = _tiny_bissm().eval()
+  layer = model.layers[0]
+  torch.manual_seed(1)
+  short = torch.randn(1, real_len, model.hidden_size)
+  padded = torch.cat(
+    [short, torch.randn(1, window - real_len, model.hidden_size)], dim=1)
+  mask = torch.zeros(1, window, dtype=torch.bool)
+  mask[:, :real_len] = True
+
+  empty = lambda n: model._empty_cache(1, short.device, short.dtype, n)
+  with torch.no_grad():
+    reference = layer.scan_active(short, empty("left").states[0],
+                                  empty("right").states[0])
+    masked = layer.scan_active(padded, empty("left").states[0],
+                               empty("right").states[0], mask=mask)
+    unmasked = layer.scan_active(padded, empty("left").states[0],
+                                 empty("right").states[0])
+
+  # With the mask, the real positions reproduce the unpadded forward.
+  assert torch.allclose(masked[:, :real_len], reference, atol=2e-3), (
+    (masked[:, :real_len] - reference).abs().max().item())
+  # Without it they do NOT -- this is the defect the flag exists for. If this
+  # assertion ever fails, padding stopped mattering and the flag is dead code.
+  assert not torch.allclose(unmasked[:, :real_len], reference, atol=2e-3)
+
+
+def test_pad_invariant_defaults_to_off_and_changes_nothing():
+  """mask=None must be bit-for-bit the previous behaviour."""
+  model = _tiny_bissm().eval()
+  layer = model.layers[0]
+  torch.manual_seed(2)
+  x = torch.randn(2, 16, model.hidden_size)
+  empty = lambda n: model._empty_cache(2, x.device, x.dtype, n)
+  with torch.no_grad():
+    a = layer.scan_active(x, empty("left").states[0], empty("right").states[0])
+    b = layer.scan_active(x, empty("left").states[0], empty("right").states[0],
+                          mask=None)
+  assert torch.equal(a, b)
+
+
+# --------------------------------------------------------------------------
+# Block-structured readout (--scan-path blocked).
+#
+# Block diffusion never scans further than block_size, but the default readout
+# runs one unbroken scan across the whole window (19 blocks on
+# dummy_mouse_enhancers_ensembl). `blocked` reproduces the pretraining geometry.
+# The decisive property is the built-in control: a window of exactly one block
+# has NO geometry mismatch, so `blocked` must be a no-op there. If it is not,
+# any effect measured on multi-block tasks is something other than geometry.
+# --------------------------------------------------------------------------
+
+def _classifier(backbone, scan_path, block_size):
+  torch.manual_seed(3)
+  return ft.Classifier(backbone, backbone.hidden_size, 2, "mean", -1, False,
+                       False, 0.0, 0.0, None, scan_path, False,
+                       block_size).eval()
+
+
+def test_blocked_readout_is_a_noop_on_a_single_block_window():
+  model = _tiny_model()
+  block = 8
+  torch.manual_seed(4)
+  ids = torch.randint(8, VOCAB, (2, block))          # window == block_size
+  mask = torch.ones(2, block, dtype=torch.bool)
+  active = _classifier(model.backbone, "active", block)
+  blocked = _classifier(model.backbone, "blocked", block)
+  blocked.load_state_dict(active.state_dict())
+  with torch.no_grad():
+    a, b = active(ids, mask), blocked(ids, mask)
+  assert torch.allclose(a, b, atol=1e-4), (a - b).abs().max().item()
+
+
+def test_blocked_readout_differs_on_a_multi_block_window():
+  """Three blocks: the default runs one 24-token scan, blocked runs 3x8."""
+  model = _tiny_model()
+  block = 8
+  torch.manual_seed(5)
+  ids = torch.randint(8, VOCAB, (2, block * 3))
+  mask = torch.ones(2, block * 3, dtype=torch.bool)
+  active = _classifier(model.backbone, "active", block)
+  blocked = _classifier(model.backbone, "blocked", block)
+  blocked.load_state_dict(active.state_dict())
+  with torch.no_grad():
+    a, b = active(ids, mask), blocked(ids, mask)
+  assert not torch.allclose(a, b, atol=1e-4)
+
+
+def test_blocked_readout_rejects_an_indivisible_window():
+  model = _tiny_model()
+  blocked = _classifier(model.backbone, "blocked", 8)
+  ids = torch.randint(8, VOCAB, (1, 20))             # 20 is not a multiple of 8
+  mask = torch.ones(1, 20, dtype=torch.bool)
+  with pytest.raises(ValueError, match="divisible by block_size"):
+    blocked(ids, mask)

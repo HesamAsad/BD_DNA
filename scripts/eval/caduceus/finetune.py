@@ -203,8 +203,14 @@ class Encoder:
     rounded = -(-longest // self.pad_multiple) * self.pad_multiple
     return min(max(rounded, self.pad_multiple), self.task_window)
 
-  def encode(self, sequences, device):
-    window = self.window_for(sequences)
+  def encode(self, sequences, device, window=None):
+    """`window=None` sizes from `pad_to`; an explicit value pins it.
+
+    Scoring passes the task window explicitly so that a prediction cannot depend
+    on the lengths of the other examples that happened to share its batch --
+    see `evaluate`.
+    """
+    window = int(window) if window is not None else self.window_for(sequences)
     rows = np.full((len(sequences), window), self.pad_id, dtype=np.int64)
     mask = np.zeros((len(sequences), window), dtype=bool)
     for row, sequence in enumerate(sequences):
@@ -270,6 +276,21 @@ class HeldOutTest:
         f"{self.log}")
 
 
+def _check_label_alphabet(name, test_labels, num_classes):
+  """Loud failure if a class appears only in test. Shape check, not selection.
+
+  The head is sized from the TRAIN labels, so a test-only class would be
+  unpredictable rather than wrong-and-obvious. This lives here, after
+  `guard.take`, rather than before training, so that every read of the held-out
+  labels is inside the access log the result JSON publishes.
+  """
+  reached = int(np.max(test_labels))
+  if reached >= num_classes:
+    raise ValueError(
+      f"{name}: test labels reach {reached} but the train split only defines "
+      f"{num_classes} classes")
+
+
 # --------------------------------------------------------------------------
 # Model
 # --------------------------------------------------------------------------
@@ -288,10 +309,38 @@ class Classifier(nn.Module):
 
   def __init__(self, backbone, hidden, num_classes, pooling="mean",
                layer=-1, head_layernorm=False, log_length=False,
-               length_scale=0.0):
+               length_scale=0.0, sigma=0.0, length_bin_edges=None,
+               scan_path="active", pad_invariant=False, block_size=256):
     super().__init__()
     self.backbone = backbone
     self.pooling = pooling
+    # Which stream of a BIDIRECTIONAL checkpoint to read out.
+    #   active   -- scan_active, the default; forward+reverse over the whole
+    #               padded window from zero states.
+    #   clean    -- scan_clean, forward-only over clean tokens. This is exactly
+    #               the computation an AR checkpoint is read out with, and it
+    #               IS trained under block diffusion (prefill_left is not
+    #               detached), so it is in-distribution, not a hack.
+    #   clean-bi -- scan_clean on the sequence and on its reversal, summed
+    #               before final_norm.
+    # Motivation: on human_enhancers_cohn a FROZEN probe (0.7386) beats the
+    # full fine-tune (0.7291), and a unidirectional AR checkpoint beats this
+    # bidirectional one. Both point at the readout regime rather than the
+    # objective, and this flag separates the two.
+    if scan_path not in ("active", "clean", "clean-bi", "blocked"):
+      raise ValueError(
+        f"--scan-path must be active|clean|clean-bi|blocked, got {scan_path!r}")
+    self.scan_path = scan_path
+    self.pad_invariant = bool(pad_invariant)
+    self.block_size = int(block_size)
+    # Conditioning timestep presented to the denoiser. The INPUT is always the
+    # clean sequence -- `sigma` only tells the network which noise regime it is
+    # supposed to be in, which is a different thing and is worth sweeping: at
+    # sigma~0 the modelled task is nearly the identity, so little capacity was
+    # spent building a rich representation there, while diffusion features are
+    # generally richest at intermediate noise. Held at 0.0 by default because
+    # that reproduces every result recorded before 2026-09-13 bit for bit.
+    self.sigma = float(sigma)
     # Which readout path this backbone needs. Until 2026-08-26 the forward
     # below unconditionally called `layers[i].scan_active(h, left, right)`,
     # which is (a) SSM-only -- a DiT has `blocks`, not `layers`, and no
@@ -318,7 +367,20 @@ class Classifier(nn.Module):
     self.norm = nn.LayerNorm(width) if head_layernorm else nn.Identity()
     self.log_length = log_length
     self.length_scale = float(length_scale)
-    self.head = nn.Linear(width + (1 if log_length else 0), num_classes)
+    # BINNED length. A scalar log(len) is ONE dimension into a linear head, so it
+    # can only express a MONOTONIC length-to-class relation. On
+    # human_ensembl_regulatory the three classes sit in length BANDS (train
+    # medians 600 / 400 / 315), which is why a depth-8 tree on len(seq) alone
+    # reaches 0.9134 while the scalar form moved the model only 0.8742 -> 0.8818.
+    # A one-hot over quantile bins lets the head weight each band independently.
+    # Edges are computed from the TRAIN split only (run_task), never from test.
+    self.register_buffer(
+      "length_bin_edges",
+      torch.as_tensor(length_bin_edges, dtype=torch.float32)
+      if length_bin_edges is not None else torch.zeros(0))
+    extra = (1 if log_length else 0) + (
+      len(self.length_bin_edges) + 1 if len(self.length_bin_edges) else 0)
+    self.head = nn.Linear(width + extra, num_classes)
 
   def trainable_backbone_parameters(self):
     """Only the parameters the forward pass actually reaches."""
@@ -333,6 +395,8 @@ class Classifier(nn.Module):
       modules += list(self.backbone.blocks[:self.n_layers])
     else:
       modules = [self.backbone.token_embedding]
+      if getattr(self.backbone, "time_embedding", None) is not None:
+        modules.append(self.backbone.time_embedding)
       modules += list(self.backbone.layers[:self.n_layers])
       if self.use_final_norm:
         modules.append(self.backbone.final_norm)
@@ -373,8 +437,8 @@ class Classifier(nn.Module):
       if sigma_map is None:
         t_cond = None
       else:
-        sigma = torch.zeros(ids.shape[0], device=ids.device,
-                            dtype=torch.float32)
+        sigma = torch.full((ids.shape[0],), self.sigma, device=ids.device,
+                           dtype=torch.float32)
         t_cond = F.silu(sigma_map(sigma))
       ctx = (torch.amp.autocast("cuda", dtype=torch.bfloat16) if h.is_cuda
              else contextlib.nullcontext())
@@ -385,28 +449,109 @@ class Classifier(nn.Module):
       h = h.float()
     else:
       h = b.token_embedding(ids)
+      # Apply the time embedding exactly as `forward_active` does
+      # (bidirectional_ssm.py:990-995). Omitting this was a SILENT DROP of a
+      # trained module on any `time_conditioning: True` checkpoint: the readout
+      # would quietly run without it, and `trainable_backbone_parameters` would
+      # not list it either, so it was neither used nor fine-tuned. It is a no-op
+      # on the checkpoints published before 2026-09-13, every one of which has
+      # `algo.time_conditioning: False` and therefore `time_embedding is None`.
+      if getattr(b, "time_embedding", None) is not None:
+        sigma = torch.full((batch,), self.sigma, device=ids.device,
+                           dtype=torch.float32)
+        h = h + b.time_embedding(sigma)[:, None, :]
       left = b._empty_cache(batch, h.device, h.dtype, "left")
       with b._compute_autocast(h):
-        if self.kind == "ssm-uni":
+        if self.kind == "ssm-uni" or self.scan_path in ("clean", "clean-bi"):
           # Forward-only, matching how an AR checkpoint was trained. Its layers
           # DO expose scan_active (UnidirectionalSSM subclasses
           # BidirectionalSSM and overrides only backbone-level methods), so the
           # bidirectional call would have run without error and quietly used
           # the reverse scan out of distribution.
-          for index in range(self.n_layers):
-            h, _ = b.layers[index].scan_clean(h, left.states[index])
+          if self.scan_path == "clean-bi":
+            # Reverse the padded row AND its mask together, run the same clean
+            # forward scan, then un-reverse and sum. With right padding the
+            # flip puts the pads first, so the reverse stream starts on them --
+            # the same contamination the active path has, which is why this is
+            # a control for `clean` rather than a strict improvement.
+            flipped = torch.flip(h, dims=(1,))
+            for index in range(self.n_layers):
+              h, _ = b.layers[index].scan_clean(h, left.states[index])
+              flipped, _ = b.layers[index].scan_clean(
+                flipped, left.states[index])
+            h = h + torch.flip(flipped, dims=(1,))
+          else:
+            for index in range(self.n_layers):
+              h, _ = b.layers[index].scan_clean(h, left.states[index])
         else:
-          right = b._empty_cache(batch, h.device, h.dtype, "right")
-          for index in range(self.n_layers):
-            h = b.layers[index].scan_active(
-              h, left.states[index], right.states[index])
+          if self.scan_path == "blocked":
+            # BLOCK-STRUCTURED READOUT -- run the scan with the geometry the
+            # checkpoint was PRETRAINED with.
+            #
+            # Block diffusion never scans further than `block_size` (256): each
+            # step supervises one block whose forward state comes from a
+            # `prefill_left` over the preceding CLEAN blocks. The default
+            # readout instead runs a single unbroken scan across the whole
+            # window from a zero state -- 3 blocks on human_ocr_ensembl and 19
+            # on dummy_mouse_enhancers_ensembl, i.e. a 19x extrapolation beyond
+            # any scan length seen in training.
+            #
+            # This branch reproduces the training geometry exactly: boundary
+            # caches from the clean sequence, input folded to
+            # (batch * num_blocks, block_size), one scan per block.
+            #
+            # The right cache is left EMPTY on purpose. This checkpoint trained
+            # at right_flank_probability=0.0, so its reverse scan never once
+            # consumed a populated right state; prefilling one here would be a
+            # DIFFERENT out-of-distribution regime, not a fix for this one.
+            #
+            # Built-in control: three tasks have window == block_size, so they
+            # are a single block and this branch must be a no-op on them. Any
+            # movement there means the effect is not block geometry.
+            window = h.shape[1]
+            if window % self.block_size:
+              raise ValueError(
+                f"--scan-path blocked needs a window divisible by block_size "
+                f"{self.block_size}; got {window}")
+            n_blocks = window // self.block_size
+            bcache = b.prefill_left_boundaries_stacked(ids, self.block_size)
+            folded = h.reshape(batch * n_blocks, self.block_size, h.shape[-1])
+            empty_right = b._empty_cache(
+              batch * n_blocks, h.device, h.dtype, "right")
+            block_mask = None
+            if self.pad_invariant:
+              block_mask = attention_mask.reshape(
+                batch * n_blocks, self.block_size)
+            for index in range(self.n_layers):
+              folded = b.layers[index].scan_active(
+                folded, bcache.states[index], empty_right.states[index],
+                mask=block_mask)
+            h = folded.reshape(batch, window, h.shape[-1])
+          else:
+            right = b._empty_cache(batch, h.device, h.dtype, "right")
+            # `pad_invariant` drives dt to -inf and zeroes the conv input at
+            # pad positions, so the scan sees exactly the unpadded sequence.
+            # Without it the REVERSE direction enters through the pad region --
+            # 57.5% of the window on human_ocr_ensembl -- and perturbs the
+            # pooled feature by ~5% at the median length. Off by default.
+            scan_mask = attention_mask if self.pad_invariant else None
+            for index in range(self.n_layers):
+              h = b.layers[index].scan_active(
+                h, left.states[index], right.states[index], mask=scan_mask)
         if self.use_final_norm:
           h = b.final_norm(h)
     features = self.norm(pool(h.float(), attention_mask, self.pooling))
-    if self.log_length:
+    if self.log_length or len(self.length_bin_edges):
       lengths = attention_mask.sum(dim=1).clamp(min=1).float()
-      features = torch.cat(
-        [features, torch.log(lengths)[:, None] - self.length_scale], dim=-1)
+      if self.log_length:
+        features = torch.cat(
+          [features, torch.log(lengths)[:, None] - self.length_scale], dim=-1)
+      if len(self.length_bin_edges):
+        index = torch.bucketize(torch.log(lengths), self.length_bin_edges)
+        onehot = torch.zeros(lengths.shape[0], len(self.length_bin_edges) + 1,
+                             device=features.device, dtype=features.dtype)
+        onehot.scatter_(1, index[:, None], 1.0)
+        features = torch.cat([features, onehot], dim=-1)
     return self.head(features)
 
 
@@ -444,11 +589,22 @@ def evaluate(classifier, encoder, sequences, labels, batch_size, device,
   """Top-1 accuracy. With `complement`, average over both strands."""
   classifier.eval()
   correct = 0
+  # FIXED width, and no length sort. Until 2026-09-13 this bucketed with
+  # `pool_batches=10**6`, which sorts the ENTIRE split by length and then lets
+  # `Encoder.window_for` take each batch's width from the longest of its
+  # batch-mates. Under `pad_to=batch` that made a prediction a function of the
+  # other examples in the split -- test-time transduction, label-free but real,
+  # and not small: this file's own padding note measures a 6.8e-2 mean-pool
+  # deviation at 17% padding. Pinning the window makes scoring per-example
+  # deterministic and independent. Under `pad_to=task` (the `legacy` preset, and
+  # every `gb-A-legacy-fulldata*` result) `window_for` already returned exactly
+  # this value, so those numbers are unchanged.
   order = make_batches(sequences, range(len(sequences)), batch_size,
-                       bucket=encoder.pad_to == "batch", pool_batches=10**6)
+                       bucket=False)
   with torch.inference_mode():
     for chunk in order:
-      ids, keep = encoder.encode([sequences[i] for i in chunk], device)
+      ids, keep = encoder.encode([sequences[i] for i in chunk], device,
+                                 window=encoder.task_window)
       logits = classifier(ids, keep)
       if complement is not None:
         other = classifier(reverse_complement_ids(ids, keep, complement), keep)
@@ -502,7 +658,25 @@ def split_train_val(labels, fraction, seed, stratified):
 def build_schedule(config, total_steps):
   """Per-group LR multiplier. Group 0 is the backbone, group 1 the head."""
   warmup = max(1, int(config["warmup_frac"] * total_steps))
-  freeze = int(config["head_warmup_steps"])
+  # CAP THE FREEZE. head_warmup_steps is an absolute step count with no guard
+  # against exceeding the run. Under the v2 preset (200) dummy_mouse_enhancers
+  # has only ~70 total steps, so its backbone NEVER unfroze and the "fine-tune"
+  # was a linear probe -- worth about -0.058 on that task and ~-0.007 on any
+  # v2-derived 8-task mean. Capping at 10% of the run keeps LP-FT's intent on
+  # the large tasks and makes it a no-op where it cannot work.
+  freeze = min(int(config["head_warmup_steps"]), int(0.1 * total_steps))
+  if int(config["head_warmup_steps"]) > freeze:
+    print(f"    head_warmup_steps {config['head_warmup_steps']} capped to "
+          f"{freeze} (10% of {total_steps} total steps)", flush=True)
+
+  if config["scheduler"] == "none" and config["warmup_frac"]:
+    # Not an error, but it has misled a measurement: every legacy (bs16) run
+    # records warmup_frac 0.05 and got NO warmup, so the backbone met its full
+    # LR at step 0 beside a randomly-initialised head. The backbone_lr=1e-4
+    # cells that "collapsed" on human_ocr_ensembl (0.7634 / 0.7121) were never
+    # tested with warmup, so that LR ceiling is unestablished.
+    print(f"    NOTE warmup_frac={config['warmup_frac']} is INERT with "
+          f"scheduler='none' (no warmup applied)", flush=True)
 
   def factor(step):
     if config["scheduler"] == "none":
@@ -540,7 +714,14 @@ def train_one(model, encoder, task, config, seed, device, complement=None,
   classifier = Classifier(
     model.backbone, int(model.backbone.hidden_size), num_classes,
     config["pooling"], config["layer"], config["head_layernorm"],
-    config["log_length"], length_scale).to(device)
+    config["log_length"], length_scale,
+    # .get, not [], so a hand-built config (tests, and any caller predating
+    # 2026-09-13) still works and lands on the behaviour it used to have.
+    config.get("sigma", 0.0),
+    config.get("length_bin_edges"),
+    config.get("scan_path", "active"),
+    config.get("pad_invariant", False),
+    config.get("block_size", 256)).to(device)
 
   # The head is random and the backbone is pretrained; one shared learning rate
   # either leaves the head untrained or wrecks the backbone.
@@ -628,7 +809,30 @@ def train_one(model, encoder, task, config, seed, device, complement=None,
 
 SWEEPABLE = ("backbone_lr", "head_lr", "batch_size", "epochs", "dropout",
              "weight_decay", "pooling", "layer", "rc_aug", "warmup_frac",
-             "head_warmup_steps")
+             "head_warmup_steps", "sigma", "log_length", "head_layernorm",
+             "scan_path", "pad_invariant")
+
+# Every knob `run_task` reads out of `config`. SWEEPABLE must be a subset, and
+# this list must be the ONLY place it is spelled: when `sigma` was added on
+# 2026-09-13 the same list existed twice -- here and, copied verbatim, in
+# tests/test_caduceus_finetune.py -- and the copies drifted immediately, turning
+# a one-line feature into 18 failing tests with a bare `KeyError: 'sigma'`.
+BASE_CONFIG_KEYS = (
+  "epochs", "batch_size", "eval_batch_size", "backbone_lr", "head_lr",
+  "weight_decay", "dropout", "clip", "clip_mode", "scheduler", "warmup_frac",
+  "head_warmup_steps", "honour_no_weight_decay", "pooling", "layer",
+  "head_layernorm", "log_length", "pad_to", "stratified_val",
+  "evals_per_epoch", "patience", "rc_tta", "rc_average", "rc_aug", "sigma",
+  "scan_path", "pad_invariant")
+assert set(SWEEPABLE) <= set(BASE_CONFIG_KEYS), (
+  f"not in BASE_CONFIG_KEYS: {sorted(set(SWEEPABLE) - set(BASE_CONFIG_KEYS))}")
+
+
+def base_config_from(args, block_size):
+  """The config dict `run_task` consumes. One spelling, used by main and tests."""
+  config = {k: getattr(args, k) for k in BASE_CONFIG_KEYS}
+  config["block_size"] = int(block_size)
+  return config
 
 
 def parse_sweep(spec, base):
@@ -644,7 +848,21 @@ def parse_sweep(spec, base):
     key = key.strip().replace("-", "_")
     if key not in SWEEPABLE:
       raise ValueError(f"{key} is not sweepable; pick from {SWEEPABLE}")
-    cast = type(base[key])
+    # bool("False") is True, so `cast = type(base[key])` silently turned every
+    # boolean sweep value into True -- which is why --log-length could never be
+    # swept even though it is exactly the feature the length-dominated task
+    # (human_ensembl_regulatory, 71% of its label entropy from len(seq)) needs.
+    base_type = type(base[key])
+    if base_type is bool:
+      def cast(v, _t=base_type):
+        text = v.strip().lower()
+        if text in ("1", "true", "yes", "on"):
+          return True
+        if text in ("0", "false", "no", "off"):
+          return False
+        raise ValueError(f"{key}: {v!r} is not a boolean")
+    else:
+      cast = base_type
     axes.append([(key, cast(v.strip())) for v in values.split(",") if v.strip()])
   return [dict(combo) for combo in itertools.product(*axes)]
 
@@ -661,13 +879,11 @@ def run_task(name, model, args, base_config, device, complement):
   stats = task_stats(name)
   xtr_all, ytr_all, xte, yte = load_task(
     name, args.max_train, args.max_test, args.seed)
-  # Shape check on the label alphabet, not a measurement: the head is sized from
-  # the TRAIN labels (the old code read `yte.max()`), so a class that only ever
-  # appears in test would silently be unpredictable rather than loudly wrong.
-  if int(np.max(yte)) >= stats["num_classes"]:
-    raise ValueError(
-      f"{name}: test labels reach {int(np.max(yte))} but the train split only "
-      f"defines {stats['num_classes']} classes")
+  # The label-alphabet check used to live here, reading `np.max(yte)` before the
+  # guard below was even constructed. It is inert in value on all 8 tasks
+  # (train and test share a label alphabet everywhere), but it is a read of the
+  # held-out split that the guard could not see, so it has moved down to the one
+  # place the test split is legitimately opened -- see `_check_label_alphabet`.
   # Coverage is already ENFORCED for this path: load_task() above calls
   # assert_full_coverage on both splits (genomic_benchmarks.py:161-164), so an
   # undeclared cap raises there before we get here. Asserting again would only
@@ -706,6 +922,14 @@ def run_task(name, model, args, base_config, device, complement):
                     args.pad_multiple, args.pad_token, args.pad_side,
                     not args.slow_encode)
   length_scale = float(np.log(max(1.0, stats["median_length"])))
+  nbins = int(getattr(args, "length_bins", 0) or 0)
+  if nbins > 1:
+    train_logs = np.log(np.maximum(1, [len(s) for s in xtr_all]))
+    base_config["length_bin_edges"] = [
+      float(v) for v in np.unique(
+        np.quantile(train_logs, np.linspace(0, 1, nbins + 1)[1:-1]))]
+  else:
+    base_config["length_bin_edges"] = None
   seeds = args.seed_list
   sweep_seeds = seeds[:max(1, args.sweep_seeds)]
 
@@ -743,7 +967,15 @@ def run_task(name, model, args, base_config, device, complement):
                          "val_per_seed": vals})
     winner = max(sweep_rows, key=lambda r: r["val_mean"])["config"]
     print(f"    winner {describe(winner)}", flush=True)
-  guard.require(0)  # nothing above this line has seen the test split
+  # Nothing above this line has *selected* on the test split: the sweep scores
+  # only validation slices carved from train, and `task_for` never returns test
+  # rows. Two reads of the split's SHAPE do happen above -- `len(xte)` for the
+  # coverage assertion that proves no silent subsampling, and `stats["n_test_full"]`
+  # for the same -- and neither can reach a parameter or a selection decision.
+  # The stronger claim this comment used to make ("nothing above this line has
+  # seen the test split") was false: until 2026-09-13 it also read `np.max(yte)`
+  # and, under `--window-from subset`, every test sequence's length.
+  guard.require(0)
   config = dict(base_config, **winner)
 
   # ---- final: one test evaluation per seed --------------------------------
@@ -754,6 +986,7 @@ def run_task(name, model, args, base_config, device, complement):
                                  device, complement)
     classifier.load_state_dict(best["state"])
     sequences, labels = guard.take(f"final seed={seed}")
+    _check_label_alphabet(name, labels, stats["num_classes"])
     accuracies.append(evaluate(
       classifier, encoder, sequences, labels, config["eval_batch_size"], device,
       complement if config["rc_tta"] else None, config["rc_average"]))
@@ -777,6 +1010,8 @@ def run_task(name, model, args, base_config, device, complement):
     "config": {k: config[k] for k in sorted(SWEEPABLE)},
     "sweep": sweep_rows,
     "window": window, "pad_fraction": round(encoder.pad_fraction, 4),
+      # True when training and scoring used different widths -- see resolve().
+      "train_eval_window_mismatch": bool(config["pad_to"] == "batch"),
     "n_train_used": len(xtr_all), "n_test_used": len(xte),
     "n_train_full": stats["n_train_full"], "n_test_full": stats["n_test_full"],
     "train_fraction": round(len(xtr_all) / stats["n_train_full"], 4),
@@ -868,11 +1103,37 @@ def build_parser():
                      help="how many of --seeds the sweep uses")
 
   group = parser.add_argument_group("readout")
+  group.add_argument("--pad-invariant", action="store_true",
+                     help="zero the conv input and drive dt to -inf at pad "
+                          "positions so the bidirectional scan is exactly "
+                          "invariant to padding; the reverse scan otherwise "
+                          "enters through the pad region")
+  group.add_argument("--scan-path",
+                     choices=("active", "clean", "clean-bi", "blocked"),
+                     default="active",
+                     help="which stream of a bidirectional checkpoint to read "
+                          "out: 'active' (default, scan_active over the padded "
+                          "window), 'clean' (forward-only scan_clean, the same "
+                          "computation an AR checkpoint uses and still trained "
+                          "under block diffusion), or 'clean-bi' (clean scan on "
+                          "the sequence and its reversal, summed)")
   group.add_argument("--pooling", default="mean",
                      choices=("mean", "max", "meanmax"))
   group.add_argument("--layer", type=int, default=-1,
                      help="1-indexed tap depth; -1 = last (with final_norm)")
   group.add_argument("--head-layernorm", action="store_true", default=None)
+  group.add_argument("--sigma", type=float, default=0.0,
+                     help="conditioning timestep fed to the denoiser; the INPUT "
+                          "stays the clean sequence. Only has an effect on a "
+                          "`time_conditioning: True` checkpoint. Sweepable, and "
+                          "worth sweeping: features are often richest at "
+                          "intermediate noise, not at 0")
+  group.add_argument("--length-bins", type=int, default=0,
+                     help="append a one-hot over N quantile bins of log(length), "
+                          "edges from the TRAIN split only. 0 disables. A scalar "
+                          "--log-length can only express a monotone length "
+                          "relation; bins can express bands, which is what "
+                          "human_ensembl_regulatory actually has.")
   group.add_argument("--log-length", action="store_true", default=None,
                      help="append log(len) to the pooled feature; mean pooling "
                           "is blind to length and length is a real class "
@@ -886,6 +1147,9 @@ def build_parser():
                      help="'subset' reproduces the old behaviour, where the "
                           "window silently depended on --max-train")
   group.add_argument("--pad-to", choices=("task", "batch"), default="task")
+  group.add_argument("--allow-window-mismatch", action="store_true",
+                     help="permit --pad-to batch despite the train/eval "
+                          "width mismatch resolve() otherwise refuses")
   group.add_argument("--pad-multiple", type=int, default=8)
   group.add_argument("--pad-token", choices=("N", "PAD"), default="N",
                      help="'N' is the nucleotide the old harness padded with; "
@@ -928,6 +1192,38 @@ def resolve(args):
       setattr(args, key, False)
   args.seed_list = ([args.seed] if not args.seeds
                     else [int(s) for s in args.seeds.split(",") if s.strip()])
+
+  # TRAIN/EVAL WINDOW CONSISTENCY.
+  #
+  # Training encodes with `Encoder.window_for(batch)`; `evaluate` pins the width
+  # to `task_window` so a prediction cannot depend on its batch-mates (the
+  # test-time transduction fixed on 2026-09-13). Under `pad_to="task"` those two
+  # rules return the SAME width and everything is consistent. Under
+  # `pad_to="batch"` they do not: measured on 160/80/240 nt sequences with
+  # task_window 256, training sees width 240 and scoring sees 256. The model is
+  # then evaluated at a padding fraction it never trained at, and for a
+  # BIDIRECTIONAL backbone that is not cosmetic -- the reverse scan enters
+  # through the pad region (measured: 5% pooled-feature shift at the median ocr
+  # length, 15% at 150 nt).
+  #
+  # No result we report has ever hit this (all 27 post-fix runs are pad_to=task;
+  # the 103 pad_to=batch files predate the evaluate() fix, when scoring bucketed
+  # too). It is a trap for the next person who reaches for `--pad-to batch` to
+  # save compute, so refuse it rather than leave it silent.
+  if args.pad_to == "batch" and args.preset in ("v2", "v2-rc"):
+    # Kept only to reproduce historical numbers; they carry the mismatch by
+    # construction, so they still run -- but never silently.
+    args.allow_window_mismatch = True
+    print("WARNING pad_to=batch: training encodes at a per-batch width while "
+          "evaluate() scores at the fixed task window, so the model is scored "
+          "at a padding fraction it never trained at. Recorded as "
+          "train_eval_window_mismatch=true in the result JSON.", file=sys.stderr)
+  if args.pad_to == "batch" and not getattr(args, "allow_window_mismatch", False):
+    raise SystemExit(
+      "--pad-to batch trains at a per-batch width but evaluate() scores at the "
+      "fixed task window, so the model is scored at a padding fraction it never "
+      "saw. Use --pad-to task, or pass --allow-window-mismatch if you have made "
+      "the readout padding-invariant and know what you are doing.")
   return args
 
 
@@ -960,13 +1256,7 @@ def main():
   model.pristine = copy.deepcopy(model.backbone.state_dict())
   complement = build_complement_table(tokenizer, model.backbone.vocab_size)
 
-  base_config = {k: getattr(args, k) for k in (
-    "epochs", "batch_size", "eval_batch_size", "backbone_lr", "head_lr",
-    "weight_decay", "dropout", "clip", "clip_mode", "scheduler", "warmup_frac",
-    "head_warmup_steps", "honour_no_weight_decay", "pooling", "layer",
-    "head_layernorm", "log_length", "pad_to", "stratified_val",
-    "evals_per_epoch", "patience", "rc_tta", "rc_average", "rc_aug")}
-  base_config["block_size"] = int(trained.block_size)
+  base_config = base_config_from(args, trained.block_size)
 
   wanted = ([t for t, _ in TASKS] if args.tasks == "all"
             else [t.strip() for t in args.tasks.split(",") if t.strip()])

@@ -8,7 +8,15 @@
 #BSUB -R "select[mem>64000 && hname!='farm-gpu0504']"
 #BSUB -R "rusage[mem=64000]"
 #BSUB -M 64000
-#BSUB -gpu "num=1:mode=exclusive_process:gmodel=NVIDIAH200"
+# GPU MODEL: unconstrained, deliberately, since 2026-09-13. This line used to
+# read `...:gmodel=NVIDIAH200`, which made every GenomicBenchmarks evaluation
+# queue behind the `iclr_2026` advance reservation on the farm-gpu050x hosts
+# (window 8/22-9/30) while nine non-H200 hosts sat completely idle. Nothing on
+# this path needs an H200: measured host peak across the historical
+# gb_ft_*/gb_probe_*.out logs is 2.4-2.7 GB for the fine-tune and 0.3-6.5 GB for
+# the probe, against 80 GB of device. Put the constraint back only for a job
+# whose memory you have actually measured as needing it.
+#BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -cwd /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms
 #BSUB -o /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/logs/gb_probe_%J.out
 #BSUB -e /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/logs/gb_probe_%J.err
@@ -36,6 +44,12 @@ EXTRA=()
 # NB: do not call this WINDOW -- GNU screen exports WINDOW=<n> and
 # `bsub -env all` carries it in, which silently passed --window 0.
 [ -n "${GB_WINDOW:-}" ] && EXTRA+=(--window "$GB_WINDOW")
+# Readout selection. READOUT=recurrent switches from pooled hidden states (C) to
+# the SSM recurrent summary (A); see embed.py:recurrent_summary.
+[ -n "${READOUT:-}" ]           && EXTRA+=(--readout "$READOUT")
+[ -n "${RECURRENT_LAYERS:-}" ]  && EXTRA+=(--recurrent-layers "$RECURRENT_LAYERS")
+[ -n "${RECURRENT_REDUCE:-}" ]  && EXTRA+=(--recurrent-reduce "$RECURRENT_REDUCE")
+[ -n "${SIGMA:-}" ]             && EXTRA+=(--sigma "$SIGMA")
 # Subsampling is opt-in twice over, matching finetune.sh. GB_MAX_TRAIN/GB_MAX_TEST
 # arriving through `bsub -env all` are IGNORED unless GB_ALLOW_CAPS=1 says you
 # meant it. Every published probe result before 2026-08-25 was silently capped at

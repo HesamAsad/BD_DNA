@@ -601,6 +601,7 @@ class SegmentMamba2(nn.Module):
       u: torch.Tensor,
       left_state: Mamba2State,
       right_state: Mamba2State,
+      mask: torch.Tensor | None = None,
   ) -> torch.Tensor:
     """Forward + reverse scan of ``u`` sharing one ``in_proj`` and ``out_proj``.
 
@@ -661,6 +662,37 @@ class SegmentMamba2(nn.Module):
       zxbcdt,
       [self.d_inner, self.conv_dim, self.nheads],
       dim=-1)
+
+    # PADDING INVARIANCE (opt-in; `mask=None` leaves this path bit-for-bit as
+    # it was). `mask` is [batch, length], True at real tokens.
+    #
+    # Mean pooling downstream already ignores pad positions, but the SCAN does
+    # not: a bidirectional pass enters the reverse direction from the right end,
+    # i.e. through the pad region, so pad tokens perturb the state that reaches
+    # real tokens. Measured on this checkpoint at the human_ocr_ensembl window
+    # (57.5% padding): 5.0% relative change of the pooled feature vector at the
+    # median 315 nt, 15.5% at 150 nt, and 46-91% at the token adjacent to the
+    # pad edge. Padding the OTHER side does not help -- it moves the same
+    # contamination onto the forward scan (5.3% vs 5.0%, measured).
+    #
+    # Two edits make a padded forward exactly equal an unpadded one:
+    #   * zero xBC at pads, so the causal convolution sees the zeros an
+    #     unpadded conv would see (both directions read this same view);
+    #   * drive dt to -inf at pads. `dt` here is PRE-activation -- `_scan`
+    #     applies `softplus(dt + dt_bias)` (dt_softplus=True for the fused
+    #     kernel, explicit for the reference path) -- so softplus(-1e4 + bias)
+    #     is 0, making a pad step the identity: exp(0*A) = 1 and dt*B*x = 0.
+    # `torch.flip(dt, ...)` below inherits the masking, so the reverse scan is
+    # covered without a second edit.
+    if mask is not None:
+      if mask.shape != u.shape[:2]:
+        raise ValueError(
+          f"mask must be [batch, length] = {tuple(u.shape[:2])}, "
+          f"received {tuple(mask.shape)}")
+      keep = mask[..., None]
+      xBC = xBC * keep.to(xBC.dtype)
+      dt = dt.masked_fill(~keep, -1e4)
+
     backend = self._select_backend(u)
 
     def heads(convolved):
