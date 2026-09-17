@@ -1095,9 +1095,28 @@ class Diffusion(L.LightningModule):
 
     # antithetic sampling along blocks & batches (for uniform sampling)
     if self.antithetic_sampling:
-      offset_b = torch.arange(batch_dims[0] * num_blocks, device=device) / (batch_dims[0] * num_blocks)
-      offset_b = offset_b.view(batch_dims[0], num_blocks)
-      _eps_b = (_eps_b / (batch_dims[0] * num_blocks) + offset_b) % 1
+      total = batch_dims[0] * num_blocks
+      strata = torch.arange(total, device=device)
+      if self.config.algo.get('shuffle_antithetic_strata', True):
+        # SHUFFLE which (row, block) receives which stratum.
+        #
+        # Without this the offset grid is a plain `arange` reshaped to
+        # [batch, num_blocks], so block j of row i is permanently bound to
+        # stratum i*num_blocks + j -- on every device, every step, for the whole
+        # run. At batch 4 / 32 blocks that is 128 strata, and BLOCK 0 reaches
+        # only {0, 32, 64, 96}: 3.125% of [0,1], never seeing t in
+        # (0.0088, 0.2508). Block 0 is exactly the geometry MaveDB scores in
+        # (model_length == block_size => a single block), and the Score I
+        # operating points t=0.0628 (nucleotide) and t=0.1594 (codon) both sit
+        # inside that unseen band.
+        #
+        # Shuffling preserves the variance reduction -- every stratum is still
+        # used exactly once per step, so the estimator stays stratified and
+        # unbiased -- while removing the block-to-stratum binding, so each block
+        # sees the full noise range over training.
+        strata = strata[torch.randperm(total, device=device)]
+      offset_b = (strata / total).view(batch_dims[0], num_blocks)
+      _eps_b = (_eps_b / total + offset_b) % 1
     t = _eps_b
     if block_size != self.config.model.length:
       t = t.repeat_interleave(block_size, dim=-1)

@@ -8,7 +8,8 @@
 #BSUB -R "select[mem>128000 && hname!='farm-gpu0504']"
 #BSUB -R "rusage[mem=128000]"
 #BSUB -M 128000
-#BSUB -gpu "num=4:mode=exclusive_process:gmodel=NVIDIAH200"
+# GPU model unconstrained (2026-09-16): the iclr_2026 reservation holds the H200s
+#BSUB -gpu "num=4:mode=exclusive_process"
 #BSUB -cwd /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms
 #BSUB -o /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/logs/train_dna_bissm_%J.out
 #BSUB -e /lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/logs/train_dna_bissm_%J.err
@@ -54,6 +55,20 @@ mkdir -p "$HF_HOME" "$TORCH_HOME" "$XDG_CACHE_HOME" outputs watch_folder logs sa
 EXTRA_ARGS=()
 [ -n "${DNA_MAX_ROWS:-}" ] && EXTRA_ARGS+=( "data.dna_max_rows=$DNA_MAX_ROWS" )
 [ "$WANDB_MODE" = "off" ] && EXTRA_ARGS+=( "wandb=null" )
+# Matched-comparison knobs. LR and the antithetic-stratum shuffle were not
+# reachable from this launcher, so the 2026-08-10 arms were all run at whatever
+# the config defaulted to. The shuffle flag exists because the pre-2026-09-16
+# offset grid bound each block to a fixed noise stratum: at batch 4 / 32 blocks,
+# block 0 saw only 4 of 128 strata and never t in (0.0088, 0.2508) -- the band
+# MaveDB's Score I scores in.
+[ -n "${LR:-}" ]              && EXTRA_ARGS+=( "optim.lr=$LR" )
+[ -n "${BETA2:-}" ]           && EXTRA_ARGS+=( "optim.beta2=$BETA2" )
+[ -n "${WEIGHT_DECAY:-}" ]    && EXTRA_ARGS+=( "optim.weight_decay=$WEIGHT_DECAY" )
+[ -n "${EMA:-}" ]             && EXTRA_ARGS+=( "training.ema=$EMA" )
+[ -n "${LR_SCHEDULER:-}" ]    && EXTRA_ARGS+=( "lr_scheduler=$LR_SCHEDULER" )
+[ -n "${SHUFFLE_STRATA:-}" ]  && EXTRA_ARGS+=( "algo.shuffle_antithetic_strata=$SHUFFLE_STRATA" )
+[ -n "${TIME_CONDITIONING:-}" ] && EXTRA_ARGS+=( "algo.time_conditioning=$TIME_CONDITIONING" )
+[ -n "${EXTRA:-}" ]           && EXTRA_ARGS+=( ${EXTRA} )
 
 RUN_TAG=${LSB_JOBID:-$(date +%Y%m%d-%H%M%S)}
 if [ "$RIGHT_FLANK_PROBABILITY" = "0.0" ]; then

@@ -14,3 +14,6 @@ clip_search_batches: 100   # validation batches feeding the variance search; eac
 fix_clipping: False
 sampler: semi_ar
 mdlm_loss_scale: False
+# Shuffle which (row, block) gets which antithetic noise stratum. False restores
+# the pre-2026-09-16 behaviour, in which block 0 only ever saw 4 of 128 strata.
+shuffle_antithetic_strata: true
