@@ -91,7 +91,50 @@ This is structurally identical to our GB protocol, which matters: our
 fraction, seed, stratified)` already carves validation out of train per seed
 with test held fixed. **Do not rebuild the split logic.**
 
-## 4. What to add to our harness
+## 4. Which checkpoint to use
+
+**Primary: `outputs/hg38-caduceus/hg_bissm_cos/checkpoints/best.ckpt`**
+
+| | |
+|---|---|
+| architecture | BiSSM (bidirectional Mamba-2), block diffusion, ~100.7M params |
+| pretraining corpus | `hg38-cad-no89` -- bed-filtered hg38 with **chr8/chr9 excluded** |
+| length / block | 8,192 / 256 |
+| `right_flank_probability` | 0.5 |
+| `time_conditioning` | **true** |
+| steps | 54,500 |
+| val/nll | 1.0795 on its own validation split |
+| GB precedent | 0.8736 8-task mean, so it is known to load and fine-tune cleanly |
+
+Chosen over the alternatives for three reasons: it is **finished and stable**
+(not a moving target), its **chr8/chr9 exclusion** is what makes the
+contamination control in &sect;8 possible, and it already has a working GB
+result through this exact harness.
+
+**Second arm, optional, available from ~18:00 on 2026-09-21:**
+`outputs/human-rf05-20260920/b256/checkpoints/best.ckpt` (the `fd_human` run --
+60,000 steps, full corpus, `rf=0.5`). Useful as a "does more pretraining help
+NT" contrast, but note it differs on **two** axes at once, not one: a different
+corpus (`human-lr8192v2`, chr8/9 NOT excluded) and `time_conditioning: false`.
+
+Three things to get right when loading:
+
+- **The backbone kind is inferred from the checkpoint** (`finetune.py:353`).
+  You do not pass an architecture flag.
+- **`time_conditioning: true` is handled**, but only since 2026-09-13.
+  `Classifier.forward` applies `b.time_embedding(sigma)` at
+  `finetune.py:497-499`; before that it silently dropped a trained module on
+  any such checkpoint. `hg_bissm_cos` carries 4 trained `time_embedding`
+  tensors, so if you port this harness anywhere, carry that code with it.
+- **Never point at `best.ckpt` of a RUNNING job.** It is rewritten every time
+  validation improves; use a frozen `<epoch>-<step>.ckpt`. `hg_bissm_cos` is
+  finished so its `best.ckpt` is stable; `fd_human`'s is not until it lands.
+
+**Do not compare val/nll between the two.** They validate on different splits
+(`hg38-cad-no89` vs `human-lr8192v2-gene`), so 1.0795 and `fd_human`'s figure
+are not the same measurement.
+
+## 5. What to add to our harness
 
 Our `scripts/eval/caduceus/finetune.py` runs the GB suite and already handles
 multi-seed, per-seed validation carving, a single guarded test evaluation,
@@ -124,7 +167,7 @@ concrete gaps:
 checkpoint is a different architecture and will not load. Extending our harness
 is the supported route.
 
-## 5. The numbers to beat (Caduceus, Table 2)
+## 6. The numbers to beat (Caduceus, Table 2)
 
 Mean over 10 seeds, error bar = max &minus; min. Higher is better throughout.
 
@@ -156,7 +199,7 @@ run on those tasks tells you essentially nothing, and a mean-only comparison
 against them is not meaningful. The histone tasks (mcc 0.4-0.8) are where the
 headroom is; the promoter and splice tasks are near ceiling for everyone.
 
-## 6. Gotchas
+## 7. Gotchas
 
 1. **The error bar is a range, not an sd.** Stated twice on purpose.
 2. **Per-task `max_length`.** 200 to 600 across tasks. Sizing one window for the
@@ -179,7 +222,7 @@ headroom is; the promoter and splice tasks are near ceiling for everyone.
    picks per task. If you fix a single setting across all 18, say so -- it is a
    defensible simplification but it is not what the published row did.
 
-## 7. Contamination, stated up front
+## 8. Contamination, stated up front
 
 These tasks are human genomic sequence. Our checkpoints are pretrained on hg38,
 as are Caduceus, HyenaDNA and the Nucleotide Transformer itself, so this is
@@ -187,9 +230,10 @@ common-mode and standard practice for the benchmark. It is not a reason to
 discount the comparison, but any absolute claim of generalisation needs the
 caveat. We have one checkpoint (`hg38-cad-no89`) trained with chr8/chr9
 excluded; if the NT task intervals can be mapped to chromosomes, scoring that
-slice separately is a control no published row in Table 2 can offer.
+slice separately is a control no published row in Table 2 can offer -- and it is
+why the primary checkpoint above is the chr8/9-excluded one.
 
-## 8. Contact points
+## 9. Contact points
 
 - our GB harness, to extend: `scripts/eval/caduceus/finetune.py`
 - the loader to mirror: `scripts/eval/caduceus/genomic_benchmarks.py`
