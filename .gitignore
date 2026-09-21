@@ -206,3 +206,6 @@ cache/
 mi_rows.npy
 data/hg38/
 data/
+
+# session scratch (leak tests, ad-hoc probes)
+.scratch/

@@ -15,6 +15,7 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
+from scripts.eval.provenance import stamp  # noqa: E402
 
 from scripts.eval.dnahnet.mavedb import spearmanr, summarize_predictions
 
@@ -81,6 +82,40 @@ def _atomic_csv(path: Path, records):
   os.replace(temporary, path)
 
 
+def _shared_score_definition(prediction_paths) -> str:
+  """Read the real estimator out of each run's sibling summary.json.
+
+  This field used to be the hardcoded string "mean of paired NELBO(WT) -
+  NELBO(mutant) runs" regardless of what was actually aggregated, so an
+  aggregate of Score I or PLL runs described itself as NELBO -- the same class
+  of false-provenance bug that `_SCORE_DEFINITIONS` fixed in score_mavedb.py.
+
+  Averaging across DIFFERENT estimators is never meaningful (they are not even
+  defined on the same variants: nelbo scores 21,250, infill_* 19,349,
+  predictive_divergence 15,889), so disagreement is a hard error rather than a
+  note in the output.
+  """
+  modes, definitions, missing = set(), set(), []
+  for path in prediction_paths:
+    sidecar = Path(path).resolve().parent / "summary.json"
+    if not sidecar.exists():
+      missing.append(str(sidecar))
+      continue
+    payload = json.loads(sidecar.read_text())
+    modes.add(str(payload.get("score_mode")))
+    definitions.add(str(payload.get("score_definition")))
+  if missing:
+    raise SystemExit(
+      "cannot establish what was aggregated -- no summary.json beside:\n  "
+      + "\n  ".join(missing))
+  if len(modes) > 1:
+    raise SystemExit(
+      f"refusing to average across different estimators: {sorted(modes)}. "
+      f"They are not defined on the same variant sets.")
+  definition = definitions.pop() if len(definitions) == 1 else "mixed"
+  return f"mean over {len(prediction_paths)} independent runs of: {definition}"
+
+
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("--prediction", type=Path, action="append", required=True)
@@ -96,12 +131,15 @@ def main():
     "label": args.label,
     "prediction_runs": [str(path.resolve()) for path in args.prediction],
     "num_independent_runs": len(runs),
-    "score_definition": "mean of paired NELBO(WT) - NELBO(mutant) runs",
-    "headline_metric": "macro mean absolute per-assay Spearman",
+    "score_definition": _shared_score_definition(args.prediction),
+    "headline_metric": "macro mean SIGNED per-assay Spearman "
+                       "(macro_abs_spearman retained for comparability with "
+                       "runs predating 2026-09-13)",
   })
 
   args.output_dir.mkdir(parents=True, exist_ok=True)
   _atomic_csv(args.output_dir / "predictions.csv", combined)
+  stamp(summary, args)
   _atomic_json(args.output_dir / "summary.json", summary)
   print(json.dumps(summary, indent=2, sort_keys=True))
 

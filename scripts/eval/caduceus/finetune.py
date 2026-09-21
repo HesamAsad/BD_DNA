@@ -310,7 +310,8 @@ class Classifier(nn.Module):
   def __init__(self, backbone, hidden, num_classes, pooling="mean",
                layer=-1, head_layernorm=False, log_length=False,
                length_scale=0.0, sigma=0.0, length_bin_edges=None,
-               scan_path="active", pad_invariant=False, block_size=256):
+               scan_path="active", pad_invariant=False, block_size=256,
+               right_cache=False):
     super().__init__()
     self.backbone = backbone
     self.pooling = pooling
@@ -332,6 +333,7 @@ class Classifier(nn.Module):
         f"--scan-path must be active|clean|clean-bi|blocked, got {scan_path!r}")
     self.scan_path = scan_path
     self.pad_invariant = bool(pad_invariant)
+    self.right_cache = bool(right_cache)
     self.block_size = int(block_size)
     # Conditioning timestep presented to the denoiser. The INPUT is always the
     # clean sequence -- `sigma` only tells the network which noise regime it is
@@ -407,6 +409,42 @@ class Classifier(nn.Module):
           seen.add(id(parameter))
           out.append(parameter)
     return out
+
+  def backbone_parameters_by_depth(self):
+    """[(depth, [params])] for layer-wise LR decay, shallowest first.
+
+    Depth 0 is the embedding (and time_embedding when present); depth i+1 is
+    backbone layer/block i; the final norm rides with the deepest layer. Only
+    the modules `forward` actually reaches are listed, exactly as
+    `trainable_backbone_parameters` does -- the two must not drift, so the flat
+    list is derived from this one rather than maintained separately.
+    """
+    if self.kind == "dit":
+      stem = [self.backbone.vocab_embed]
+      if getattr(self.backbone, "sigma_map", None) is not None:
+        stem.append(self.backbone.sigma_map)
+      depth_modules = list(self.backbone.blocks[:self.n_layers])
+      tail = []
+    else:
+      stem = [self.backbone.token_embedding]
+      if getattr(self.backbone, "time_embedding", None) is not None:
+        stem.append(self.backbone.time_embedding)
+      depth_modules = list(self.backbone.layers[:self.n_layers])
+      tail = [self.backbone.final_norm] if self.use_final_norm else []
+    groups, seen = [], set()
+    def take(modules):
+      out = []
+      for module in modules:
+        for parameter in module.parameters():
+          if id(parameter) not in seen:
+            seen.add(id(parameter))
+            out.append(parameter)
+      return out
+    groups.append((0, take(stem)))
+    for i, module in enumerate(depth_modules):
+      extra = tail if i == len(depth_modules) - 1 else []
+      groups.append((i + 1, take([module] + extra)))
+    return [(d, ps) for d, ps in groups if ps]
 
   def head_parameters(self):
     return list(self.norm.parameters()) + list(self.head.parameters())
@@ -516,8 +554,16 @@ class Classifier(nn.Module):
             n_blocks = window // self.block_size
             bcache = b.prefill_left_boundaries_stacked(ids, self.block_size)
             folded = h.reshape(batch * n_blocks, self.block_size, h.shape[-1])
-            empty_right = b._empty_cache(
-              batch * n_blocks, h.device, h.dtype, "right")
+            # Right boundary cache. Empty by default (every published GB
+            # number was produced that way), but with `--right-cache` we build
+            # the REAL one from the clean sequence -- BiSSM's reverse
+            # cross-block pathway, which is otherwise dead weight here.
+            if self.right_cache:
+              empty_right = b.prefill_right_boundaries_stacked(
+                ids, self.block_size)
+            else:
+              empty_right = b._empty_cache(
+                batch * n_blocks, h.device, h.dtype, "right")
             block_mask = None
             if self.pad_invariant:
               block_mask = attention_mask.reshape(
@@ -528,7 +574,11 @@ class Classifier(nn.Module):
                 mask=block_mask)
             h = folded.reshape(batch, window, h.shape[-1])
           else:
-            right = b._empty_cache(batch, h.device, h.dtype, "right")
+            if self.right_cache:
+              # whole-sequence reverse pass, not a zero state
+              right = b.prefill_right(ids)
+            else:
+              right = b._empty_cache(batch, h.device, h.dtype, "right")
             # `pad_invariant` drives dt to -inf and zeroes the conv input at
             # pad positions, so the scan sees exactly the unpadded sequence.
             # Without it the REVERSE direction enters through the pad region --
@@ -721,7 +771,8 @@ def train_one(model, encoder, task, config, seed, device, complement=None,
     config.get("length_bin_edges"),
     config.get("scan_path", "active"),
     config.get("pad_invariant", False),
-    config.get("block_size", 256)).to(device)
+    config.get("block_size", 256),
+    right_cache=config.get("right_cache", False)).to(device)
 
   # The head is random and the backbone is pretrained; one shared learning rate
   # either leaves the head untrained or wrecks the backbone.
@@ -733,8 +784,29 @@ def train_one(model, encoder, task, config, seed, device, complement=None,
     special = [p for p in backbone_params if getattr(p, "_no_weight_decay", False)]
   else:
     plain, special = backbone_params, []
-  groups = [{"params": plain, "lr": config["backbone_lr"]},
-            {"params": classifier.head_parameters(), "lr": config["head_lr"]}]
+  # LAYER-WISE LR DECAY. gamma < 1 scales each depth by gamma^(depth_from_top),
+  # so the embedding moves least and the layer feeding the head moves most. The
+  # standard transfer-learning recipe, never tried here: every result so far
+  # gave all 12 layers one shared `backbone_lr`.
+  llrd = float(config.get("llrd", 1.0) or 1.0)
+  if llrd < 1.0:
+    by_depth = classifier.backbone_parameters_by_depth()
+    top = max(d for d, _ in by_depth)
+    special_ids = {id(p) for p in special}
+    groups = []
+    for depth, params in by_depth:
+      scaled = config["backbone_lr"] * (llrd ** (top - depth))
+      kept = [p for p in params if id(p) not in special_ids]
+      if kept:
+        groups.append({"params": kept, "lr": scaled})
+    if special:
+      groups.append({"params": special, "lr": config["backbone_lr"],
+                     "weight_decay": 0.0})
+    groups.append({"params": classifier.head_parameters(), "lr": config["head_lr"]})
+    special = []   # already placed
+  else:
+    groups = [{"params": plain, "lr": config["backbone_lr"]},
+              {"params": classifier.head_parameters(), "lr": config["head_lr"]}]
   if special:
     groups.append({"params": special, "lr": config["backbone_lr"],
                    "weight_decay": 0.0})
@@ -810,7 +882,7 @@ def train_one(model, encoder, task, config, seed, device, complement=None,
 SWEEPABLE = ("backbone_lr", "head_lr", "batch_size", "epochs", "dropout",
              "weight_decay", "pooling", "layer", "rc_aug", "warmup_frac",
              "head_warmup_steps", "sigma", "log_length", "head_layernorm",
-             "scan_path", "pad_invariant")
+             "scan_path", "pad_invariant", "llrd", "clip", "clip_mode")
 
 # Every knob `run_task` reads out of `config`. SWEEPABLE must be a subset, and
 # this list must be the ONLY place it is spelled: when `sigma` was added on
@@ -819,11 +891,12 @@ SWEEPABLE = ("backbone_lr", "head_lr", "batch_size", "epochs", "dropout",
 # a one-line feature into 18 failing tests with a bare `KeyError: 'sigma'`.
 BASE_CONFIG_KEYS = (
   "epochs", "batch_size", "eval_batch_size", "backbone_lr", "head_lr",
+  "right_cache",
   "weight_decay", "dropout", "clip", "clip_mode", "scheduler", "warmup_frac",
   "head_warmup_steps", "honour_no_weight_decay", "pooling", "layer",
   "head_layernorm", "log_length", "pad_to", "stratified_val",
   "evals_per_epoch", "patience", "rc_tta", "rc_average", "rc_aug", "sigma",
-  "scan_path", "pad_invariant")
+  "scan_path", "pad_invariant", "llrd")
 assert set(SWEEPABLE) <= set(BASE_CONFIG_KEYS), (
   f"not in BASE_CONFIG_KEYS: {sorted(set(SWEEPABLE) - set(BASE_CONFIG_KEYS))}")
 
@@ -915,7 +988,19 @@ def run_task(name, model, args, base_config, device, complement):
     # --max-train the way the old code's did.
     window = min(-(-stats["max_length"] // block) * block, args.window_cap)
   else:
-    longest = max(max(len(s) for s in xtr_all), max(len(s) for s in xte))
+    # TRAIN ONLY. This branch is the argparse default and, until 2026-09-21,
+    # was the one place the harness still sized a hyperparameter from the test
+    # split -- which contradicted the `test_split_policy` string written into
+    # every result file. `Encoder.encode` already raises on a sequence longer
+    # than the window, so a test sequence that does not fit is now a hard error
+    # rather than a silent peek at the held-out data.
+    #
+    # Verified non-retroactive on 2026-09-21: across all 8 tasks the window is
+    # IDENTICAL either way (4864/256/256/512/768/1024/256/768), so no published
+    # number moves. `dummy_mouse_enhancers_ensembl` is the only task where the
+    # raw maxima differ at all (train 4707 vs test 4776) and both round up to
+    # the same 4864, which also leaves the longest test row fitting.
+    longest = max(len(s) for s in xtr_all)
     window = min(-(-longest // block) * block, args.window_cap)
 
   encoder = Encoder(model.tokenizer, window, base_config["pad_to"],
@@ -973,8 +1058,10 @@ def run_task(name, model, args, base_config, device, complement):
   # coverage assertion that proves no silent subsampling, and `stats["n_test_full"]`
   # for the same -- and neither can reach a parameter or a selection decision.
   # The stronger claim this comment used to make ("nothing above this line has
-  # seen the test split") was false: until 2026-09-13 it also read `np.max(yte)`
-  # and, under `--window-from subset`, every test sequence's length.
+  # seen the test split") was false twice over: until 2026-09-13 it also read
+  # `np.max(yte)`, and until 2026-09-21 `--window-from subset` -- the argparse
+  # DEFAULT -- sized the window from every test sequence's length. Both reads
+  # are gone; what remains is the two shape reads named above.
   guard.require(0)
   config = dict(base_config, **winner)
 
@@ -1103,6 +1190,18 @@ def build_parser():
                      help="how many of --seeds the sweep uses")
 
   group = parser.add_argument_group("readout")
+  group.add_argument("--llrd", type=float, default=1.0,
+                     help="layer-wise LR decay: each depth gets "
+                          "backbone_lr * llrd**(depth_from_top). 1.0 = off "
+                          "(one shared rate, the behaviour of every result "
+                          "before 2026-09-18)")
+  group.add_argument(
+    "--right-cache", action="store_true",
+    help="Supply BiSSM's REAL right boundary cache in the classifier instead "
+         "of a zero state. Off by default (every published GB number used the "
+         "zero state), which left the reverse cross-block pathway unused -- "
+         "the point of a bidirectional SSM. Needs a checkpoint trained with "
+         "right_flank_probability>0 to be meaningful.")
   group.add_argument("--pad-invariant", action="store_true",
                      help="zero the conv input and drive dt to -inf at pad "
                           "positions so the bidirectional scan is exactly "
@@ -1292,6 +1391,31 @@ def main():
   mean = float(np.mean([r["accuracy"] for r in rows]))
   ph = float(np.mean([r["caduceus_ph_published"] for r in rows]))
   ps = float(np.mean([r["caduceus_ps_published"] for r in rows]))
+
+  # Two of the eight official tasks leak between their own train and test
+  # splits, in the upstream data -- not through anything this harness does.
+  # `human_enhancers_ensembl`: 75.5% of positive test windows are EXACT
+  # coordinate duplicates of train windows (37.8% of that whole test set),
+  # because FANTOM5 enhancers arrive once per CAGE peak and were never
+  # deduplicated before splitting. `human_nontata_promoters`: 0.00% exact
+  # duplicates, so an exact-match audit calls it clean, but 99.2% of negative
+  # test windows share >=50% of their sequence with a train negative at a
+  # median offset of 13 nt -- the same 251-nt windows, jittered (47.5% of that
+  # test set).
+  #
+  # This is common-mode: Caduceus, HyenaDNA and the CNN baseline all train and
+  # test on these same splits, so it does not flatter us specifically. But it
+  # inflates everyone's 8-task mean by roughly 0.019, so BOTH numbers belong in
+  # the file. Do not drop the two tasks from `mean_accuracy` -- that would
+  # break comparability with every published row.
+  LEAKY_TASKS = ("human_enhancers_ensembl", "human_nontata_promoters")
+  clean_rows = [r for r in rows if r["task"] not in LEAKY_TASKS]
+  leak_free_mean = (float(np.mean([r["accuracy"] for r in clean_rows]))
+                    if clean_rows else None)
+  leak_free_ph = (float(np.mean([r["caduceus_ph_published"] for r in clean_rows]))
+                  if clean_rows else None)
+  leak_free_ps = (float(np.mean([r["caduceus_ps_published"] for r in clean_rows]))
+                  if clean_rows else None)
   print("-" * len(header))
   print(f"{'MEAN':<34}{mean:>8.4f}{'':>7}{ph:>8.3f}{mean - ph:>+8.4f}"
         f"{ps:>8.3f}{mean - ps:>+8.4f}")
@@ -1310,6 +1434,22 @@ def main():
     "caduceus_no_equiv_mean_published": float(np.mean(
       [r["caduceus_no_equiv_published"] for r in rows])),
     "delta_ph": mean - ph, "delta_ps": mean - ps,
+    "leak_free_mean_accuracy": leak_free_mean,
+    "leak_free_n_tasks": len(clean_rows),
+    "leak_free_excluded": list(LEAKY_TASKS),
+    "leak_free_caduceus_ph_published": leak_free_ph,
+    "leak_free_caduceus_ps_published": leak_free_ps,
+    "leak_free_delta_ph": (None if leak_free_mean is None
+                           else leak_free_mean - leak_free_ph),
+    "leak_free_delta_ps": (None if leak_free_mean is None
+                           else leak_free_mean - leak_free_ps),
+    "leak_free_note": (
+      "human_enhancers_ensembl and human_nontata_promoters leak between their "
+      "own train and test splits in the OFFICIAL upstream data (37.8% exact "
+      "coordinate duplicates and 47.5% jittered near-duplicates of the "
+      "respective test sets). Common-mode across Caduceus, HyenaDNA and the "
+      "CNN baseline, so relative standing barely moves -- but it lifts every "
+      "8-task mean by ~0.019. Report both."),
     "note": (
       "Published values are transcribed from arXiv:2403.03234 Table 1, not "
       "reproduced here. The GenomicBenchmarks row of that table is a 470K-"
@@ -1326,7 +1466,14 @@ def main():
       "The test split is held behind HeldOutTest and evaluated exactly once "
       "per seed, from the restored best-validation weights. Sweeps select on "
       "validation only and assert zero test accesses; per-task "
-      "'test_evaluations' records the count."),
+      "'test_evaluations' records the count. No hyperparameter is sized from "
+      "the test split: num_classes, length_scale and the encoder window all "
+      "come from train alone (the window under --window-from subset did read "
+      "test lengths until 2026-09-21; verified identical on all 8 tasks, so "
+      "earlier numbers are unaffected). Two reads of the test split's SHAPE "
+      "remain -- len(xte) and n_test_full, both for the coverage assertion "
+      "that proves no silent subsampling -- and neither can reach a parameter "
+      "or a selection decision."),
     "tasks": rows,
   }
   # git sha, argv, host, LSF job id and every watched environment variable.

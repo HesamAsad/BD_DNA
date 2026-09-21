@@ -32,6 +32,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 sys.path.insert(0, str(REPO))
+from scripts.eval.provenance import stamp  # noqa: E402
 
 from scripts.eval.dnahnet.deg import (  # noqa: E402
   STOP_CASSETTE,
@@ -452,6 +453,8 @@ def main():
 
   args.output_dir.mkdir(parents=True, exist_ok=True)
   _atomic_csv(args.output_dir / "predictions.csv", scored)
+  # argv/git/time in the artifact itself, matching score_mavedb.py
+  stamp(summary, args)
   _atomic_json(args.output_dir / "summary.json", summary)
   compact = {key: summary[key] for key in (
     "label", "num_genes", "num_organisms", "num_essential", "base_rate",

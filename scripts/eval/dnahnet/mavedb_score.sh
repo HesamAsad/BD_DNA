@@ -53,7 +53,20 @@ mkdir -p "$OUTPUT_DIR" logs
 EXTRA_ARGS=()
 [[ "$REVERSE_OFF" == "1" ]] && EXTRA_ARGS+=(--reverse-off)
 EXTRA_ARGS+=(--score-mode "$SCORE_MODE")
+[ -n "${SCORE2_WINDOW:-}" ] && EXTRA_ARGS+=(--score2-window "$SCORE2_WINDOW")
+# EPSILON sets the LOWER end of the sampled noise band: t ~ U(0,1)*(1-eps)+eps.
+# Raising it isolates the high-mask regime, where a block conditions only on CLEAN
+# preceding blocks. score_mavedb.py has always exposed --epsilon; this wrapper never
+# forwarded it, which is why the noise band had never been swept.
+[ -n "${EPSILON:-}" ]        && EXTRA_ARGS+=(--epsilon "$EPSILON")
 [ -n "${INFILL_PAD_SIDE:-}" ] && EXTRA_ARGS+=(--infill-pad-side "$INFILL_PAD_SIDE")
+# RIGHT_FLANK populates the reverse boundary cache at scoring time. score_mavedb.py
+# has always exposed --right-flank; this wrapper never forwarded it, the same
+# silent no-op that hid --epsilon until 2026-09-19. Meaningful ONLY on a checkpoint
+# trained with right_flank_probability>0 -- on an rf=0.0 checkpoint it drives an
+# untrained pathway. Label any result from it a two-sided pseudo-likelihood, never
+# a NELBO.
+[ -n "${RIGHT_FLANK:-}" ]    && EXTRA_ARGS+=(--right-flank "$RIGHT_FLANK")
 [ -n "$GENOMIC_PREFIX" ] && EXTRA_ARGS+=(--genomic-prefix "$GENOMIC_PREFIX")
 [ -n "$MAX_VARIANTS" ] && EXTRA_ARGS+=(--max-variants "$MAX_VARIANTS")
 

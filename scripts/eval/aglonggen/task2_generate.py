@@ -55,6 +55,7 @@ import torch
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
+from scripts.eval.provenance import stamp  # noqa: E402
 
 from scripts.eval.dnahnet.score_mavedb import load_checkpoint_model  # noqa: E402
 
@@ -393,12 +394,16 @@ def main():
           "trained, so any ca-vs-mismatch contrast measures an untrained input "
           "slot. See the 2026-09-07 root cause.", flush=True)
   print("provenance:", json.dumps(prov), flush=True)
-  args.out.write_text(json.dumps({
+  report = {
     "checkpoint": str(args.checkpoint), "global_step": step,
     "provenance": prov,
     "length": LENGTH, "block_size": block, "num_steps": args.num_steps,
-    "refine_passes": args.refine_passes, "split": args.split, "chroms": sorted(chroms) if chroms else "all",
-    "n_loci": len(loci), "records": records}, indent=2))
+    "refine_passes": args.refine_passes, "split": args.split,
+    "chroms": sorted(chroms) if chroms else "all",
+    "n_loci": len(loci), "n_loci_requested": args.n_loci, "records": records}
+  # argv/git/time, so the sample size behind a result is recoverable from it
+  stamp(report, args)
+  args.out.write_text(json.dumps(report, indent=2))
   bad = [r for r in records if len(r["sequence"]) != LENGTH]
   print(f"\nwrote {args.out}  ({len(records)} sequences, "
         f"{len(bad)} wrong length)")

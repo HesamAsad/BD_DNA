@@ -1,0 +1,219 @@
+{
+  "_provenance": {
+    "argv": [
+      "scripts/eval/dnahnet/score_mavedb.py",
+      "--checkpoint",
+      "outputs/carbon-prokaryote/transformer-ar-20260808-v1/full/checkpoints/last.ckpt",
+      "--data",
+      "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/data_cache/dnahnet/mavedb_ecoli_k12_21250.jsonl.gz",
+      "--output-dir",
+      "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/results/dnahnet/mavedb/transformer-ar-genomicprefix-154315",
+      "--label",
+      "transformer-ar-genomicprefix",
+      "--batch-size",
+      "64",
+      "--mc-samples",
+      "1",
+      "--model-length",
+      "512",
+      "--seed",
+      "1",
+      "--score-mode",
+      "nelbo",
+      "--genomic-prefix",
+      "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/data_cache/dnahnet/mavedb_genomic_prefix.json"
+    ],
+    "git_dirty": true,
+    "git_sha": "5b3e202e9c464bb9b4b29df22821db898c0269c2",
+    "host": "farm-gpu0303",
+    "lsf_job_id": "154315",
+    "python": "3.10.15",
+    "resolved_args": {
+      "batch_size": 64,
+      "checkpoint": "outputs/carbon-prokaryote/transformer-ar-20260808-v1/full/checkpoints/last.ckpt",
+      "data": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/data_cache/dnahnet/mavedb_ecoli_k12_21250.jsonl.gz",
+      "epsilon": 0.001,
+      "genomic_prefix": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/data_cache/dnahnet/mavedb_genomic_prefix.json",
+      "infill_pad_side": "right",
+      "label": "transformer-ar-genomicprefix",
+      "max_variants": null,
+      "mc_samples": 1,
+      "model_length": 512,
+      "output_dir": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/results/dnahnet/mavedb/transformer-ar-genomicprefix-154315",
+      "reverse_off": false,
+      "score_mode": "nelbo",
+      "seed": 1
+    },
+    "watched_env": {
+      "BATCH_SIZE": "64",
+      "CUDA_VISIBLE_DEVICES": "0",
+      "MC_SAMPLES": "1",
+      "SEED": "1",
+      "WINDOW": "0"
+    }
+  },
+  "assays": [
+    {
+      "abs_spearman": 0.18069997079410965,
+      "n": 1521,
+      "score_set_urn": "urn:mavedb:00000122-0-1",
+      "spearman": 0.18069997079410965,
+      "target": "argR",
+      "title": "argR combined scores"
+    },
+    {
+      "abs_spearman": 0.35191774809032,
+      "n": 1481,
+      "score_set_urn": "urn:mavedb:00000160-0-1",
+      "spearman": 0.35191774809032,
+      "target": "cspA",
+      "title": "cspA combined scores"
+    },
+    {
+      "abs_spearman": 0.27458021972332264,
+      "n": 1499,
+      "score_set_urn": "urn:mavedb:00000161-0-1",
+      "spearman": 0.27458021972332264,
+      "target": "cspA (G17A)",
+      "title": "cspA (G17A) combined scores"
+    },
+    {
+      "abs_spearman": 0.3472171392076175,
+      "n": 1500,
+      "score_set_urn": "urn:mavedb:00000162-0-1",
+      "spearman": 0.3472171392076175,
+      "target": "cspA (L43S)",
+      "title": "cspA (L43S) combined scores"
+    },
+    {
+      "abs_spearman": 0.5323265401585903,
+      "n": 2079,
+      "score_set_urn": "urn:mavedb:00000213-0-1",
+      "spearman": 0.5323265401585903,
+      "target": "sucB",
+      "title": "sucB combined scores"
+    },
+    {
+      "abs_spearman": 0.18924307513347557,
+      "n": 2244,
+      "score_set_urn": "urn:mavedb:00000214-0-1",
+      "spearman": 0.18924307513347557,
+      "target": "nusA",
+      "title": "nusA combined scores"
+    },
+    {
+      "abs_spearman": 0.42399256162603355,
+      "n": 1070,
+      "score_set_urn": "urn:mavedb:00000230-0-1",
+      "spearman": 0.42399256162603355,
+      "target": "sucB",
+      "title": "sucB combined scores"
+    },
+    {
+      "abs_spearman": 0.04339062201765349,
+      "n": 2165,
+      "score_set_urn": "urn:mavedb:00000233-0-1",
+      "spearman": -0.04339062201765349,
+      "target": "FecA",
+      "title": "FecA combined scores"
+    },
+    {
+      "abs_spearman": 0.025376779650674346,
+      "n": 2593,
+      "score_set_urn": "urn:mavedb:00000282-0-1",
+      "spearman": 0.025376779650674346,
+      "target": "yaiA",
+      "title": "yaiA combined scores"
+    },
+    {
+      "abs_spearman": 0.1585262019138531,
+      "n": 2526,
+      "score_set_urn": "urn:mavedb:00000369-0-1",
+      "spearman": 0.1585262019138531,
+      "target": "exbD",
+      "title": "exbD combined scores"
+    },
+    {
+      "abs_spearman": 0.32173625299232844,
+      "n": 1115,
+      "score_set_urn": "urn:mavedb:00000383-0-1",
+      "spearman": 0.32173625299232844,
+      "target": "sucB",
+      "title": "sucB combined scores"
+    },
+    {
+      "abs_spearman": 0.28627472213989413,
+      "n": 1457,
+      "score_set_urn": "urn:mavedb:00000630-0-1",
+      "spearman": 0.28627472213989413,
+      "target": "CspA",
+      "title": "CspA combined scores"
+    }
+  ],
+  "backbone": "dit",
+  "block_size": 1,
+  "checkpoint": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/outputs/carbon-prokaryote/transformer-ar-20260808-v1/full/checkpoints/last.ckpt",
+  "checkpoint_global_step": 8000,
+  "epsilon": 0.001,
+  "genomic_prefix": true,
+  "headline_metric": "macro mean SIGNED per-assay Spearman (macro_abs_spearman retained for comparability with runs predating 2026-09-13)",
+  "label": "transformer-ar-genomicprefix",
+  "macro_abs_spearman": 0.2612734861206561,
+  "macro_signed_spearman": 0.25404171578438045,
+  "mc_samples": 1,
+  "model_length": 512,
+  "num_assays": 12,
+  "num_negative_assays": 1,
+  "num_scored_variants": 21250,
+  "num_unscored_variants": 0,
+  "num_variants": 21250,
+  "parameterization": "ar",
+  "pooled_abs_spearman": 0.0862011700972159,
+  "pooled_spearman": 0.0862011700972159,
+  "protein_event_baseline": {
+    "macro_abs_spearman": 0.3093064554200026,
+    "macro_signed_spearman": 0.3093064554200026,
+    "num_assays": 12,
+    "num_negative_assays": 0,
+    "num_scored_variants": 21250,
+    "num_unscored_variants": 0,
+    "num_variants": 21250,
+    "pooled_abs_spearman": 0.4035653495145634,
+    "pooled_spearman": 0.4035653495145634
+  },
+  "requested_mc_samples": 1,
+  "reverse_off": false,
+  "score_definition": "exact NLL(WT) - exact NLL(mutant)",
+  "score_mode": "nelbo",
+  "seed": 1,
+  "stratified": {
+    "all": {
+      "macro_signed_spearman": 0.24757408286126292,
+      "n_assays": 12,
+      "n_assays_positive": 11,
+      "n_variants": 19349
+    },
+    "blosum62_baseline_nsyn_eq_1": {
+      "macro_signed_spearman": 0.23840349076208386,
+      "n_assays": 12,
+      "n_assays_positive": 12,
+      "n_variants": 13838,
+      "note": "zero parameters, no DNA; the bar the nsyn==1 stratum must clear"
+    },
+    "nsyn_eq_1": {
+      "macro_signed_spearman": 0.18115099608075488,
+      "n_assays": 12,
+      "n_assays_positive": 12,
+      "n_variants": 13838
+    },
+    "nsyn_ge_2": {
+      "macro_signed_spearman": 0.10422192516715015,
+      "n_assays": 7,
+      "n_assays_positive": 7,
+      "n_variants": 5445
+    },
+    "unparseable_hgvs_pro": 1901
+  },
+  "trained_model_length": 8192,
+  "trained_right_flank_probability": NaN
+}

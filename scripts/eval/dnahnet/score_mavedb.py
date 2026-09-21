@@ -17,6 +17,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import math
 import torch
 from omegaconf import OmegaConf
 
@@ -39,12 +40,44 @@ from scripts.eval.provenance import stamp  # noqa: E402
 DEFAULT_DATA = REPO / "data_cache/dnahnet/mavedb_ecoli_k12_21250.jsonl.gz"
 
 
+# Human-readable provenance per --score-mode. Keyed explicitly rather than
+# chained on if/elif: an `else` fallback stamped four different estimators
+# (predictive_divergence, pll, pll_causal, state_displacement) with the NELBO
+# definition, so a summary.json claimed to be something it was not. The
+# completeness test asserts this dict covers every argparse choice.
+_SCORE_DEFINITIONS = {
+  "nelbo": "paired NELBO(WT) - paired NELBO(mutant), Monte Carlo bound",
+  "pll": "pseudo-log-likelihood(mutant) - pseudo-log-likelihood(WT): "
+         "sum_i log p(x_i | x_{-i}), bidirectional masked marginals",
+  "block_marginal": "fully-masked one-step control: sum log q(x_i | clean "
+                    "prefix, whole block masked, t=1); deterministic, no "
+                    "within-block conditioning -- isolates what revealing adds",
+  "seq_unmask": "sequential-unmasking log-likelihood(mutant) - ...(WT): "
+                "within each block reveal true bases left to right, "
+                "sum log q(x_j | clean prefix, revealed x_<j); deterministic, "
+                "no 1/t, expresses within-block dependence",
+  "pll_causal": "causal pseudo-log-likelihood(mutant) - ...(WT): AR "
+                "factorisation sum_i log p(x_i | x_{<i}) via the BD model",
+  "infill_nt": "Score I: log q(mutant) - log q(WT) at the masked variant "
+               "site, one forward pass, per nucleotide",
+  "infill_nt_bounded": "Score I per nucleotide, mapped to [0,1] by eq. (6)-(7)",
+  "infill_codon": "Score I summed over the whole mutated codon",
+  "infill_nsyn": "Score I over the codon, non-synonymous stratum only",
+  "state_displacement": "cosine distance between the WT and mutant recurrent "
+                        "states at the end of the scan",
+  "predictive_divergence": "Score II: mean_j JSD(p_j^wt || p_j^mut) in bits "
+                           "over downstream positions j > max(M), stored "
+                           "negated so that higher = fitter",
+}
+
+
 def load_checkpoint_model(
     checkpoint_path: Path,
     model_length: int,
     eval_batch_size: int,
     device: torch.device,
     reverse_off: bool = False,
+    right_flank: float | None = None,
 ):
   raw = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
   hyperparameters = raw.get("hyper_parameters", {})
@@ -60,7 +93,15 @@ def load_checkpoint_model(
   config.eval.checkpoint_path = str(checkpoint_path)
   if config.algo.backbone in {"bissm", "ussm"}:
     config.model.active_blocks = "all"
-    config.model.right_flank_probability = 0.0
+    # Inference default stays 0.0 so every published number reproduces.
+    # --right-flank turns on BiSSM's reverse CROSS-BLOCK pathway, which was
+    # dead in every arm until 2026-09-20.
+    # SEMANTICS: with a clean right cache each block also conditions on the
+    # clean blocks AFTER it, so the score stops being a NELBO and becomes a
+    # two-sided block PSEUDO-LIKELIHOOD. Legitimate -- Evo 2 prescribes
+    # pseudolikelihood for masked models -- but a different quantity.
+    config.model.right_flank_probability = (
+      0.0 if right_flank is None else float(right_flank))
   if reverse_off:
     # Same ablation as the `bissm_reverse_off` arm of
     # scripts/eval/ppl_ssm_baselines.sh: build the UNIdirectional backbone from
@@ -168,6 +209,122 @@ def _loss_from_fixed_corruption(model, x0, t, common_uniform):
 
 
 
+def _block_marginal_totals(model, x0, token_mask):
+  """Fully-masked one-step control for `seq_unmask`.
+
+  Identical clean caches, identical starting time, but every real position is
+  scored from ONE forward pass with its whole block masked -- nothing is ever
+  revealed:
+
+      l_marg(x) = sum_b sum_{i in b} log q(x_i | x_{<b}, MASK^B, t=1)
+
+  This is literally `_sequential_unmask_totals`' first forward pass, read at
+  every position instead of only at position 0.
+
+  WHY IT IS NEEDED. Sequential unmasking differs from the high-noise NELBO
+  score in two ways at once: it removes Monte Carlo corruption sampling, and
+  it lets a block condition on its own already-revealed bases. Both this
+  control and `seq_unmask` are deterministic, so the difference between THEM
+  isolates the second effect. Without it, any sequential improvement could
+  simply be the removal of estimator noise.
+
+  It does NOT show that the recovered dependencies are codon dependencies;
+  that needs the synonymous-encoding comparison.
+
+  Returns positive NLL-like totals, matching the caller's convention.
+  """
+  block_size = int(model.config.block_size)
+  batch_size, sequence_length = x0.shape
+  if sequence_length % block_size:
+    raise ValueError(
+      f"sequence length {sequence_length} not divisible by block {block_size}")
+  num_blocks = sequence_length // block_size
+
+  with model._model_autocast_context():
+    left_cache = model.backbone.prefill_left_boundaries_stacked(x0, block_size)
+  if model._bissm_use_right_flank(x0.device):
+    pass  # allowed: see the semantics note in load_checkpoint_model
+
+  folded = (batch_size * num_blocks, block_size)
+  clean = x0.reshape(*folded)
+  current = torch.full_like(clean, model.mask_index)
+  # t = 1.0 is seq_unmask's step-0 time, so the two share this forward exactly.
+  p_step = torch.ones((batch_size * num_blocks, 1),
+                      device=x0.device, dtype=torch.float32)
+  sigma = model._sigma_from_p(p_step).reshape(batch_size * num_blocks)
+  with model._model_autocast_context():
+    logits = model.backbone.forward_active(
+      current, sigma, left_cache=left_cache, right_cache=None)
+  scores = model._subs_parameterization(logits, current)
+  logp = scores.gather(-1, clean[:, :, None]).squeeze(-1).double()
+  total = logp.reshape(batch_size, sequence_length)
+  return -(total * token_mask).sum(dim=-1)
+
+
+def _sequential_unmask_totals(model, x0, token_mask):
+  """Exact log-likelihood under a fixed left-to-right unmasking order.
+
+  WHY THIS EXISTS. The NELBO estimator draws t and masks each position
+  independently. At the epsilon=0.9 setting that scored best, a block of 8
+  holds 0.4 visible bases on average and 68% of blocks are masked ENTIRELY
+  (E[t^8] over U(0.9,1) = 0.681). A fully masked block is scored as a product
+  of independent per-position marginals, which cannot express any within-block
+  dependency: if the only legal strings are AA and CC, the marginals are
+  uniform at both positions and the impossible AC scores exactly like AA. The
+  codon is the DNA analogue. The model can know the dependency perfectly and
+  still be unable to express it through that estimator.
+
+  This estimator removes that limitation. Within each block, reveal the true
+  bases one at a time, left to right, and read each base's log-probability
+  given the clean prefix AND the already-revealed bases of its own block:
+
+      l_seq(x) = sum_b sum_j log q(x_{b,j} | x_{<b}, x_{b,<j}, MASK_{b,>=j})
+
+  Properties: deterministic (no Monte Carlo), no 1/t weight, and it is an
+  EXACT likelihood for the generative order it defines -- not a bound, though
+  also not the likelihood of a stochastic-order diffusion sampler.
+
+  Cost: block_size sequential steps, with all blocks batched inside each step,
+  so 8 forward passes per sequence against the NELBO path's 128 draws.
+
+  Returns positive NLL-like totals so the caller's `wt_loss - mut_loss`
+  keeps its meaning.
+  """
+  block_size = int(model.config.block_size)
+  batch_size, sequence_length = x0.shape
+  if sequence_length % block_size:
+    raise ValueError(
+      f"sequence length {sequence_length} not divisible by block {block_size}")
+  num_blocks = sequence_length // block_size
+
+  with model._model_autocast_context():
+    left_cache = model.backbone.prefill_left_boundaries_stacked(x0, block_size)
+  if model._bissm_use_right_flank(x0.device):
+    pass  # allowed: conditioning becomes two-sided, reveal order unchanged
+
+  folded = (batch_size * num_blocks, block_size)
+  clean = x0.reshape(*folded)
+  current = torch.full_like(clean, model.mask_index)
+  logp = torch.zeros(folded, dtype=torch.float64, device=x0.device)
+
+  for step in range(block_size):
+    # fraction of the block still hidden, used only if the net is time-conditioned
+    remaining = (block_size - step) / block_size
+    p_step = torch.full((batch_size * num_blocks, 1), remaining,
+                        device=x0.device, dtype=torch.float32)
+    sigma = model._sigma_from_p(p_step).reshape(batch_size * num_blocks)
+    with model._model_autocast_context():
+      logits = model.backbone.forward_active(
+        current, sigma, left_cache=left_cache, right_cache=None)
+    scores = model._subs_parameterization(logits, current)
+    logp[:, step] = scores[:, step, :].gather(
+      -1, clean[:, step, None]).squeeze(-1).double()
+    current[:, step] = clean[:, step]          # reveal the true base, then continue
+
+  total = logp.reshape(batch_size, sequence_length)
+  return -(total * token_mask).sum(dim=-1)     # positive, NLL-like
+
+
 def _pll_totals(model, x0, token_mask, chunk_size=128):
   """Pseudo-log-likelihood: sum_i -log p(x_i | x_{-i}), one masked position at a time.
 
@@ -188,9 +345,18 @@ def _pll_totals(model, x0, token_mask, chunk_size=128):
   Returns a positive NLL-like total, matching the sign convention of the
   NELBO path so `predicted_fitness = wt_loss - mut_loss` is unchanged.
   """
-  if int(model.config.model.length) != int(model.config.block_size):
+  # The leak this guards against is the CLEAN stream: with more than one block,
+  # x_t could in principle read x_0 and the masked marginal would return the
+  # answer. That stream only exists when `cross_attn` is set -- every estimator
+  # here builds it as `cat(noisy, clean)` under `if model.cross_attn`, and
+  # passes `noisy` alone otherwise. A state-space backbone therefore sees only
+  # the noisy sequence, in which the scored position is masked, so there is
+  # nothing to leak from at any model_length. Guarding it anyway made pll,
+  # pll_causal and all four infill modes unrunnable on the b8/b32 checkpoints
+  # -- the two best models in the study had 3 estimators against block 256's 9.
+  if model.cross_attn and int(model.config.model.length) != int(model.config.block_size):
     raise ValueError(
-      f"PLL scoring requires one block: model.length "
+      f"PLL scoring requires one block under cross-attention: model.length "
       f"({model.config.model.length}) must equal block_size "
       f"({model.config.block_size}), otherwise x_t can attend to the clean "
       f"stream and the masked marginal leaks the answer")
@@ -208,6 +374,69 @@ def _pll_totals(model, x0, token_mask, chunk_size=128):
       arange = torch.arange(count, device=x0.device)
       noisy = sequence.unsqueeze(0).repeat(count, 1)
       noisy[arange, index] = model.mask_index
+      if model.cross_attn:
+        clean = sequence.unsqueeze(0).repeat(count, 1)
+        model_input = torch.cat((noisy, clean), dim=-1)
+      else:
+        model_input = noisy
+      sigma = torch.zeros(count, 1, device=x0.device, dtype=torch.float32)
+      log_scores = model.forward(model_input, sigma=sigma)
+      totals[row] -= log_scores[
+        arange, index, sequence[index]].double().sum()
+  return totals
+
+
+def _causal_pll_totals(model, x0, token_mask, chunk_size=128):
+  """sum_i -log p(x_i | x_{<i}) -- the AUTOREGRESSIVE factorisation, computed
+  with a block-diffusion model.
+
+  Why this exists. The AR arms score a variant with the exact chain rule,
+  conditioning position i on its LEFT context only. `_pll_totals` conditions on
+  BOTH flanks. Those differ in two ways at once -- the training objective AND
+  the conditioning -- so the 0.2547 (AR) vs 0.1031 (BD PLL) gap cannot be
+  attributed to either. This estimator changes only the conditioning: mask
+  position i and everything to its right, leave the left clean, read
+  log p(x_i | x_{<i}). Summed over i that IS the autoregressive factorisation,
+  evaluated by the BD checkpoint.
+
+  If this recovers ~0.25 the BD objective is fine and the deficit was the
+  bidirectional conditioning. If it stays near 0.10 the BD model's conditionals
+  are genuinely weaker and the objective is the cause.
+
+  Same one-block and time_conditioning requirements as `_pll_totals`, for the
+  same anti-leak reason, and the same positive NLL-like sign convention.
+  """
+  # The leak this guards against is the CLEAN stream: with more than one block,
+  # x_t could in principle read x_0 and the masked marginal would return the
+  # answer. That stream only exists when `cross_attn` is set -- every estimator
+  # here builds it as `cat(noisy, clean)` under `if model.cross_attn`, and
+  # passes `noisy` alone otherwise. A state-space backbone therefore sees only
+  # the noisy sequence, in which the scored position is masked, so there is
+  # nothing to leak from at any model_length. Guarding it anyway made pll,
+  # pll_causal and all four infill modes unrunnable on the b8/b32 checkpoints
+  # -- the two best models in the study had 3 estimators against block 256's 9.
+  if model.cross_attn and int(model.config.model.length) != int(model.config.block_size):
+    raise ValueError(
+      f"causal PLL requires one block under cross-attention: model.length "
+      f"({model.config.model.length}) must equal block_size "
+      f"({model.config.block_size})")
+  if model.config.algo.time_conditioning:
+    raise ValueError("causal PLL scoring assumes time_conditioning=False")
+
+  batch_size, length = x0.shape
+  totals = torch.zeros(batch_size, dtype=torch.float64, device=x0.device)
+  positions_all = torch.arange(length, device=x0.device)
+  for row in range(batch_size):
+    positions = token_mask[row].nonzero(as_tuple=True)[0]
+    sequence = x0[row]
+    for start in range(0, positions.numel(), chunk_size):
+      index = positions[start:start + chunk_size]
+      count = index.numel()
+      arange = torch.arange(count, device=x0.device)
+      noisy = sequence.unsqueeze(0).repeat(count, 1)
+      # Mask position i AND everything after it, so the model sees exactly the
+      # left context an autoregressive factorisation would condition on.
+      noisy[positions_all.unsqueeze(0) >= index.unsqueeze(1)] = model.mask_index
       if model.cross_attn:
         clean = sequence.unsqueeze(0).repeat(count, 1)
         model_input = torch.cat((noisy, clean), dim=-1)
@@ -265,6 +494,31 @@ def _infill_logprobs(model, ids, mask_positions):
   return log_scores[0, mask_positions]
 
 
+def _assert_index_lands_on_variant(wt_ids, index, wt_string, positions, model):
+  """Fail loudly if the absolute indices do not sit on the intended bases.
+
+  `positions` are 0-based within the VARIANT string, while `wt_ids` is the
+  padded model input. Those coincide only when nothing precedes the variant.
+  With `--genomic-prefix` the prefix occupies `[0, len(prefix))` and the variant
+  starts after it, but `score_batch` computes a non-zero `offset` only for
+  `--infill-pad-side left` -- so an infill run behind a prefix would silently
+  read positions INSIDE THE PREFIX and score the wrong nucleotides.
+
+  No published number is affected: no run has ever combined an infill mode with
+  a genomic prefix. It became REACHABLE on 2026-09-20, when the one-block guard
+  was relaxed to fire on `cross_attn` only -- exactly the kind of hole a
+  relaxation opens. Checking the bases rather than re-deriving the arithmetic
+  catches any offset error, not only this one.
+  """
+  ids = wt_ids[index].tolist()
+  want = [model.tokenizer.convert_tokens_to_ids(wt_string[p]) for p in positions]
+  if ids != want:
+    raise ValueError(
+      f"Score I index does not land on the variant: read token ids {ids[:8]} "
+      f"but the wild-type bases at those variant positions are {want[:8]}. A "
+      f"genomic prefix shifts the variant; pass the prefix length as `offset`.")
+
+
 def score_infill(model, wt_ids, mut_ids, wt_string, mut_string, unit="codon",
                  offset=0):
   """Score I. Returns (score, n_units, n_synonymous_units) or (nan, 0, 0).
@@ -300,15 +554,31 @@ def score_infill(model, wt_ids, mut_ids, wt_string, mut_string, unit="codon",
   if not positions:
     return 0.0, 0, 0          # identity variant: exactly zero, as for NELBO/PLL
 
-  if unit not in ("nt", "codon", "codon_nsyn"):
-    raise ValueError(f"unit must be nt|codon|codon_nsyn, got {unit!r}")
-  if unit == "nt":
+  if unit not in ("nt", "nt_bounded", "codon", "codon_nsyn"):
+    raise ValueError(
+      f"unit must be nt|nt_bounded|codon|codon_nsyn, got {unit!r}")
+  if unit in ("nt", "nt_bounded"):
     index = torch.tensor([p + offset for p in positions], device=wt_ids.device)
+    _assert_index_lands_on_variant(wt_ids, index, wt_string, positions, model)
     logp = _infill_logprobs(model, wt_ids, index).double()
     arange = torch.arange(index.numel(), device=wt_ids.device)
-    total = float((logp[arange, mut_ids[index]] - logp[arange, wt_ids[index]]).sum())
+    per_position = logp[arange, mut_ids[index]] - logp[arange, wt_ids[index]]
     del arange
-    return total, len(positions), 0
+    if unit == "nt":
+      # S_raw = sum_i [log q_i(mut) - log q_i(wt)].
+      return float(per_position.sum()), len(positions), 0
+    # BOUNDED AGGREGATION. sigma() applied to the TOTAL is a monotone map of
+    # S_raw and so leaves Spearman exactly unchanged (verified: 0.124532 both
+    # ways). Applied PER POSITION and then averaged it is NOT monotone in the
+    # sum, and it is a different estimator:
+    #
+    #   mean_i  q_i(mut) / (q_i(mut) + q_i(wt))   in [0, 1]
+    #
+    # The motivation is a measured property of this dataset: the median variant
+    # differs at 13 nucleotides, so an unbounded SUM is dominated by its single
+    # most extreme term. Bounding each position first caps any one site's
+    # influence at 1/n. Same single forward pass, still zero-variance.
+    return float(torch.sigmoid(per_position).mean()), len(positions), 0
 
   codons = sorted({i // 3 for i in positions})
   if unit == "codon_nsyn":
@@ -342,6 +612,9 @@ def score_infill(model, wt_ids, mut_ids, wt_string, mut_string, unit="codon",
       # Every change was synonymous: exactly zero, as in the `codon` mode.
       return 0.0, len(codons), synonymous_skipped
     codons = keep
+  _assert_index_lands_on_variant(
+    wt_ids, torch.tensor([p + offset for p in positions],
+                         device=wt_ids.device), wt_string, positions, model)
   span = torch.tensor([3 * c + k + offset for c in codons for k in range(3)],
                       device=wt_ids.device)
   logp = _infill_logprobs(model, wt_ids, span).double()
@@ -379,6 +652,56 @@ def score_infill(model, wt_ids, mut_ids, wt_string, mut_string, unit="codon",
     # a partial total would not be.
     return float("nan"), len(codons), synonymous
   return total, len(codons), synonymous
+
+
+def score_predictive_divergence(model, wt_ids, mut_ids, positions, window=0):
+  """Score II, eq. (4): mean Jensen-Shannon divergence over DOWNSTREAM positions.
+
+      S_II = (1/|J|) sum_{j in J} JSD( p_j^wt || p_j^mut ),   J = { j > max(M) }
+
+  `p_j = p_theta(x_j | context)` where the context is the prefix carrying either
+  the wild-type or the mutant bases at the variant sites M. Every j in J is
+  masked in the SAME pass, so each p_j conditions on the prefix and not on the
+  other downstream positions -- which is what "the induced predictive
+  distribution over the remaining sequence" means. Two forward passes total,
+  deterministic, no Monte Carlo.
+
+  NORMALISATION. JSD is computed in BITS (log base 2), for which
+  0 <= JSD <= 1 for any pair of distributions, so the mean over J is in [0, 1]
+  natively and needs no rescaling. 0 means "the variant changes nothing about
+  what should follow".
+
+  SIGN. S_II is a MAGNITUDE of perturbation: larger = more disruptive = LOWER
+  fitness. This harness stores `predicted_fitness` as higher = FITTER
+  throughout, so the caller negates before storing. Reporting -S_II against +f
+  is identical to reporting S_II against rank(-f), which is the convention the
+  design asks for; doing both would double-negate and invert the result.
+
+  `window` > 0 truncates J to the next `window` positions after the variant;
+  0 uses the whole remaining real sequence.
+  """
+  if not positions:
+    return float("nan"), 0
+  start = max(positions) + 1
+  real = int((wt_ids != model.tokenizer.convert_tokens_to_ids("N")).sum())
+  stop = wt_ids.shape[0] if real <= 0 else min(real, wt_ids.shape[0])
+  if window > 0:
+    stop = min(stop, start + window)
+  if stop <= start:
+    return float("nan"), 0
+  index = torch.arange(start, stop, device=wt_ids.device)
+
+  wt_log = _infill_logprobs(model, wt_ids, index).double()     # [|J|, vocab]
+  mut_log = _infill_logprobs(model, mut_ids, index).double()
+  p = wt_log.exp()
+  q = mut_log.exp()
+  m = 0.5 * (p + q)
+  log_m = m.clamp_min(1e-30).log()
+  kl_pm = (p * (wt_log - log_m)).sum(-1)
+  kl_qm = (q * (mut_log - log_m)).sum(-1)
+  jsd_nats = 0.5 * (kl_pm + kl_qm)
+  jsd_bits = jsd_nats / math.log(2.0)                          # in [0, 1]
+  return float(jsd_bits.mean()), int(index.numel())
 
 
 def score_state_displacement(model, wt_ids, mut_ids, direction="right"):
@@ -442,6 +765,7 @@ def score_batch(
     score_mode: str = "nelbo",
     prefixes=None,
     infill_pad_side: str = "right",
+    score2_window: int = 0,
 ):
   x0_cpu, token_mask_cpu = build_pair_tensors(
     records, tokenizer, model_length, prefixes)
@@ -454,14 +778,17 @@ def score_batch(
 
   is_ar = str(model.parameterization) == "ar"
   infill = None
-  if score_mode.startswith("infill") or score_mode == "state_displacement":
+  if (score_mode.startswith("infill")
+      or score_mode in ("state_displacement", "predictive_divergence")):
     if is_ar:
       raise ValueError(
         f"--score-mode {score_mode} reads DOWNSTREAM context, which an "
         f"autoregressive model cannot see. Use --score-mode nelbo for AR "
         f"checkpoints; the contrast between the two is the point, not a "
         f"limitation to work round.")
-    if score_mode == "state_displacement":
+    if score_mode == "predictive_divergence":
+      pass          # needs only a downstream flank, which the AR check above covers
+    elif score_mode == "state_displacement":
       # prefill_right is the direction that can see these variants, and only a
       # bidirectional backbone has an honest one. UnidirectionalSSM subclasses
       # BidirectionalSSM, so this would otherwise run out of distribution rather
@@ -470,12 +797,24 @@ def score_batch(
         raise ValueError(
           f"state displacement uses the reverse-scan summary; backbone is "
           f"{model.config.algo.backbone!r}, not 'bissm'")
-    elif int(model.config.model.length) != int(model.config.block_size):
+    elif (model.cross_attn
+          and int(model.config.model.length) != int(model.config.block_size)):
       raise ValueError(
         f"Score I requires one block so the clean stream cannot leak the "
         f"answer: model.length ({model.config.model.length}) must equal "
         f"block_size ({model.config.block_size})")
-    if score_mode == "state_displacement":
+    if score_mode == "predictive_divergence":
+      infill = []
+      for i, record in enumerate(records):
+        pos = variant_positions(record["wt_sequence"], record["mut_sequence"])
+        value, n_j = score_predictive_divergence(
+          model, x0[2 * i], x0[2 * i + 1], pos or [], window=score2_window)
+        # NEGATED: S_II is higher = MORE DISRUPTIVE, but `predicted_fitness` is
+        # higher = FITTER everywhere in this harness. Storing -S_II and
+        # correlating against +f is exactly "S_II against rank(-f)".
+        infill.append((-value, n_j, 0))
+      objective = "predictive_divergence_jsd_bits"
+    elif score_mode == "state_displacement":
       infill = []
       for i in range(len(records)):
         right = score_state_displacement(model, x0[2 * i], x0[2 * i + 1],
@@ -486,8 +825,13 @@ def score_batch(
         infill.append((-right, left, right))
       objective = "state_displacement_right"
     else:
-      unit = {"infill_codon": "codon",
-              "infill_nsyn": "codon_nsyn"}.get(score_mode, "nt")
+      # Explicit, not .get(..., "nt"): a default here would silently route an
+      # unrecognised infill mode to plain nt scoring and report it under the
+      # requested label.
+      unit = {"infill_nt": "nt",
+              "infill_nt_bounded": "nt_bounded",
+              "infill_codon": "codon",
+              "infill_nsyn": "codon_nsyn"}[score_mode]
       # PADDING SIDE. MaveDB fragments are 132-216 nt padded to a 256-nt block,
       # i.e. 15.6-48.4% filler, and the three 132-nt assays that carry the
       # ENTIRE block-diffusion macro number are the most padded at 48.4%. The
@@ -511,9 +855,21 @@ def score_batch(
           model, wt_row, mut_row,
           record["wt_sequence"], record["mut_sequence"], unit, offset=shift))
       objective = f"infill_preference_{unit}"
+  elif score_mode == "block_marginal" and not is_ar:
+    totals = _block_marginal_totals(model, x0, token_mask)
+    objective = "fully_masked_block_marginal"
+  elif score_mode == "seq_unmask" and not is_ar:
+    totals = _sequential_unmask_totals(model, x0, token_mask)
+    objective = "sequential_unmasking_likelihood"
   elif score_mode == "pll" and not is_ar:
     totals = _pll_totals(model, x0, token_mask)
     objective = "pseudo_log_likelihood"
+  elif score_mode == "pll_causal" and not is_ar:
+    totals = _causal_pll_totals(model, x0, token_mask)
+    # Distinct label: this is the AUTOREGRESSIVE factorisation, not the
+    # bidirectional masked marginal, and conflating them in results would
+    # hide the very comparison the mode exists to make.
+    objective = "pseudo_log_likelihood_causal"
   elif is_ar:
     token_mask[:, 0] = False
     token_mask_cpu[:, 0] = False
@@ -532,7 +888,9 @@ def score_batch(
     totals /= mc_samples
 
   totals = totals.cpu()
-  if infill is None and (score_mode != "pll" or is_ar):
+  if infill is None and (
+      score_mode not in ("pll", "pll_causal", "seq_unmask",
+                         "block_marginal") or is_ar):
     objective = "exact_ar_nll" if is_ar else "paired_diffusion_nelbo"
   scored = []
   for index, record in enumerate(records):
@@ -631,6 +989,22 @@ def main():
   parser.add_argument("--seed", type=int, default=1)
   parser.add_argument("--max-variants", type=int)
   parser.add_argument(
+    "--right-flank", type=float, default=None,
+    help="Probability of supplying the clean RIGHT boundary cache at scoring. "
+         "Default off, matching every published number; 1.0 always supplies "
+         "it. Turns on BiSSM's reverse cross-block pathway. NOTE this makes "
+         "the score a two-sided block pseudo-likelihood, not a NELBO.")
+  parser.add_argument(
+    "--only-urn", default=None,
+    help="Score ONLY this score_set_urn. Exists so each assay can be scored at "
+         "its own --model-length: the 12 references run 132-216 nt, so a single "
+         "L=256 pads sucB to 48.4%% N while FecA sits at 15.6%%. The BiSSM "
+         "reverse "
+         "scan starts at the padded end, so that handicap is real AND varies by "
+         "assay, which biases the macro average unevenly rather than as a "
+         "constant offset. Note the block COUNT changes too, and block count is "
+         "what drives the epsilon effect -- measure, do not assume.")
+  parser.add_argument(
     "--genomic-prefix", type=Path,
     help="JSON mapping score_set_urn -> a real 256-nt upstream genomic prefix. "
          "Places each variant in block 1 so the recurrent cache is populated "
@@ -638,8 +1012,10 @@ def main():
          "prefix length + one block.")
   parser.add_argument(
     "--score-mode",
-    choices=("nelbo", "pll", "infill_nt", "infill_codon", "infill_nsyn",
-             "state_displacement"), default="nelbo",
+    choices=("nelbo", "pll", "pll_causal", "seq_unmask", "block_marginal",
+             "infill_nt",
+             "infill_nt_bounded", "infill_codon", "infill_nsyn",
+             "state_displacement", "predictive_divergence"), default="nelbo",
     help="nelbo: the training objective's paired Monte Carlo NELBO (a bound). "
          "pll: deterministic pseudo-log-likelihood, sum_i log p(x_i | x_{-i}), "
          "exact per term and directly comparable in spirit to an exact "
@@ -655,6 +1031,13 @@ def main():
          "infill_nsyn masks ONLY the non-synonymous codons, leaving the "
          "synonymous ones as clean context -- an 11x reduction in how much of "
          "the fragment is destroyed before the marginals are read. BD only.")
+  parser.add_argument(
+    "--score2-window", type=int, default=0,
+    help="Score II: truncate the downstream window J to this many positions "
+         "after the variant. 0 = the whole remaining real sequence. The "
+         "measured effective range of these models is ~128 nt, so a J that "
+         "runs the full remainder averages over positions where no "
+         "perturbation survives.")
   parser.add_argument(
     "--infill-pad-side", choices=("right", "left"), default="right",
     help="which side the N filler sits on for Score I. 'right' is the historical "
@@ -674,6 +1057,10 @@ def main():
   if not 0 < args.epsilon < 1:
     parser.error("epsilon must be in (0, 1)")
   records = list(read_jsonl_gz(args.data))
+  if args.only_urn is not None:
+    records = [r for r in records if r["score_set_urn"] == args.only_urn]
+    if not records:
+      raise SystemExit(f"--only-urn {args.only_urn!r} matched no variants")
   if args.max_variants is not None:
     records = records[:args.max_variants]
   if not records:
@@ -698,7 +1085,7 @@ def main():
 
   model, tokenizer, config, global_step = load_checkpoint_model(
     args.checkpoint, args.model_length, args.batch_size * 2, device,
-    reverse_off=args.reverse_off)
+    reverse_off=args.reverse_off, right_flank=args.right_flank)
   prefixes = (
     json.loads(args.genomic_prefix.read_text())
     if args.genomic_prefix else None)
@@ -717,6 +1104,7 @@ def main():
         score_mode=args.score_mode,
         prefixes=prefixes,
         infill_pad_side=args.infill_pad_side,
+        score2_window=args.score2_window,
         epsilon=args.epsilon,
         generator=generator))
       print(
@@ -741,10 +1129,8 @@ def main():
     "epsilon": args.epsilon,
     "seed": args.seed,
     "score_definition": (
-      "exact NLL(WT) - exact NLL(mutant)" if is_ar else
-      "log q(mutant) - log q(WT) at the masked variant site, one forward pass"
-      if str(args.score_mode).startswith("infill") else
-      "paired NELBO(WT) - paired NELBO(mutant)"),
+      "exact NLL(WT) - exact NLL(mutant)" if is_ar
+      else _SCORE_DEFINITIONS[str(args.score_mode)]),
     # The right-flank gate is forced to 0 for scoring (load_checkpoint_model),
     # so the RUNTIME value says nothing about training. Record what the
     # CHECKPOINT was trained with, read before that override -- reporting the

@@ -1,0 +1,653 @@
+{
+  "_provenance": {
+    "argv": [
+      "scripts/eval/caduceus/finetune.py",
+      "--checkpoint",
+      "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/outputs/hg38-caduceus/hg_bissm_cos/checkpoints/0-25000.ckpt",
+      "--label",
+      "gb-hgcos-25k",
+      "--tasks",
+      "all",
+      "--preset",
+      "legacy",
+      "--seeds",
+      "0",
+      "--backbone-lr",
+      "1e-4",
+      "--scheduler",
+      "cosine",
+      "--warmup-frac",
+      "0.1"
+    ],
+    "git_dirty": true,
+    "git_sha": "5b3e202e9c464bb9b4b29df22821db898c0269c2",
+    "host": "farm-gpu0503",
+    "lsf_job_id": "155082",
+    "python": "3.10.15",
+    "resolved_args": {
+      "allow_window_mismatch": false,
+      "backbone_lr": 0.0001,
+      "batch_size": 16,
+      "checkpoint": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/outputs/hg38-caduceus/hg_bissm_cos/checkpoints/0-25000.ckpt",
+      "clip": 1.0,
+      "clip_mode": "global",
+      "dropout": 0.0,
+      "epochs": 4,
+      "eval_batch_size": 32,
+      "evals_per_epoch": 0,
+      "head_layernorm": false,
+      "head_lr": 0.001,
+      "head_warmup_steps": 0,
+      "honour_no_weight_decay": false,
+      "label": "gb-hgcos-25k",
+      "layer": -1,
+      "length_bins": 0,
+      "log_length": false,
+      "max_test": null,
+      "max_train": null,
+      "output_dir": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/results/caduceus/genomic_benchmarks_ft",
+      "pad_invariant": false,
+      "pad_multiple": 8,
+      "pad_side": "right",
+      "pad_to": "task",
+      "pad_token": "N",
+      "patience": 0,
+      "pooling": "mean",
+      "preset": "legacy",
+      "rc_aug": 0.0,
+      "rc_average": "prob",
+      "rc_tta": false,
+      "scan_path": "active",
+      "scheduler": "cosine",
+      "seed": 0,
+      "seed_list": [
+        0
+      ],
+      "seeds": "0",
+      "sigma": 0.0,
+      "slow_encode": false,
+      "stratified_val": false,
+      "sweep": "",
+      "sweep_seeds": 1,
+      "tasks": "all",
+      "val_fraction": 0.1,
+      "warmup_frac": 0.1,
+      "weight_decay": 0.01,
+      "window": "auto",
+      "window_cap": 8192,
+      "window_from": "subset"
+    },
+    "watched_env": {
+      "CUDA_VISIBLE_DEVICES": "0",
+      "PRESET": "legacy",
+      "SEEDS": "0",
+      "WINDOW": "0"
+    }
+  },
+  "args": {
+    "allow_window_mismatch": false,
+    "backbone_lr": 0.0001,
+    "batch_size": 16,
+    "checkpoint": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/outputs/hg38-caduceus/hg_bissm_cos/checkpoints/0-25000.ckpt",
+    "clip": 1.0,
+    "clip_mode": "global",
+    "dropout": 0.0,
+    "epochs": 4,
+    "eval_batch_size": 32,
+    "evals_per_epoch": 0,
+    "head_layernorm": false,
+    "head_lr": 0.001,
+    "head_warmup_steps": 0,
+    "honour_no_weight_decay": false,
+    "label": "gb-hgcos-25k",
+    "layer": -1,
+    "length_bins": 0,
+    "log_length": false,
+    "max_test": null,
+    "max_train": null,
+    "output_dir": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/results/caduceus/genomic_benchmarks_ft",
+    "pad_invariant": false,
+    "pad_multiple": 8,
+    "pad_side": "right",
+    "pad_to": "task",
+    "pad_token": "N",
+    "patience": 0,
+    "pooling": "mean",
+    "preset": "legacy",
+    "rc_aug": 0.0,
+    "rc_average": "prob",
+    "rc_tta": false,
+    "scan_path": "active",
+    "scheduler": "cosine",
+    "seed": 0,
+    "seed_list": [
+      0
+    ],
+    "seeds": "0",
+    "sigma": 0.0,
+    "slow_encode": false,
+    "stratified_val": false,
+    "sweep": "",
+    "sweep_seeds": 1,
+    "tasks": "all",
+    "val_fraction": 0.1,
+    "warmup_frac": 0.1,
+    "weight_decay": 0.01,
+    "window": "auto",
+    "window_cap": 8192,
+    "window_from": "subset"
+  },
+  "backbone": "bissm",
+  "caduceus_no_equiv_mean_published": 0.86175,
+  "caduceus_ph_mean_published": 0.8660000000000001,
+  "caduceus_ps_mean_published": 0.869,
+  "checkpoint": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/outputs/hg38-caduceus/hg_bissm_cos/checkpoints/0-25000.ckpt",
+  "checkpoint_global_step": 25000,
+  "delta_ph": 0.010499253807458642,
+  "delta_ps": 0.00749925380745875,
+  "label": "gb-hgcos-25k",
+  "mean_accuracy": 0.8764992538074587,
+  "note": "Published values are transcribed from arXiv:2403.03234 Table 1, not reproduced here. The GenomicBenchmarks row of that table is a 470K-parameter, 1k-context model (App. D.1; the released wrapper loads caduceus-ph_seqlen-1k_d_model-118_n_layer-4), so we are comparing a ~100.7M-parameter 8k-context model against one 214x smaller -- the capacity advantage is OURS and no gap is 'expected' from scale or context. Quote the comparison against Caduceus-PS (0.8690 mean), the stronger of their two variants, not Caduceus-Ph (0.8660). Their own 'w/o equivariance' column (0.8618) is the same backbone class as ours, which bounds everything reverse-complement handling can buy on this suite at +0.004 (Ph) to +0.007 (PS).",
+  "preset": "legacy",
+  "pretraining_data": "hg38-cad-no89",
+  "protocol": "full fine-tune, Caduceus Table 1 protocol",
+  "tasks": [
+    {
+      "accuracy": 0.8016528925619835,
+      "accuracy_per_seed": [
+        0.8016528925619835
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        2
+      ],
+      "best_step": [
+        165
+      ],
+      "caduceus_no_equiv_published": 0.77,
+      "caduceus_ph_published": 0.754,
+      "caduceus_ps_published": 0.793,
+      "config": {
+        "backbone_lr": 0.0001,
+        "batch_size": 16,
+        "dropout": 0.0,
+        "epochs": 4,
+        "head_layernorm": false,
+        "head_lr": 0.001,
+        "head_warmup_steps": 0,
+        "layer": -1,
+        "log_length": false,
+        "pad_invariant": false,
+        "pooling": "mean",
+        "rc_aug": 0.0,
+        "scan_path": "active",
+        "sigma": 0.0,
+        "warmup_frac": 0.1,
+        "weight_decay": 0.01
+      },
+      "delta_ph": 0.04765289256198346,
+      "delta_ps": 0.008652892561983427,
+      "max_length": 4707,
+      "median_length": 2330.5,
+      "minutes": 2.1497876087824506,
+      "n_test_full": 242,
+      "n_test_used": 242,
+      "n_train_full": 968,
+      "n_train_used": 968,
+      "num_classes": 2,
+      "pad_fraction": 0.5176,
+      "seeds": [
+        0
+      ],
+      "sweep": null,
+      "task": "dummy_mouse_enhancers_ensembl",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_eval_window_mismatch": false,
+      "train_fraction": 1.0,
+      "truncations": [],
+      "val_accuracy": 0.8333333333333334,
+      "val_per_seed": [
+        0.8333333333333334
+      ],
+      "window": 4864
+    },
+    {
+      "accuracy": 0.9338,
+      "accuracy_per_seed": [
+        0.9338
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        1
+      ],
+      "best_step": [
+        8438
+      ],
+      "caduceus_no_equiv_published": 0.908,
+      "caduceus_ph_published": 0.915,
+      "caduceus_ps_published": 0.91,
+      "config": {
+        "backbone_lr": 0.0001,
+        "batch_size": 16,
+        "dropout": 0.0,
+        "epochs": 4,
+        "head_layernorm": false,
+        "head_lr": 0.001,
+        "head_warmup_steps": 0,
+        "layer": -1,
+        "log_length": false,
+        "pad_invariant": false,
+        "pooling": "mean",
+        "rc_aug": 0.0,
+        "scan_path": "active",
+        "sigma": 0.0,
+        "warmup_frac": 0.1,
+        "weight_decay": 0.01
+      },
+      "delta_ph": 0.018799999999999928,
+      "delta_ps": 0.023799999999999932,
+      "max_length": 200,
+      "median_length": 200.0,
+      "minutes": 32.02927520275116,
+      "n_test_full": 25000,
+      "n_test_used": 25000,
+      "n_train_full": 75000,
+      "n_train_used": 75000,
+      "num_classes": 2,
+      "pad_fraction": 0.2188,
+      "seeds": [
+        0
+      ],
+      "sweep": null,
+      "task": "demo_coding_vs_intergenomic_seqs",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_eval_window_mismatch": false,
+      "train_fraction": 1.0,
+      "truncations": [],
+      "val_accuracy": 0.9278666666666666,
+      "val_per_seed": [
+        0.9278666666666666
+      ],
+      "window": 256
+    },
+    {
+      "accuracy": 0.96856,
+      "accuracy_per_seed": [
+        0.96856
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        1
+      ],
+      "best_step": [
+        8438
+      ],
+      "caduceus_no_equiv_published": 0.97,
+      "caduceus_ph_published": 0.973,
+      "caduceus_ps_published": 0.968,
+      "config": {
+        "backbone_lr": 0.0001,
+        "batch_size": 16,
+        "dropout": 0.0,
+        "epochs": 4,
+        "head_layernorm": false,
+        "head_lr": 0.001,
+        "head_warmup_steps": 0,
+        "layer": -1,
+        "log_length": false,
+        "pad_invariant": false,
+        "pooling": "mean",
+        "rc_aug": 0.0,
+        "scan_path": "active",
+        "sigma": 0.0,
+        "warmup_frac": 0.1,
+        "weight_decay": 0.01
+      },
+      "delta_ph": -0.0044399999999999995,
+      "delta_ps": 0.0005600000000000049,
+      "max_length": 200,
+      "median_length": 200.0,
+      "minutes": 32.22568501234055,
+      "n_test_full": 25000,
+      "n_test_used": 25000,
+      "n_train_full": 75000,
+      "n_train_used": 75000,
+      "num_classes": 2,
+      "pad_fraction": 0.2188,
+      "seeds": [
+        0
+      ],
+      "sweep": null,
+      "task": "demo_human_or_worm",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_eval_window_mismatch": false,
+      "train_fraction": 1.0,
+      "truncations": [],
+      "val_accuracy": 0.9698666666666667,
+      "val_per_seed": [
+        0.9698666666666667
+      ],
+      "window": 256
+    },
+    {
+      "accuracy": 0.743811168681635,
+      "accuracy_per_seed": [
+        0.743811168681635
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        1
+      ],
+      "best_step": [
+        2346
+      ],
+      "caduceus_no_equiv_published": 0.741,
+      "caduceus_ph_published": 0.747,
+      "caduceus_ps_published": 0.745,
+      "config": {
+        "backbone_lr": 0.0001,
+        "batch_size": 16,
+        "dropout": 0.0,
+        "epochs": 4,
+        "head_layernorm": false,
+        "head_lr": 0.001,
+        "head_warmup_steps": 0,
+        "layer": -1,
+        "log_length": false,
+        "pad_invariant": false,
+        "pooling": "mean",
+        "rc_aug": 0.0,
+        "scan_path": "active",
+        "sigma": 0.0,
+        "warmup_frac": 0.1,
+        "weight_decay": 0.01
+      },
+      "delta_ph": -0.003188831318365004,
+      "delta_ps": -0.0011888313183650023,
+      "max_length": 500,
+      "median_length": 500.0,
+      "minutes": 8.98781613111496,
+      "n_test_full": 6948,
+      "n_test_used": 6948,
+      "n_train_full": 20843,
+      "n_train_used": 20843,
+      "num_classes": 2,
+      "pad_fraction": 0.0234,
+      "seeds": [
+        0
+      ],
+      "sweep": null,
+      "task": "human_enhancers_cohn",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_eval_window_mismatch": false,
+      "train_fraction": 1.0,
+      "truncations": [],
+      "val_accuracy": 0.736084452975048,
+      "val_per_seed": [
+        0.736084452975048
+      ],
+      "window": 512
+    },
+    {
+      "accuracy": 0.9083629318695512,
+      "accuracy_per_seed": [
+        0.9083629318695512
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        3
+      ],
+      "best_step": [
+        27872
+      ],
+      "caduceus_no_equiv_published": 0.883,
+      "caduceus_ph_published": 0.893,
+      "caduceus_ps_published": 0.9,
+      "config": {
+        "backbone_lr": 0.0001,
+        "batch_size": 16,
+        "dropout": 0.0,
+        "epochs": 4,
+        "head_layernorm": false,
+        "head_lr": 0.001,
+        "head_warmup_steps": 0,
+        "layer": -1,
+        "log_length": false,
+        "pad_invariant": false,
+        "pooling": "mean",
+        "rc_aug": 0.0,
+        "scan_path": "active",
+        "sigma": 0.0,
+        "warmup_frac": 0.1,
+        "weight_decay": 0.01
+      },
+      "delta_ph": 0.015362931869551177,
+      "delta_ps": 0.008362931869551171,
+      "max_length": 573,
+      "median_length": 269.0,
+      "minutes": 53.593747572104135,
+      "n_test_full": 30970,
+      "n_test_used": 30970,
+      "n_train_full": 123872,
+      "n_train_used": 123872,
+      "num_classes": 2,
+      "pad_fraction": 0.6497,
+      "seeds": [
+        0
+      ],
+      "sweep": null,
+      "task": "human_enhancers_ensembl",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_eval_window_mismatch": false,
+      "train_fraction": 1.0,
+      "truncations": [],
+      "val_accuracy": 0.9145071445870671,
+      "val_per_seed": [
+        0.9145071445870671
+      ],
+      "window": 768
+    },
+    {
+      "accuracy": 0.89797792525081,
+      "accuracy_per_seed": [
+        0.89797792525081
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        2
+      ],
+      "best_step": [
+        39042
+      ],
+      "caduceus_no_equiv_published": 0.871,
+      "caduceus_ph_published": 0.872,
+      "caduceus_ps_published": 0.873,
+      "config": {
+        "backbone_lr": 0.0001,
+        "batch_size": 16,
+        "dropout": 0.0,
+        "epochs": 4,
+        "head_layernorm": false,
+        "head_lr": 0.001,
+        "head_warmup_steps": 0,
+        "layer": -1,
+        "log_length": false,
+        "pad_invariant": false,
+        "pooling": "mean",
+        "rc_aug": 0.0,
+        "scan_path": "active",
+        "sigma": 0.0,
+        "warmup_frac": 0.1,
+        "weight_decay": 0.01
+      },
+      "delta_ph": 0.025977925250809997,
+      "delta_ps": 0.024977925250809996,
+      "max_length": 802,
+      "median_length": 401.0,
+      "minutes": 106.137140695254,
+      "n_test_full": 57713,
+      "n_test_used": 57713,
+      "n_train_full": 231348,
+      "n_train_used": 231348,
+      "num_classes": 3,
+      "pad_fraction": 0.5802,
+      "seeds": [
+        0
+      ],
+      "sweep": null,
+      "task": "human_ensembl_regulatory",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_eval_window_mismatch": false,
+      "train_fraction": 1.0,
+      "truncations": [],
+      "val_accuracy": 0.9000172905679952,
+      "val_per_seed": [
+        0.9000172905679952
+      ],
+      "window": 1024
+    },
+    {
+      "accuracy": 0.9631392517157406,
+      "accuracy_per_seed": [
+        0.9631392517157406
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        3
+      ],
+      "best_step": [
+        6100
+      ],
+      "caduceus_no_equiv_published": 0.933,
+      "caduceus_ph_published": 0.946,
+      "caduceus_ps_published": 0.945,
+      "config": {
+        "backbone_lr": 0.0001,
+        "batch_size": 16,
+        "dropout": 0.0,
+        "epochs": 4,
+        "head_layernorm": false,
+        "head_lr": 0.001,
+        "head_warmup_steps": 0,
+        "layer": -1,
+        "log_length": false,
+        "pad_invariant": false,
+        "pooling": "mean",
+        "rc_aug": 0.0,
+        "scan_path": "active",
+        "sigma": 0.0,
+        "warmup_frac": 0.1,
+        "weight_decay": 0.01
+      },
+      "delta_ph": 0.0171392517157406,
+      "delta_ps": 0.0181392517157406,
+      "max_length": 251,
+      "median_length": 251.0,
+      "minutes": 11.665409628550211,
+      "n_test_full": 9034,
+      "n_test_used": 9034,
+      "n_train_full": 27097,
+      "n_train_used": 27097,
+      "num_classes": 2,
+      "pad_fraction": 0.0195,
+      "seeds": [
+        0
+      ],
+      "sweep": null,
+      "task": "human_nontata_promoters",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_eval_window_mismatch": false,
+      "train_fraction": 1.0,
+      "truncations": [],
+      "val_accuracy": 0.9590254706533776,
+      "val_per_seed": [
+        0.9590254706533776
+      ],
+      "window": 256
+    },
+    {
+      "accuracy": 0.7946898603799496,
+      "accuracy_per_seed": [
+        0.7946898603799496
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        2
+      ],
+      "best_step": [
+        23592
+      ],
+      "caduceus_no_equiv_published": 0.818,
+      "caduceus_ph_published": 0.828,
+      "caduceus_ps_published": 0.818,
+      "config": {
+        "backbone_lr": 0.0001,
+        "batch_size": 16,
+        "dropout": 0.0,
+        "epochs": 4,
+        "head_layernorm": false,
+        "head_lr": 0.001,
+        "head_warmup_steps": 0,
+        "layer": -1,
+        "log_length": false,
+        "pad_invariant": false,
+        "pooling": "mean",
+        "rc_aug": 0.0,
+        "scan_path": "active",
+        "sigma": 0.0,
+        "warmup_frac": 0.1,
+        "weight_decay": 0.01
+      },
+      "delta_ph": -0.03331013962005036,
+      "delta_ps": -0.023310139620050352,
+      "max_length": 593,
+      "median_length": 315.0,
+      "minutes": 60.38234278758367,
+      "n_test_full": 34952,
+      "n_test_used": 34952,
+      "n_train_full": 139804,
+      "n_train_used": 139804,
+      "num_classes": 2,
+      "pad_fraction": 0.5752,
+      "seeds": [
+        0
+      ],
+      "sweep": null,
+      "task": "human_ocr_ensembl",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_eval_window_mismatch": false,
+      "train_fraction": 1.0,
+      "truncations": [],
+      "val_accuracy": 0.7976394849785408,
+      "val_per_seed": [
+        0.7976394849785408
+      ],
+      "window": 768
+    }
+  ],
+  "test_split_policy": "The test split is held behind HeldOutTest and evaluated exactly once per seed, from the restored best-validation weights. Sweeps select on validation only and assert zero test accesses; per-task 'test_evaluations' records the count."
+}

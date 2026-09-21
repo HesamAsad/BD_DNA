@@ -1,0 +1,655 @@
+{
+  "_provenance": {
+    "argv": [
+      "scripts/eval/caduceus/finetune.py",
+      "--checkpoint",
+      "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/outputs/carbon-prokaryote/2026.08.18/dna-bd3lm-bi-mamba2-lr3e-4-b20.95-wd0.1-rf0.0-a16.0-dt0.1-N64-L8192-human-lr8192v2-114010/checkpoints/1-8000.ckpt",
+      "--label",
+      "gb-blocked-s0",
+      "--tasks",
+      "all",
+      "--preset",
+      "legacy",
+      "--seeds",
+      "0",
+      "--backbone-lr",
+      "1e-4",
+      "--scan-path",
+      "blocked",
+      "--scheduler",
+      "cosine",
+      "--warmup-frac",
+      "0.1"
+    ],
+    "git_dirty": true,
+    "git_sha": "5b3e202e9c464bb9b4b29df22821db898c0269c2",
+    "host": "farm-gpu0510",
+    "lsf_job_id": "153898",
+    "python": "3.10.15",
+    "resolved_args": {
+      "allow_window_mismatch": false,
+      "backbone_lr": 0.0001,
+      "batch_size": 16,
+      "checkpoint": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/outputs/carbon-prokaryote/2026.08.18/dna-bd3lm-bi-mamba2-lr3e-4-b20.95-wd0.1-rf0.0-a16.0-dt0.1-N64-L8192-human-lr8192v2-114010/checkpoints/1-8000.ckpt",
+      "clip": 1.0,
+      "clip_mode": "global",
+      "dropout": 0.0,
+      "epochs": 4,
+      "eval_batch_size": 32,
+      "evals_per_epoch": 0,
+      "head_layernorm": false,
+      "head_lr": 0.001,
+      "head_warmup_steps": 0,
+      "honour_no_weight_decay": false,
+      "label": "gb-blocked-s0",
+      "layer": -1,
+      "length_bins": 0,
+      "log_length": false,
+      "max_test": null,
+      "max_train": null,
+      "output_dir": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/results/caduceus/genomic_benchmarks_ft",
+      "pad_invariant": false,
+      "pad_multiple": 8,
+      "pad_side": "right",
+      "pad_to": "task",
+      "pad_token": "N",
+      "patience": 0,
+      "pooling": "mean",
+      "preset": "legacy",
+      "rc_aug": 0.0,
+      "rc_average": "prob",
+      "rc_tta": false,
+      "scan_path": "blocked",
+      "scheduler": "cosine",
+      "seed": 0,
+      "seed_list": [
+        0
+      ],
+      "seeds": "0",
+      "sigma": 0.0,
+      "slow_encode": false,
+      "stratified_val": false,
+      "sweep": "",
+      "sweep_seeds": 1,
+      "tasks": "all",
+      "val_fraction": 0.1,
+      "warmup_frac": 0.1,
+      "weight_decay": 0.01,
+      "window": "auto",
+      "window_cap": 8192,
+      "window_from": "subset"
+    },
+    "watched_env": {
+      "CUDA_VISIBLE_DEVICES": "0",
+      "PRESET": "legacy",
+      "SEEDS": "0",
+      "WINDOW": "0"
+    }
+  },
+  "args": {
+    "allow_window_mismatch": false,
+    "backbone_lr": 0.0001,
+    "batch_size": 16,
+    "checkpoint": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/outputs/carbon-prokaryote/2026.08.18/dna-bd3lm-bi-mamba2-lr3e-4-b20.95-wd0.1-rf0.0-a16.0-dt0.1-N64-L8192-human-lr8192v2-114010/checkpoints/1-8000.ckpt",
+    "clip": 1.0,
+    "clip_mode": "global",
+    "dropout": 0.0,
+    "epochs": 4,
+    "eval_batch_size": 32,
+    "evals_per_epoch": 0,
+    "head_layernorm": false,
+    "head_lr": 0.001,
+    "head_warmup_steps": 0,
+    "honour_no_weight_decay": false,
+    "label": "gb-blocked-s0",
+    "layer": -1,
+    "length_bins": 0,
+    "log_length": false,
+    "max_test": null,
+    "max_train": null,
+    "output_dir": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/results/caduceus/genomic_benchmarks_ft",
+    "pad_invariant": false,
+    "pad_multiple": 8,
+    "pad_side": "right",
+    "pad_to": "task",
+    "pad_token": "N",
+    "patience": 0,
+    "pooling": "mean",
+    "preset": "legacy",
+    "rc_aug": 0.0,
+    "rc_average": "prob",
+    "rc_tta": false,
+    "scan_path": "blocked",
+    "scheduler": "cosine",
+    "seed": 0,
+    "seed_list": [
+      0
+    ],
+    "seeds": "0",
+    "sigma": 0.0,
+    "slow_encode": false,
+    "stratified_val": false,
+    "sweep": "",
+    "sweep_seeds": 1,
+    "tasks": "all",
+    "val_fraction": 0.1,
+    "warmup_frac": 0.1,
+    "weight_decay": 0.01,
+    "window": "auto",
+    "window_cap": 8192,
+    "window_from": "subset"
+  },
+  "backbone": "bissm",
+  "caduceus_no_equiv_mean_published": 0.86175,
+  "caduceus_ph_mean_published": 0.8660000000000001,
+  "caduceus_ps_mean_published": 0.869,
+  "checkpoint": "/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/outputs/carbon-prokaryote/2026.08.18/dna-bd3lm-bi-mamba2-lr3e-4-b20.95-wd0.1-rf0.0-a16.0-dt0.1-N64-L8192-human-lr8192v2-114010/checkpoints/1-8000.ckpt",
+  "checkpoint_global_step": 8000,
+  "delta_ph": 0.005108573936694949,
+  "delta_ps": 0.0021085739366950573,
+  "label": "gb-blocked-s0",
+  "mean_accuracy": 0.871108573936695,
+  "note": "Published values are transcribed from arXiv:2403.03234 Table 1, not reproduced here. The GenomicBenchmarks row of that table is a 470K-parameter, 1k-context model (App. D.1; the released wrapper loads caduceus-ph_seqlen-1k_d_model-118_n_layer-4), so we are comparing a ~100.7M-parameter 8k-context model against one 214x smaller -- the capacity advantage is OURS and no gap is 'expected' from scale or context. Quote the comparison against Caduceus-PS (0.8690 mean), the stronger of their two variants, not Caduceus-Ph (0.8660). Their own 'w/o equivariance' column (0.8618) is the same backbone class as ours, which bounds everything reverse-complement handling can buy on this suite at +0.004 (Ph) to +0.007 (PS).",
+  "preset": "legacy",
+  "pretraining_data": "human-lr8192v2",
+  "protocol": "full fine-tune, Caduceus Table 1 protocol",
+  "tasks": [
+    {
+      "accuracy": 0.7727272727272727,
+      "accuracy_per_seed": [
+        0.7727272727272727
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        1
+      ],
+      "best_step": [
+        110
+      ],
+      "caduceus_no_equiv_published": 0.77,
+      "caduceus_ph_published": 0.754,
+      "caduceus_ps_published": 0.793,
+      "config": {
+        "backbone_lr": 0.0001,
+        "batch_size": 16,
+        "dropout": 0.0,
+        "epochs": 4,
+        "head_layernorm": false,
+        "head_lr": 0.001,
+        "head_warmup_steps": 0,
+        "layer": -1,
+        "log_length": false,
+        "pad_invariant": false,
+        "pooling": "mean",
+        "rc_aug": 0.0,
+        "scan_path": "blocked",
+        "sigma": 0.0,
+        "warmup_frac": 0.1,
+        "weight_decay": 0.01
+      },
+      "delta_ph": 0.018727272727272704,
+      "delta_ps": -0.02027272727272733,
+      "max_length": 4707,
+      "median_length": 2330.5,
+      "minutes": 3.498328634103139,
+      "n_test_full": 242,
+      "n_test_used": 242,
+      "n_train_full": 968,
+      "n_train_used": 968,
+      "num_classes": 2,
+      "pad_fraction": 0.5176,
+      "seeds": [
+        0
+      ],
+      "sweep": null,
+      "task": "dummy_mouse_enhancers_ensembl",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_eval_window_mismatch": false,
+      "train_fraction": 1.0,
+      "truncations": [],
+      "val_accuracy": 0.78125,
+      "val_per_seed": [
+        0.78125
+      ],
+      "window": 4864
+    },
+    {
+      "accuracy": 0.9318,
+      "accuracy_per_seed": [
+        0.9318
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        3
+      ],
+      "best_step": [
+        16876
+      ],
+      "caduceus_no_equiv_published": 0.908,
+      "caduceus_ph_published": 0.915,
+      "caduceus_ps_published": 0.91,
+      "config": {
+        "backbone_lr": 0.0001,
+        "batch_size": 16,
+        "dropout": 0.0,
+        "epochs": 4,
+        "head_layernorm": false,
+        "head_lr": 0.001,
+        "head_warmup_steps": 0,
+        "layer": -1,
+        "log_length": false,
+        "pad_invariant": false,
+        "pooling": "mean",
+        "rc_aug": 0.0,
+        "scan_path": "blocked",
+        "sigma": 0.0,
+        "warmup_frac": 0.1,
+        "weight_decay": 0.01
+      },
+      "delta_ph": 0.016799999999999926,
+      "delta_ps": 0.02179999999999993,
+      "max_length": 200,
+      "median_length": 200.0,
+      "minutes": 31.5709285457929,
+      "n_test_full": 25000,
+      "n_test_used": 25000,
+      "n_train_full": 75000,
+      "n_train_used": 75000,
+      "num_classes": 2,
+      "pad_fraction": 0.2188,
+      "seeds": [
+        0
+      ],
+      "sweep": null,
+      "task": "demo_coding_vs_intergenomic_seqs",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_eval_window_mismatch": false,
+      "train_fraction": 1.0,
+      "truncations": [],
+      "val_accuracy": 0.9278666666666666,
+      "val_per_seed": [
+        0.9278666666666666
+      ],
+      "window": 256
+    },
+    {
+      "accuracy": 0.96896,
+      "accuracy_per_seed": [
+        0.96896
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        2
+      ],
+      "best_step": [
+        12657
+      ],
+      "caduceus_no_equiv_published": 0.97,
+      "caduceus_ph_published": 0.973,
+      "caduceus_ps_published": 0.968,
+      "config": {
+        "backbone_lr": 0.0001,
+        "batch_size": 16,
+        "dropout": 0.0,
+        "epochs": 4,
+        "head_layernorm": false,
+        "head_lr": 0.001,
+        "head_warmup_steps": 0,
+        "layer": -1,
+        "log_length": false,
+        "pad_invariant": false,
+        "pooling": "mean",
+        "rc_aug": 0.0,
+        "scan_path": "blocked",
+        "sigma": 0.0,
+        "warmup_frac": 0.1,
+        "weight_decay": 0.01
+      },
+      "delta_ph": -0.0040399999999999325,
+      "delta_ps": 0.0009600000000000719,
+      "max_length": 200,
+      "median_length": 200.0,
+      "minutes": 31.620436680316924,
+      "n_test_full": 25000,
+      "n_test_used": 25000,
+      "n_train_full": 75000,
+      "n_train_used": 75000,
+      "num_classes": 2,
+      "pad_fraction": 0.2188,
+      "seeds": [
+        0
+      ],
+      "sweep": null,
+      "task": "demo_human_or_worm",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_eval_window_mismatch": false,
+      "train_fraction": 1.0,
+      "truncations": [],
+      "val_accuracy": 0.9686666666666667,
+      "val_per_seed": [
+        0.9686666666666667
+      ],
+      "window": 256
+    },
+    {
+      "accuracy": 0.7246689694876224,
+      "accuracy_per_seed": [
+        0.7246689694876224
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        2
+      ],
+      "best_step": [
+        3519
+      ],
+      "caduceus_no_equiv_published": 0.741,
+      "caduceus_ph_published": 0.747,
+      "caduceus_ps_published": 0.745,
+      "config": {
+        "backbone_lr": 0.0001,
+        "batch_size": 16,
+        "dropout": 0.0,
+        "epochs": 4,
+        "head_layernorm": false,
+        "head_lr": 0.001,
+        "head_warmup_steps": 0,
+        "layer": -1,
+        "log_length": false,
+        "pad_invariant": false,
+        "pooling": "mean",
+        "rc_aug": 0.0,
+        "scan_path": "blocked",
+        "sigma": 0.0,
+        "warmup_frac": 0.1,
+        "weight_decay": 0.01
+      },
+      "delta_ph": -0.022331030512377614,
+      "delta_ps": -0.020331030512377612,
+      "max_length": 500,
+      "median_length": 500.0,
+      "minutes": 16.708536342779794,
+      "n_test_full": 6948,
+      "n_test_used": 6948,
+      "n_train_full": 20843,
+      "n_train_used": 20843,
+      "num_classes": 2,
+      "pad_fraction": 0.0234,
+      "seeds": [
+        0
+      ],
+      "sweep": null,
+      "task": "human_enhancers_cohn",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_eval_window_mismatch": false,
+      "train_fraction": 1.0,
+      "truncations": [],
+      "val_accuracy": 0.7365642994241842,
+      "val_per_seed": [
+        0.7365642994241842
+      ],
+      "window": 512
+    },
+    {
+      "accuracy": 0.8884081369066839,
+      "accuracy_per_seed": [
+        0.8884081369066839
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        3
+      ],
+      "best_step": [
+        27872
+      ],
+      "caduceus_no_equiv_published": 0.883,
+      "caduceus_ph_published": 0.893,
+      "caduceus_ps_published": 0.9,
+      "config": {
+        "backbone_lr": 0.0001,
+        "batch_size": 16,
+        "dropout": 0.0,
+        "epochs": 4,
+        "head_layernorm": false,
+        "head_lr": 0.001,
+        "head_warmup_steps": 0,
+        "layer": -1,
+        "log_length": false,
+        "pad_invariant": false,
+        "pooling": "mean",
+        "rc_aug": 0.0,
+        "scan_path": "blocked",
+        "sigma": 0.0,
+        "warmup_frac": 0.1,
+        "weight_decay": 0.01
+      },
+      "delta_ph": -0.004591863093316162,
+      "delta_ps": -0.011591863093316168,
+      "max_length": 573,
+      "median_length": 269.0,
+      "minutes": 101.14637473026912,
+      "n_test_full": 30970,
+      "n_test_used": 30970,
+      "n_train_full": 123872,
+      "n_train_used": 123872,
+      "num_classes": 2,
+      "pad_fraction": 0.6497,
+      "seeds": [
+        0
+      ],
+      "sweep": null,
+      "task": "human_enhancers_ensembl",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_eval_window_mismatch": false,
+      "train_fraction": 1.0,
+      "truncations": [],
+      "val_accuracy": 0.8882699604423993,
+      "val_per_seed": [
+        0.8882699604423993
+      ],
+      "window": 768
+    },
+    {
+      "accuracy": 0.9256839880096339,
+      "accuracy_per_seed": [
+        0.9256839880096339
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        3
+      ],
+      "best_step": [
+        52056
+      ],
+      "caduceus_no_equiv_published": 0.871,
+      "caduceus_ph_published": 0.872,
+      "caduceus_ps_published": 0.873,
+      "config": {
+        "backbone_lr": 0.0001,
+        "batch_size": 16,
+        "dropout": 0.0,
+        "epochs": 4,
+        "head_layernorm": false,
+        "head_lr": 0.001,
+        "head_warmup_steps": 0,
+        "layer": -1,
+        "log_length": false,
+        "pad_invariant": false,
+        "pooling": "mean",
+        "rc_aug": 0.0,
+        "scan_path": "blocked",
+        "sigma": 0.0,
+        "warmup_frac": 0.1,
+        "weight_decay": 0.01
+      },
+      "delta_ph": 0.05368398800963392,
+      "delta_ps": 0.05268398800963392,
+      "max_length": 802,
+      "median_length": 401.0,
+      "minutes": 192.8077757914861,
+      "n_test_full": 57713,
+      "n_test_used": 57713,
+      "n_train_full": 231348,
+      "n_train_used": 231348,
+      "num_classes": 3,
+      "pad_fraction": 0.5802,
+      "seeds": [
+        0
+      ],
+      "sweep": null,
+      "task": "human_ensembl_regulatory",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_eval_window_mismatch": false,
+      "train_fraction": 1.0,
+      "truncations": [],
+      "val_accuracy": 0.929368029739777,
+      "val_per_seed": [
+        0.929368029739777
+      ],
+      "window": 1024
+    },
+    {
+      "accuracy": 0.9540624308169139,
+      "accuracy_per_seed": [
+        0.9540624308169139
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        3
+      ],
+      "best_step": [
+        6100
+      ],
+      "caduceus_no_equiv_published": 0.933,
+      "caduceus_ph_published": 0.946,
+      "caduceus_ps_published": 0.945,
+      "config": {
+        "backbone_lr": 0.0001,
+        "batch_size": 16,
+        "dropout": 0.0,
+        "epochs": 4,
+        "head_layernorm": false,
+        "head_lr": 0.001,
+        "head_warmup_steps": 0,
+        "layer": -1,
+        "log_length": false,
+        "pad_invariant": false,
+        "pooling": "mean",
+        "rc_aug": 0.0,
+        "scan_path": "blocked",
+        "sigma": 0.0,
+        "warmup_frac": 0.1,
+        "weight_decay": 0.01
+      },
+      "delta_ph": 0.008062430816913935,
+      "delta_ps": 0.009062430816913936,
+      "max_length": 251,
+      "median_length": 251.0,
+      "minutes": 11.722248228391011,
+      "n_test_full": 9034,
+      "n_test_used": 9034,
+      "n_train_full": 27097,
+      "n_train_used": 27097,
+      "num_classes": 2,
+      "pad_fraction": 0.0195,
+      "seeds": [
+        0
+      ],
+      "sweep": null,
+      "task": "human_nontata_promoters",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_eval_window_mismatch": false,
+      "train_fraction": 1.0,
+      "truncations": [],
+      "val_accuracy": 0.949796973052787,
+      "val_per_seed": [
+        0.949796973052787
+      ],
+      "window": 256
+    },
+    {
+      "accuracy": 0.8025577935454338,
+      "accuracy_per_seed": [
+        0.8025577935454338
+      ],
+      "accuracy_std": 0.0,
+      "best_epoch": [
+        2
+      ],
+      "best_step": [
+        23592
+      ],
+      "caduceus_no_equiv_published": 0.818,
+      "caduceus_ph_published": 0.828,
+      "caduceus_ps_published": 0.818,
+      "config": {
+        "backbone_lr": 0.0001,
+        "batch_size": 16,
+        "dropout": 0.0,
+        "epochs": 4,
+        "head_layernorm": false,
+        "head_lr": 0.001,
+        "head_warmup_steps": 0,
+        "layer": -1,
+        "log_length": false,
+        "pad_invariant": false,
+        "pooling": "mean",
+        "rc_aug": 0.0,
+        "scan_path": "blocked",
+        "sigma": 0.0,
+        "warmup_frac": 0.1,
+        "weight_decay": 0.01
+      },
+      "delta_ph": -0.025442206454566185,
+      "delta_ps": -0.015442206454566176,
+      "max_length": 593,
+      "median_length": 315.0,
+      "minutes": 116.13374138673147,
+      "n_test_full": 34952,
+      "n_test_used": 34952,
+      "n_train_full": 139804,
+      "n_train_used": 139804,
+      "num_classes": 2,
+      "pad_fraction": 0.5752,
+      "seeds": [
+        0
+      ],
+      "sweep": null,
+      "task": "human_ocr_ensembl",
+      "test_access_log": [
+        "final seed=0"
+      ],
+      "test_evaluations": 1,
+      "train_eval_window_mismatch": false,
+      "train_fraction": 1.0,
+      "truncations": [],
+      "val_accuracy": 0.8015021459227468,
+      "val_per_seed": [
+        0.8015021459227468
+      ],
+      "window": 768
+    }
+  ],
+  "test_split_policy": "The test split is held behind HeldOutTest and evaluated exactly once per seed, from the restored best-validation weights. Sweeps select on validation only and assert zero test accesses; per-task 'test_evaluations' records the count."
+}

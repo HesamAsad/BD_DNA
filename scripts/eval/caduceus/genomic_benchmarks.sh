@@ -69,4 +69,5 @@ echo "[$(date)] GenomicBenchmarks probe | label=$LABEL | ckpt=$CKPT | tasks=$TAS
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 "$PYTHON" -u scripts/eval/caduceus/genomic_benchmarks.py \
   --checkpoint "$CKPT" --label "$LABEL" --tasks "$TASKS" \
-  --pooling "$POOLING" --batch-size "$BATCH_SIZE" ${EXTRA[@]+"${EXTRA[@]}"}
+  --pooling "$POOLING" --batch-size "$BATCH_SIZE" --seed "${SEED:-0}" \
+  ${EXTRA[@]+"${EXTRA[@]}"}

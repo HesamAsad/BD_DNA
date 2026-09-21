@@ -712,8 +712,15 @@ def test_window_from_subset_and_the_real_task_stats_are_exercised(monkeypatch):
   assert stats["max_length"] < max(len(s) for s in xte), (
     "this test is vacuous unless test is longer than train")
 
-  # And the subset branch: it still reads xte, so assert that it does so only to
-  # cover the split, never to pick a window smaller than train needs.
+  # And the subset branch. Until 2026-09-21 it widened the window to fit the
+  # longest TEST sequence, and this test asserted that it did. It no longer
+  # does: the window comes from train alone and `Encoder.encode` refuses a
+  # sequence that does not fit, so a test row longer than the train-sized
+  # window is a hard ERROR rather than a silent peek at held-out data.
+  #
+  # This changes no published number. Verified 2026-09-21 on all 8 official
+  # tasks: the train-only window is identical to the old train-or-test window
+  # on every one of them, and the longest test row still fits.
   monkeypatch.setattr(
     ft, "load_task",
     lambda name, max_train=None, max_test=None, seed=0: (xtr, ytr, xte, yte))
@@ -722,9 +729,9 @@ def test_window_from_subset_and_the_real_task_stats_are_exercised(monkeypatch):
   model = _tiny_model()
   args = _args(seed_list=[0], epochs=1, batch_size=2, eval_batch_size=2,
                window_from="subset")
-  row = ft.run_task("toy", model, args, _base_config(args), torch.device("cpu"),
-                    None)
-  assert row["test_evaluations"] == 1
+  with pytest.raises(ValueError, match="exceeds window"):
+    ft.run_task("toy", model, args, _base_config(args), torch.device("cpu"),
+                None)
 
 
 def test_embed_lut_encoder_is_bit_identical_to_encode_dna():
@@ -975,3 +982,121 @@ def test_blocked_readout_rejects_an_indivisible_window():
   mask = torch.ones(1, 20, dtype=torch.bool)
   with pytest.raises(ValueError, match="divisible by block_size"):
     blocked(ids, mask)
+
+
+# --------------------------------------------------------------------------
+# Layer-wise LR decay (--llrd). Every result before 2026-09-18 gave all 12
+# backbone layers one shared rate. The failure mode to guard is not a wrong
+# learning rate but a DROPPED parameter: if the depth partition misses one, the
+# model silently trains fewer weights and nothing else notices.
+# --------------------------------------------------------------------------
+
+def test_llrd_partition_covers_every_trainable_parameter_exactly_once():
+  model = _tiny_model()
+  clf = ft.Classifier(model.backbone, model.backbone.hidden_size, 2)
+  flat = clf.trainable_backbone_parameters()
+  by_depth = clf.backbone_parameters_by_depth()
+  ids_flat = [id(p) for p in flat]
+  ids_depth = [id(p) for _, ps in by_depth for p in ps]
+  assert len(ids_depth) == len(set(ids_depth)), "a parameter appears twice"
+  assert set(ids_depth) == set(ids_flat), (
+    f"partition misses {len(set(ids_flat) - set(ids_depth))} parameters and "
+    f"invents {len(set(ids_depth) - set(ids_flat))}")
+  assert len(ids_depth) == len(ids_flat)
+
+
+def test_llrd_scales_learning_rate_by_depth_and_is_off_by_default():
+  model = _tiny_model()
+  clf = ft.Classifier(model.backbone, model.backbone.hidden_size, 2)
+  by_depth = clf.backbone_parameters_by_depth()
+  depths = [d for d, _ in by_depth]
+  assert depths == sorted(depths) and depths[0] == 0, depths
+  # gamma**(top - depth): the deepest layer keeps the full rate, the embedding
+  # is damped the most.
+  top, base, gamma = max(depths), 1e-4, 0.8
+  scaled = {d: base * gamma ** (top - d) for d in depths}
+  assert scaled[top] == pytest.approx(base)
+  assert scaled[0] == pytest.approx(base * gamma ** top)
+  assert scaled[0] < scaled[top]
+
+
+# ---------------------------------------------------------------------------
+# --window-from subset: the argparse DEFAULT, and until 2026-09-21 the one
+# branch that sized a hyperparameter from the test split. Every other test in
+# this file passes window_from="full", so this branch had no coverage at all --
+# which is exactly how the test read survived a leakage audit that named it.
+# ---------------------------------------------------------------------------
+
+def _fixed_length_task(monkeypatch, train_len, test_len, n_train=64, n_test=32):
+  """Train and test sequences at chosen, DIFFERENT fixed lengths."""
+  rng = np.random.default_rng(3)
+
+  def draw(n, length):
+    sequences, labels = [], []
+    for _ in range(n):
+      label = int(rng.integers(2))
+      alphabet = list("GC") if label else list("AT")
+      sequences.append("".join(rng.choice(alphabet, size=length)))
+      labels.append(label)
+    return sequences, np.asarray(labels)
+
+  xtr, ytr = draw(n_train, train_len)
+  xte, yte = draw(n_test, test_len)
+  monkeypatch.setattr(
+    ft, "load_task",
+    lambda name, max_train=None, max_test=None, seed=0: (xtr, ytr, xte, yte))
+  monkeypatch.setattr(ft, "task_stats", lambda name: {
+    "n_train_full": n_train, "n_test_full": n_test, "max_length": train_len,
+    "median_length": float(train_len), "mean_length": float(train_len),
+    "num_classes": 2})
+  monkeypatch.setattr(ft, "reference", lambda name, column: 0.5)
+  return xtr, ytr, xte, yte
+
+
+def test_subset_window_matches_train_max_rounded_to_the_block(monkeypatch):
+  _fixed_length_task(monkeypatch, train_len=20, test_len=12)
+  model = _tiny_model()
+  args = _args(seed_list=[0], epochs=1, batch_size=16, eval_batch_size=16,
+               window_from="subset")
+  row = ft.run_task("toy", model, args, config := _base_config(args),
+                    torch.device("cpu"), None)
+  # ceil(20/8)*8 == 24, from TRAIN alone; the 12-long test rows cannot lower it
+  assert row["window"] == 24, row["window"]
+  assert config["block_size"] == 8
+
+
+def test_real_task_stats_reports_a_train_only_max_length():
+  """`task_stats` is monkeypatched out everywhere else, so assert the real one.
+
+  It must not consult the test split -- `finetune.py`'s window (under
+  --window-from full) is sized straight from this value.
+  """
+  import ast
+  import inspect
+  tree = ast.parse(inspect.getsource(gb.task_stats).lstrip())
+  fn = tree.body[0]
+  # Strip the docstring: it QUOTES the old buggy expression to explain it, so a
+  # naive substring check over the whole source fails on the explanation, not
+  # on the code. This test is about the body.
+  body = fn.body[1:] if (isinstance(fn.body[0], ast.Expr)
+                         and isinstance(fn.body[0].value, ast.Constant)) else fn.body
+  code = "\n".join(ast.unparse(node) for node in body)
+  assert "test_lengths.max()" not in code, (
+    "task_stats reads the test split's lengths:\n" + code)
+  assert "train_lengths" in code
+
+
+def test_leak_free_mean_excludes_exactly_the_two_upstream_leaky_tasks():
+  """The 6-task mean must name its exclusions and keep the 8-task mean intact."""
+  import re
+  repo = pathlib.Path(__file__).resolve().parents[1]
+  source = (repo / "scripts/eval/caduceus/finetune.py").read_text()
+  block = re.search(r"LEAKY_TASKS\s*=\s*\(([^)]*)\)", source)
+  assert block, "LEAKY_TASKS tuple not found"
+  assert "human_enhancers_ensembl" in block.group(1)
+  assert "human_nontata_promoters" in block.group(1)
+  # mean_accuracy must still be over ALL rows, for comparability with published
+  assert 'mean = float(np.mean([r["accuracy"] for r in rows]))' in source
+  for key in ("leak_free_mean_accuracy", "leak_free_n_tasks",
+              "leak_free_excluded"):
+    assert f'"{key}"' in source, key

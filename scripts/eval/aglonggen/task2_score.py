@@ -51,6 +51,8 @@ from pathlib import Path
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO))
+from scripts.eval.provenance import stamp  # noqa: E402
 # PROCAP joins CAGE as a transcription-initiation readout: there is NO TSS
 # OutputType, so these two are the TSS proxies Score 2 has to work from.
 OUTPUTS = ("RNA_SEQ", "ATAC", "DNASE", "CAGE", "CHIP_HISTONE",
@@ -364,11 +366,15 @@ def main():
     rows.append(row)
 
   args.out.parent.mkdir(parents=True, exist_ok=True)
-  args.out.write_text(json.dumps(
-    {"gen": str(args.gen), "label": args.label,
-     "checkpoint": payload.get("checkpoint"),
-     "provenance": payload.get("provenance"),
-     "n_records": len(rows), "rows": rows}, indent=2))
+  # Record argv/git/time in the output itself. Without this you cannot recover
+  # from a result file what produced it -- the generation step's `--n-loci`
+  # defaults to 24 and nothing downstream recorded which value was used.
+  report = {"gen": str(args.gen), "label": args.label,
+            "checkpoint": payload.get("checkpoint"),
+            "provenance": payload.get("provenance"),
+            "n_records": len(rows), "rows": rows}
+  stamp(report, args)
+  args.out.write_text(json.dumps(report, indent=2))
   print(f"\nwrote {args.out}")
 
   gaps = sorted({r["gap_nt"] for r in rows})

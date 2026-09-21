@@ -47,6 +47,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+from pathlib import Path as _P
+sys.path.insert(0, str(_P(__file__).resolve().parents[3]))
+from scripts.eval.provenance import stamp  # noqa: E402
 import os
 import sys
 from pathlib import Path
@@ -246,6 +250,10 @@ def main():
       cells = "  ".join(f"{k}nt:{val:.4f}" for k, val in sorted(row.items()))
       print(f"  {name:<14}{cells}")
   args.out.parent.mkdir(parents=True, exist_ok=True)
+  # Record argv/git/time in the output itself. Without this you cannot recover
+  # from a result file what sample size produced it -- `--n-loci` defaults to
+  # 24/32 here, and nothing downstream recorded which was used.
+  stamp(report, args)
   args.out.write_text(json.dumps(report, indent=2))
   print(f"\nwrote {args.out}")
 

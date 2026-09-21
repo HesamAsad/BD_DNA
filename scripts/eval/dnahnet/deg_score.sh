@@ -45,6 +45,10 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 mkdir -p "$OUTPUT_DIR" logs
 
 EXTRA_ARGS=()
+# EPSILON was accepted by score_deg.py but never forwarded here -- the same
+# silent no-op that hid it in mavedb_score.sh until 2026-09-19. The DEG noise
+# band has therefore never been swept.
+[ -n "${EPSILON:-}" ] && EXTRA_ARGS+=(--epsilon "$EPSILON")
 [[ "$REVERSE_OFF" == "1" ]] && EXTRA_ARGS+=(--reverse-off)
 [[ "$BASELINES_ONLY" == "1" ]] && EXTRA_ARGS+=(--baselines-only)
 [ -n "$MAX_GENES" ] && EXTRA_ARGS+=(--max-genes "$MAX_GENES")

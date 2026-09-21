@@ -180,9 +180,22 @@ def evaluate(path: Path):
       "protein_baseline_spearman": float(protein_only),
     })
   macro = lambda key: float(np.nanmean([r[key] for r in rows]))
+  # Pooled: ONE Spearman over every variant at once, ignoring which assay it
+  # came from. Reported beside macro because it is not settled which of the two
+  # dnaHNet's published numbers use -- their Fig 4B axis is |Spearman rho| and
+  # they release no code, and the choice flips whether we lead or trail them.
+  # The two disagree violently here (uSSM-AR is +0.2547 macro and -0.0303
+  # pooled) because the 12 assays have different experimental scales, so a
+  # pooled correlation is driven by between-assay offsets rather than by
+  # ranking variants within an assay.
+  usable = frame.dropna(subset=["experimental_score", "predicted_fitness"])
+  pooled = (float(stats.spearmanr(usable["predicted_fitness"],
+                                  usable["experimental_score"]).statistic)
+            if len(usable) >= 10 else float("nan"))
   return {
     "predictions": str(path),
     "assays": len(rows),
+    "pooled_spearman": pooled,
     "macro_signed_spearman": macro("signed_spearman"),
     "macro_partial_spearman": macro("partial_spearman"),
     "macro_abs_spearman": float(
@@ -203,8 +216,8 @@ def main():
 
   results = []
   print(f"{'arm':<34} {'signed':>9} {'part.nt':>9} {'part.+pro':>10} "
-        f"{'|rho|':>9} {'nt-base':>9} {'pro-base':>9}")
-  print("-" * 74)
+        f"{'|rho|':>9} {'POOLED':>9} {'nt-base':>9} {'pro-base':>9}")
+  print("-" * 84)
   for path in args.predictions:
     summary = evaluate(path)
     results.append(summary)
@@ -213,6 +226,7 @@ def main():
           f"{summary['macro_partial_spearman']:>9.5f} "
           f"{summary['macro_partial_spearman_with_protein']:>10.5f} "
           f"{summary['macro_abs_spearman']:>9.5f} "
+          f"{summary['pooled_spearman']:>9.5f} "
           f"{summary['macro_count_baseline_spearman']:>9.5f} "
           f"{summary['macro_protein_baseline_spearman']:>9.5f}")
   if args.output:

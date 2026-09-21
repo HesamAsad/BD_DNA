@@ -103,6 +103,18 @@ EXTRA=(--preset "$PRESET" --seeds "$SEEDS")
 # strands, so train and eval finally match -- worth retesting together.
 [ -n "${RC_AVERAGE:-}" ]       && EXTRA+=(--rc-average "$RC_AVERAGE")
 [ "${PAD_INVARIANT:-0}" = "1" ] && EXTRA+=(--pad-invariant)
+# BiSSM's REAL right boundary cache in the classifier. Off by default: every
+# published GB number used a zero right state, so the reverse cross-block
+# pathway -- the point of a bidirectional SSM -- went unused. Only meaningful
+# on a checkpoint trained with right_flank_probability > 0.
+[ "${RIGHT_CACHE:-0}" = "1" ] && EXTRA+=(--right-cache)
+# The head is random at lr 1e-3 and dominates the GLOBAL gradient norm for the
+# first few hundred steps, so one clip over both groups scales the backbone
+# update down further -- the same symptom as a too-low backbone_lr, which is
+# exactly the defect we just fixed. per-group clips each param group alone.
+[ -n "${CLIP_MODE:-}" ]      && EXTRA+=(--clip-mode "$CLIP_MODE")
+[ -n "${CLIP:-}" ]           && EXTRA+=(--clip "$CLIP")
+[ -n "${LLRD:-}" ]            && EXTRA+=(--llrd "$LLRD")
 [ -n "${SCAN_PATH:-}" ]        && EXTRA+=(--scan-path "$SCAN_PATH")
 [ -n "${POOLING:-}" ]           && EXTRA+=(--pooling "$POOLING")
 [ -n "${LAYER:-}" ]             && EXTRA+=(--layer "$LAYER")

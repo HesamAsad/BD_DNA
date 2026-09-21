@@ -32,6 +32,13 @@ RIGHT_FLANK_PROBABILITY=${RIGHT_FLANK_PROBABILITY:-0.0}
 VAL_EVERY=${VAL_EVERY:-2000}
 VAL_BATCHES=${VAL_BATCHES:-50}
 NUM_WORKERS=${NUM_WORKERS:-16}
+# Cap datasets.map() workers. The default is every visible core (128 on a GPU
+# node), which DEADLOCKS the grouping step at long context -- each group row is
+# a multi-million-element tensor and 128-way fork oversubscribes. It also makes
+# 128 temp shards instead of 16, which is how the 2026-09-20 arms exhausted the
+# group quota. This lived only in the submitting shell until 2026-09-20 and was
+# silently lost on relaunch; it belongs here.
+export BD3LM_DATA_NUM_PROC=${BD3LM_DATA_NUM_PROC:-16}
 ACTIVE_BLOCKS=${ACTIVE_BLOCKS:-all}   # all = every block supervised per step
 WANDB_MODE=${WANDB_MODE:-online}
 
@@ -54,7 +61,17 @@ mkdir -p "$HF_HOME" "$TORCH_HOME" "$XDG_CACHE_HOME" outputs watch_folder logs sa
 
 EXTRA_ARGS=()
 [ -n "${DNA_MAX_ROWS:-}" ] && EXTRA_ARGS+=( "data.dna_max_rows=$DNA_MAX_ROWS" )
-[ "$WANDB_MODE" = "off" ] && EXTRA_ARGS+=( "wandb=null" )
+# WANDB_MODE was only ever compared against "off"; every other value was
+# accepted silently and then picked up by the wandb library itself. Passing
+# "offline" therefore produced a run that logged locally and never synced --
+# which looks exactly like "wandb is broken". Handle the three real cases and
+# EXPORT so the library and this script cannot disagree.
+case "${WANDB_MODE}" in
+  off)     EXTRA_ARGS+=( "wandb=null" ); export WANDB_MODE=disabled ;;
+  offline) export WANDB_MODE=offline ;;
+  online)  export WANDB_MODE=online ;;
+  *) echo "FATAL: WANDB_MODE must be online|offline|off, got '${WANDB_MODE}'" >&2; exit 2 ;;
+esac
 # Matched-comparison knobs. LR and the antithetic-stratum shuffle were not
 # reachable from this launcher, so the 2026-08-10 arms were all run at whatever
 # the config defaulted to. The shuffle flag exists because the pre-2026-09-16
@@ -66,6 +83,11 @@ EXTRA_ARGS=()
 [ -n "${WEIGHT_DECAY:-}" ]    && EXTRA_ARGS+=( "optim.weight_decay=$WEIGHT_DECAY" )
 [ -n "${EMA:-}" ]             && EXTRA_ARGS+=( "training.ema=$EMA" )
 [ -n "${LR_SCHEDULER:-}" ]    && EXTRA_ARGS+=( "lr_scheduler=$LR_SCHEDULER" )
+# Checkpoint cadence. Was passed by a caller on 2026-09-20 and silently did
+# nothing -- the config default of 500 applied instead. On a 60k-step run that
+# is 120 checkpoints at 1.2 GB; harmless here (and useful for a scaling curve)
+# but it must not be a silent no-op.
+[ -n "${CKPT_EVERY:-}" ] && EXTRA_ARGS+=( "callbacks.checkpoint_every_n_steps.every_n_train_steps=$CKPT_EVERY" )
 [ -n "${SHUFFLE_STRATA:-}" ]  && EXTRA_ARGS+=( "algo.shuffle_antithetic_strata=$SHUFFLE_STRATA" )
 [ -n "${TIME_CONDITIONING:-}" ] && EXTRA_ARGS+=( "algo.time_conditioning=$TIME_CONDITIONING" )
 [ -n "${EXTRA:-}" ]           && EXTRA_ARGS+=( ${EXTRA} )

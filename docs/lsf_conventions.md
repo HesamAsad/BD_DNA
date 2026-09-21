@@ -395,6 +395,78 @@ window:
 
     n0=$(...); sleep 300; n1=$(...); echo "$(( (n1-n0) / 300 )) it/s"
 
+## 9c. Getting capacity when everything is PEND (reservation shopping)
+
+Learned 2026-09-19, when 7 jobs sat PEND behind 4 running ones and the whole
+campaign stalled for hours. The fix was not to kill anything — it was to notice
+we own **several** reservations and were requesting none of them.
+
+**The failure signature.** `bjobs -l <id>` shows:
+
+```
+PENDING REASONS:
+Not enough job slot(s) while advance reservation is active: 10 hosts;
+```
+
+That means the hosts are fenced off inside advance reservations and your job,
+which asked for no reservation, cannot touch them. It is NOT "the cluster is
+full".
+
+**Step 1 — list what you actually own.** `brsvs` truncates the RSVID; always use
+`-w`:
+
+```bash
+brsvs -w        # RSVID, NCPUS used/total, and per-host occupancy
+```
+
+As of 2026-09-19 this account (`s10396`) had three usable reservations:
+
+| RSVID | hosts | size | queue it pairs with |
+|---|---|---|---|
+| `lotfollahi-training-parallel` | farm-gpu0307, 0308 | 256 CPU | `training-parallel` |
+| `iclr_2026` | farm-gpu0501–0510 | 1280 CPU | `training-parallel` |
+| `lotfollahi-training-normal` | farm-gpu0201, 0202 | 384 CPU | `training-normal` (name implies; untested) |
+
+`pg20_sept_2026` (farm-gpu0303/0304) belongs to another user — do not target it.
+
+Read the per-host column, not just the total: `iclr_2026` showed 276/1280 used
+but farm-gpu0509 was at **0/128**, i.e. a whole idle node, which is what a
+4-GPU training job needs.
+
+**Step 2 — target one with `-U`.**
+
+```bash
+bsub -q training-parallel -U lotfollahi-training-parallel ...   # small 1-GPU jobs
+bsub -q training-parallel -U iclr_2026 ...                      # 4-GPU training
+```
+
+This took the session from 4 running / 7 pending to 15 running / 0 pending
+without killing a single job.
+
+**Step 3 — right-size `-n`, it gates scheduling.** Scoring jobs are GPU-bound
+and were asking `-n 16` out of habit; at 16 slots each they could not pack into
+the free hosts. Dropping to `-n 4` (with `NUM_WORKERS=2`) let four of them land
+on one node. Rule of thumb here:
+
+| job class | `-n` | why |
+|---|---|---|
+| single-GPU scoring / eval | 4 | GPU-bound; workers only feed the loader |
+| 1-GPU fine-tune | 16 | dataloader actually benefits |
+| 4-GPU training | 32 | 8 per GPU for the DDP loaders |
+
+**Gotchas.**
+- Spread work across reservations rather than piling onto one: your own jobs
+  starve each other inside a single reservation just as effectively as other
+  users do.
+- A queue is not a reservation. You still pass `-q training-parallel` *and*
+  `-U <rsvid>`; `-U` alone is not enough.
+- `bqueues -o "QUEUE_NAME STATUS NJOBS PEND RUN"` shows contention per queue —
+  on 2026-09-19 `training-parallel` had 121 PEND / 586 RUN while
+  `training-normal` had 0 RUN, so the quiet queues are worth checking before
+  assuming you need to wait.
+- Killing a *pending* job to resubmit elsewhere is free. Killing a *running* one
+  is not — exhaust reservation shopping first.
+
 ## 10. Quick reference
 
 ```bash
@@ -415,4 +487,11 @@ bkill -J <name>
 
 # cluster
 bqueues | awk 'NR==1 || /training/'
+bqueues -o "QUEUE_NAME STATUS NJOBS PEND RUN"   # which queues are contended
+
+# capacity (see section 9c) -- do this BEFORE concluding the cluster is full
+brsvs -w                                        # reservations + per-host free CPUs
+bjobs -l <id> | grep -A2 "PENDING REASON"       # "advance reservation is active" => use -U
+bsub -q training-parallel -U iclr_2026 ...      # 4-GPU jobs, 10 hosts
+bsub -q training-parallel -U lotfollahi-training-parallel ...   # 1-GPU jobs, 2 hosts
 ```

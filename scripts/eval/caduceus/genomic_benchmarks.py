@@ -39,6 +39,7 @@ from omegaconf import OmegaConf
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 sys.path.insert(0, str(REPO))
+from scripts.eval.provenance import stamp  # noqa: E402
 
 from scripts.eval.provenance import (  # noqa: E402
   assert_full_coverage, provenance)
@@ -399,6 +400,7 @@ def main():
   path = args.output_dir / f"{args.label}.json"
   with tempfile.NamedTemporaryFile("w", dir=args.output_dir, delete=False) as fh:
     summary["_provenance"] = provenance(args)
+    stamp(summary, args)
     json.dump(summary, fh, indent=2, sort_keys=True)
     fh.write("\n")
     tmp = Path(fh.name)

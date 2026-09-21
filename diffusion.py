@@ -341,6 +341,27 @@ class Diffusion(L.LightningModule):
           persistent_workers=self.config.loader.num_workers > 0))
     self.trainer.fit_loop._combined_loader.flattened = updated_dls
 
+  def on_before_optimizer_step(self, optimizer):
+    """Log the global grad L2 and the live LR.
+
+    Neither was recorded before. `trainer/lr` came from the scheduler_dict
+    `name`, which the CSV logger does not populate, so every lr column in
+    every run so far is NaN; and grad norm was never logged at all, so a
+    finished run could not be audited for exploding or vanishing gradients
+    after the fact. Both are near-free here and this hook runs BEFORE
+    clipping, so the value is the raw pre-clip norm.
+    """
+    total = 0.0
+    for param in self.parameters():
+      if param.grad is not None:
+        total += float(param.grad.detach().float().norm(2)) ** 2
+    self.log('trainer/grad_norm', total ** 0.5,
+             on_step=True, on_epoch=False, prog_bar=False, sync_dist=False)
+    for group in optimizer.param_groups:
+      self.log('trainer/lr_live', float(group['lr']),
+               on_step=True, on_epoch=False, prog_bar=False, sync_dist=False)
+      break
+
   def optimizer_step(self, *args, **kwargs):
     super().optimizer_step(*args, **kwargs)
     if self.ema:

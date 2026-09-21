@@ -104,9 +104,9 @@
         <tr class="hl">
           <td class="model">uSSM-AR<span class="sub">105320 &middot; Mamba-2, autoregressive</span></td>
           <td class="num"><strong>1.19305</strong></td>
-          <td class="num"><strong>+0.26410</strong></td>
-          <td class="num">0.29781</td>
-          <td class="num win">+0.21644</td>
+          <td class="num"><strong>+0.25468</strong></td>
+          <td class="num">0.27538</td>
+          <td class="num win">+0.19669</td>
           <td class="num dim">2/12</td>
           <td class="num"><strong>2652</strong></td>
           <td class="num">2h33m / 2h17m</td>
@@ -114,10 +114,10 @@
         <tr>
           <td class="model">Transformer-AR<span class="sub">20260808-v1 &middot; d=832</span></td>
           <td class="num">1.19864</td>
-          <td class="num">+0.18803</td>
-          <td class="num">0.22017</td>
-          <td class="num">+0.13287</td>
-          <td class="num dim">2/12</td>
+          <td class="num">+0.25404</td>
+          <td class="num">0.26127</td>
+          <td class="num win">+0.19991</td>
+          <td class="num dim">1/12</td>
           <td class="num">4910</td>
           <td class="num">2h11m / &mdash;</td>
         </tr>
@@ -251,140 +251,293 @@
   </div>
   <div class="note">
     <p><strong>What is left is how the models were trained.</strong> Compare uSSM-AR with uSSM-BD. Same backbone, same data, same number of parameters. We can even score them the same way, because uSSM-BD reads left to right, so its exact likelihood can be computed. The only thing that differs is the training objective. uSSM-AR scores <strong>+0.21644</strong>. uSSM-BD scores <strong>+0.06689</strong>.</p>
-    <p>The val NLL column says the same thing on its own: <strong>1.19305 against 1.28691</strong>. The block diffusion models predict DNA less sharply. A less sharp model gives the wild-type and the mutant almost the same score. The difference we need to detect is about 0.01 nats, and it gets buried.</p>
-    <p>Why does block diffusion produce a less sharp model? Because it has to learn a much bigger job. The autoregressive model learns one thing: predict the next nucleotide from everything on the left. The block diffusion model has to handle every possible pattern of hidden positions, at every hiding rate from 5 percent to 90 percent. With the same number of parameters, it spreads its capacity across all of those cases.</p>
+    <p>The val NLL column looks like it says the same thing: <strong>1.19305 against 1.28691</strong>. The block diffusion models do predict DNA less sharply, and a less sharp model gives the wild-type and the mutant more nearly the same score. That was our explanation for a long time. <strong>It does not survive being measured.</strong></p>
+  </div>
+
+  <div class="note bad-note">
+    <p><strong>Sharpness cannot account for the gap, and we can put a number on how badly it fails.</strong> Across all seven arms, val NLL and signed &rho; correlate at r = &minus;0.917, which looks decisive. But that correlation is produced entirely by the autoregressive/block-diffusion split. <em>Within</em> the five block-diffusion arms the relationship disappears: <strong>r = &minus;0.259, p = 0.67</strong>. A sharper block-diffusion model is not a better variant scorer. uSSM-BD is the blurriest arm on the page at 1.28691 and still outscores BiSSM-BD at 1.24749.</p>
+    <p>The slope within block diffusion is <strong>&minus;0.236 &rho; per nat</strong>. The slope that would be needed for sharpness to explain the autoregressive advantage is <strong>&minus;2.490 &rho; per nat</strong> &mdash; ten times steeper. At the slope we actually observe, the 0.062-nat gap in val NLL buys <strong>0.015</strong> of Spearman. The gap to explain is <strong>0.156</strong>. Sharpness covers about <strong>9 percent</strong> of it.</p>
+    <p>Put the other way round: producing 0.156 of Spearman at the observed slope would take a <strong>0.66-nat</strong> improvement in val NLL. The block diffusion arms sit <strong>0.128 nats</strong> above the uniform-DNA floor, so the improvement required is five times larger than a perfect model could deliver. The explanation is not merely unsupported, it is arithmetically unavailable.</p>
+    <p class="dim" style="font-size:12.5px">Caveat: five points, spanning only 0.04 nats, with p = 0.67 &mdash; the within-block-diffusion slope is poorly determined on its own. The conclusion does not rest on it, because the headroom argument holds for any slope that is not itself steeper than the effect it is meant to explain.</p>
+  </div>
+
+  <div class="note">
+    <p><strong>So the gap is a discontinuity at the objective boundary, not a quality gradient.</strong> Something changes in kind between the two training objectives, and it is not how well the model has learned DNA. That reframes the search: the question is not how to make block diffusion sharper, but what the block-diffusion scoring path destroys that the autoregressive path keeps.</p>
+    <p>It also explains why training block size is the only lever that has moved the number. Scoring runs at 256 nucleotides, so a model trained at block 256 sees the whole scored sequence as a <em>single block with an empty cache</em>, while a model trained at block 8 sees 32 blocks, most of them conditioned on a populated one. That is a structural difference in what the model is asked to do, not a difference in how well it does it &mdash; which is the kind of thing that can produce a discontinuity.</p>
   </div>
 </section>
 
 <section>
   <h2>How much score is left after removing the easy shortcuts</h2>
-  <p>A model can score well on MaveDB without understanding DNA at all. Variants with more mutations tend to be less fit. So simply counting mutations already produces a score.</p>
-  <p><strong>Partial correlation</strong> removes that shortcut. We rank every value, subtract off what three counting features predict, and then correlate what is left over. The three features are: how many nucleotides changed, how much the length changed, and how many separate edit events there were. The script is <code>scripts/eval/dnahnet/partial_corr.py</code>.</p>
-  <p>We do not take absolute values in this table. If a model ranks an experiment backwards, it counts against that model.</p>
+  <p>A model can score well on MaveDB without understanding DNA at all. Variants with more mutations tend to be less fit, so simply counting mutations already produces a score.</p>
+  <p><strong>Partial correlation</strong> removes that shortcut. We rank every value, subtract off what the counting features predict, and correlate what is left. The three nucleotide features are how many nucleotides changed, how much the length changed, and how many separate edit events there were. We then also subtract the <strong>protein-event count</strong>, which on its own reaches +0.30931 and beats every model here. The script is <code>scripts/eval/dnahnet/partial_corr.py</code>.</p>
+  <p>We do not take absolute values. If a model ranks an experiment backwards, it counts against that model.</p>
+
+  <div class="note warn-note">
+    <p><strong>Two corrections to an earlier version of this page.</strong></p>
+    <p><em>Matched geometry.</em> The autoregressive rows previously read uSSM-AR +0.264 against Transformer-AR +0.188. Those came from a run without a genomic prefix, which starves a left-to-right model of context and penalises the Transformer specifically. Scored at matched geometry the two arms <strong>tie</strong>, and the apparent 1.4&times; advantage disappears.</p>
+    <p><em>Matched variant subsets.</em> Each estimator is defined on a different set of variants: NELBO, causal PLL and state displacement score all 21,250; Score I is undefined for length-changing variants and scores 19,349; Score II needs a downstream window and scores 15,889. Ranking estimators against each other on their own subsets compares different benchmarks. Every cross-estimator number below is computed on the intersection.</p>
+  </div>
+
+  <p>The table below holds the estimator fixed (NELBO), the geometry fixed (genomic prefix), the training budget fixed (8,000 steps) and the variant set fixed (all 21,250). The only thing that varies is the model.</p>
   <div class="scroll">
     <table>
       <thead>
         <tr>
-          <th>Scoring run</th>
-          <th>Estimator</th>
+          <th>Arm</th>
           <th class="num">signed &rho;</th>
-          <th class="num">partial &rho;</th>
-          <th class="num">|&rho;|</th>
+          <th class="num">partial, nt only</th>
+          <th class="num">partial, all shortcuts</th>
+          <th class="num">fraction kept</th>
         </tr>
       </thead>
       <tbody>
         <tr class="hl">
-          <td class="model">uSSM-AR</td>
-          <td class="dim">exact AR likelihood</td>
-          <td class="num">+0.26402</td>
-          <td class="num win">+0.21644</td>
-          <td class="num">0.29777</td>
+          <td class="model">uSSM-AR<span class="sub">exact AR likelihood</span></td>
+          <td class="num"><strong>+0.25468</strong></td>
+          <td class="num">+0.21260</td>
+          <td class="num win">+0.19669</td>
+          <td class="num">77%</td>
+        </tr>
+        <tr class="hl">
+          <td class="model">Transformer-AR<span class="sub">exact AR likelihood</span></td>
+          <td class="num"><strong>+0.25404</strong></td>
+          <td class="num">+0.21613</td>
+          <td class="num win">+0.19991</td>
+          <td class="num">79%</td>
         </tr>
         <tr>
-          <td class="model">Transformer-AR</td>
-          <td class="dim">exact AR likelihood</td>
-          <td class="num">+0.18803</td>
-          <td class="num win">+0.13287</td>
-          <td class="num">0.22017</td>
-        </tr>
-        <tr class="rule">
-          <td class="model">uSSM-BD</td>
-          <td class="dim">exact AR readout (PLL)</td>
-          <td class="num">+0.11161</td>
-          <td class="num">+0.06689</td>
-          <td class="num">0.12801</td>
-        </tr>
-        <tr>
-          <td class="model">uSSM-BD</td>
-          <td class="dim">genomic prefix, MC-128</td>
-          <td class="num">+0.08917</td>
-          <td class="num">+0.06237</td>
-          <td class="num">0.12433</td>
-        </tr>
-        <tr>
-          <td class="model">BiSSM-BD</td>
-          <td class="dim">PLL</td>
-          <td class="num">+0.10307</td>
-          <td class="num">+0.05660</td>
-          <td class="num">0.12915</td>
-        </tr>
-        <tr>
-          <td class="model">BiSSM-BD</td>
-          <td class="dim">NELBO, MC-128</td>
-          <td class="num">+0.08994</td>
-          <td class="num">+0.05330</td>
-          <td class="num">0.13689</td>
-        </tr>
-        <tr>
-          <td class="model">Transformer-BD</td>
-          <td class="dim">genomic prefix, MC-128</td>
+          <td class="model">Transformer-BD<span class="sub">block 256</span></td>
           <td class="num">+0.09671</td>
           <td class="num">+0.04917</td>
-          <td class="num">0.13700</td>
+          <td class="num">+0.04204</td>
+          <td class="num">44%</td>
         </tr>
         <tr>
-          <td class="model">BiSSM-BD</td>
-          <td class="dim">genomic prefix, MC-128</td>
-          <td class="num">+0.08436</td>
-          <td class="num">+0.04814</td>
-          <td class="num">0.11214</td>
+          <td class="model">uSSM-BD<span class="sub">block 256</span></td>
+          <td class="num">+0.08917</td>
+          <td class="num">+0.06243</td>
+          <td class="num">+0.05577</td>
+          <td class="num">63%</td>
         </tr>
         <tr>
-          <td class="model">uSSM-BD</td>
-          <td class="dim">NELBO, MC-32</td>
-          <td class="num">+0.06263</td>
-          <td class="num">+0.04184</td>
-          <td class="num">0.09391</td>
+          <td class="model">BiSSM-BD<span class="sub">block 256</span></td>
+          <td class="num">+0.08433</td>
+          <td class="num">+0.04807</td>
+          <td class="num">+0.04771</td>
+          <td class="num">57%</td>
         </tr>
         <tr>
-          <td class="model">Transformer-BD</td>
-          <td class="dim">NELBO, MC-128</td>
-          <td class="num">+0.09799</td>
-          <td class="num">+0.03680</td>
-          <td class="num">0.14170</td>
+          <td class="model">BiSSM-BD<span class="sub">block 32</span></td>
+          <td class="num">+0.09993</td>
+          <td class="num">+0.05732</td>
+          <td class="num">+0.05445</td>
+          <td class="num">55%</td>
         </tr>
-        <tr>
-          <td class="model">Transformer-BD</td>
-          <td class="dim">PLL</td>
-          <td class="num">+0.09684</td>
-          <td class="num">+0.01831</td>
-          <td class="num">0.13880</td>
-        </tr>
-        <tr class="rule">
-          <td class="model dim">protein-event count</td>
-          <td class="dim">zero parameters &middot; <code>hgvs_pro</code></td>
-          <td class="num dim">+0.30931</td>
-          <td class="num dim">&mdash;</td>
-          <td class="num dim">0.30931</td>
-        </tr>
-        <tr>
-          <td class="model dim">nt-edit count</td>
-          <td class="dim">zero parameters &middot; <code>hgvs_nt</code>, a control variable</td>
-          <td class="num dim">&minus;0.17860</td>
-          <td class="num dim">&mdash;</td>
-          <td class="num dim">0.17860</td>
+        <tr class="hl">
+          <td class="model">BiSSM-BD<span class="sub">block 8</span></td>
+          <td class="num"><strong>+0.12378</strong></td>
+          <td class="num">+0.08903</td>
+          <td class="num win">+0.09506</td>
+          <td class="num"><strong>77%</strong></td>
         </tr>
       </tbody>
     </table>
   </div>
-  <p class="dim" style="font-size:12.5px">The block diffusion rows range from 0.018 to 0.067. That is a narrow band, and the differences inside it are small. Treat the block diffusion models as indistinguishable from each other rather than ranking them. The difference that is real is autoregressive against block diffusion. Depending on which pair you compare it is 2 to 12 times.</p>
-  <div class="note warn-note">
-    <p><strong>The simplest possible feature beats every model, and it never points the wrong way.</strong> Count how many amino acid changes a variant carries. This number is only ever 0, 1 or 2, so it says little more than "wild-type, single mutant, or double mutant". It points the right way on <strong>all 12 experiments</strong>. Our best model, uSSM-AR, points the wrong way on 2 of them. The block diffusion models point the wrong way on 3 to 6 of them.</p>
-    <p>Written as a fitness predictor, this feature scores +0.30931. The raw count scores &minus;0.30931, because more changes means lower fitness. A second feature, the number of nucleotide changes, is weaker at &minus;0.17860. That second feature is one of the three we subtract out in the partial correlation.</p>
-    <p><strong>Subtracting the protein-event count too &mdash; the strongest of the shortcuts &mdash; separates the arms cleanly.</strong> What survives is signal that no counting feature supplies:</p>
-    <table>
-      <thead><tr><th>arm</th><th class="num">signed &rho;</th><th class="num">partial, all shortcuts removed</th><th class="num">fraction kept</th></tr></thead>
-      <tbody>
-        <tr><td class="model">uSSM-AR</td><td class="num">0.2609</td><td class="num"><strong>0.2103</strong></td><td class="num win"><strong>81%</strong></td></tr>
-        <tr><td class="model">Transformer-AR</td><td class="num">0.1880</td><td class="num">0.1441</td><td class="num">77%</td></tr>
-        <tr><td class="model">BiSSM-BD, best (Score I)</td><td class="num">0.1290</td><td class="num"><strong>0.0581</strong></td><td class="num"><strong>45%</strong></td></tr>
-        <tr><td class="model">BiSSM-BD, NELBO</td><td class="num">0.0997</td><td class="num">0.0500</td><td class="num">50%</td></tr>
-        <tr><td class="model">BiSSM-BD, reverse scan OFF</td><td class="num">0.0476</td><td class="num">0.0152</td><td class="num">32%</td></tr>
-      </tbody>
-    </table>
-    <p>Every arm is at the same 8,000 training steps, so this is an objective comparison and not a checkpoint one. Two things follow. <strong>The gap is the training objective, not the architecture</strong>: the exact autoregressive likelihood keeps 81% of its signal once counting is removed, while every block-diffusion estimator keeps about 45% &mdash; a 3.6&times; difference in counting-independent signal, which is not a tuning gap. And <strong>bidirectionality is not the problem</strong>: turning the reverse scan off costs 3.8&times; on the same measure, so it is working, just not sufficient.</p>
-  </div>
+
+  <p>The autoregressive arms are still roughly twice the best block-diffusion arm in absolute terms, and that gap is the honest headline. But the <em>character</em> of the gap changed. An earlier version of this page argued that block diffusion keeps only about 45 percent of its signal once counting is removed against 81 percent for autoregressive, and called that "a 3.6&times; difference in counting-independent signal, which is not a tuning gap."</p>
+  <p><strong>At block 8 the block-diffusion model keeps 77 percent &mdash; the same fraction as the autoregressive arms.</strong> What remains is a difference in magnitude, not in the quality of what is being measured. The 45 percent figure was a property of the block size we happened to train at, not of the objective.</p>
 </section>
+
+<section>
+  <h2>The training block size is the lever, and smaller is better</h2>
+  <p>BD3-LM splits a sequence into blocks and denoises within each one. Block size is a pretraining choice, not an inference knob &mdash; changing it means training a new model. We had only ever trained at 256. Shrinking it to 32 and then 8 improves MaveDB monotonically, on two estimators that share no machinery.</p>
+  <div class="scroll">
+    <table>
+      <thead>
+        <tr>
+          <th>Estimator</th>
+          <th class="num">block 256</th>
+          <th class="num">block 32</th>
+          <th class="num">block 8</th>
+          <th class="num">trend</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="model">NELBO<span class="sub">signed &rho;</span></td>
+          <td class="num">+0.0898</td>
+          <td class="num">+0.1065</td>
+          <td class="num win"><strong>+0.1238</strong></td>
+          <td class="num dim">&rho; = &minus;1.00</td>
+        </tr>
+        <tr>
+          <td class="model">NELBO<span class="sub">partial, all shortcuts</span></td>
+          <td class="num">+0.0430</td>
+          <td class="num">+0.0646</td>
+          <td class="num win"><strong>+0.0951</strong></td>
+          <td class="num dim">+121%</td>
+        </tr>
+        <tr>
+          <td class="model">State displacement<span class="sub">signed &rho;</span></td>
+          <td class="num">+0.0503</td>
+          <td class="num">+0.0938</td>
+          <td class="num"><strong>+0.1152</strong></td>
+          <td class="num dim">&rho; = &minus;1.00</td>
+        </tr>
+        <tr>
+          <td class="model">State displacement<span class="sub">partial, all shortcuts</span></td>
+          <td class="num loss">&minus;0.0331</td>
+          <td class="num loss">&minus;0.0067</td>
+          <td class="num">+0.0024</td>
+          <td class="num dim">flat at zero</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="foot">Every run scored identically: 256 nucleotides, no genomic prefix, all 21,250 variants, and every checkpoint at step 8,000. Both signed ladders are perfectly monotone, &rho;(block, score) = &minus;1.00 on every row.</p>
+
+  <div class="note ok-note">
+    <p><strong>The two estimators disagree about what improved.</strong> State displacement doubles in signed &rho; but its partial correlation sits at zero at every block size &mdash; it is recovering the mutation-counting shortcut more efficiently, not finding new signal. NELBO's partial more than doubles. Only the NELBO result is evidence about DNA.</p>
+  </div>
+
+  <div class="note warn-note">
+    <p><strong>What is and is not controlled.</strong> Block 8 against block 32 is an exact comparison: identical configuration but for <code>block_size</code>. Three caveats attach to the block-256 anchor.</p>
+    <p><em>Training.</em> It comes from an earlier run that also carried a cosine learning-rate schedule with warmup, which blocks 8 and 32 lacked. That difference favours block 256, so the effect is if anything understated. A fully matched block-256 model is training.</p>
+    <p><em>Step &mdash; checked.</em> Block 32's <code>best.ckpt</code> is step 7,000 against block 8's 8,000. Rescored at the matched step 8,000 it rises on both estimators &mdash; NELBO +0.0999 to +0.1065, state displacement +0.0914 to +0.0938 &mdash; and lands between blocks 256 and 8 either way. The table uses the step-matched runs.</p>
+    <p><em>Scoring geometry &mdash; checked, and the ladder survives.</em> The NELBO ladder was originally not matched: the only block-256 NELBO run scored at 512 nucleotides behind a genomic prefix while blocks 8 and 32 scored at 256 with none. We predicted a matched block-256 run would score <em>higher</em>, because the prefix is known to hurt BiSSM-BD, and that it would therefore shrink the effect. It did both, by very little: <strong>+0.0898 matched against +0.0843 unmatched</strong>. The table above now uses the matched run throughout, and every row is still monotone.</p>
+  </div>
+
+  <div class="note warn-note">
+    <p><strong>Score II runs the other way, and it is not a confound.</strong> Every Score II run originally used a fixed 64-nucleotide window, which made the window-to-block ratio 8, 2 and 0.25 across the three models &mdash; perfectly collinear with block size, so the apparent trend could not be read. We swept the window at each block size to get a best-per-block comparison instead.</p>
+    <table>
+      <thead><tr><th>block</th><th class="num">w8</th><th class="num">w16</th><th class="num">w32</th><th class="num">w64</th><th class="num">full</th><th class="num">best</th></tr></thead>
+      <tbody>
+        <tr><td class="model">256</td><td class="num dim">&mdash;</td><td class="num">+0.0207</td><td class="num win">+0.0522</td><td class="num">+0.0500</td><td class="num">+0.0088</td><td class="num"><strong>+0.0522</strong></td></tr>
+        <tr><td class="model">32</td><td class="num dim">&mdash;</td><td class="num">+0.0308</td><td class="num">+0.0376</td><td class="num win">+0.0433</td><td class="num dim">&mdash;</td><td class="num"><strong>+0.0433</strong></td></tr>
+        <tr><td class="model">8</td><td class="num win">+0.0389</td><td class="num">+0.0202</td><td class="num">+0.0283</td><td class="num">+0.0339</td><td class="num dim">&mdash;</td><td class="num"><strong>+0.0389</strong></td></tr>
+      </tbody>
+    </table>
+    <p>At best-per-block the ordering is <strong>256 &gt; 32 &gt; 8</strong> &mdash; the opposite of NELBO and state displacement. An earlier version of this page claimed a matched window-to-block ratio reversed the ordering; that comparison was not sound, because at block 256 the scored sequence <em>is</em> one block, so "ratio 1" forces the window to the full sequence and conflates matched-ratio with longest-window.</p>
+    <p>The disagreement has a plausible mechanism rather than being a contradiction. Score II measures how far a mutation's effect <em>propagates downstream</em>. A model trained at block 256 couples the whole scored sequence inside one block; a model trained at block 8 couples only within 8 nucleotides plus its cache. So larger blocks genuinely have more within-block propagation for Score II to detect, while smaller blocks give NELBO and state displacement the better-conditioned geometry they reward. The grid is complete at all nine points, and the best-per-block ordering is monotone.</p>
+  </div>
+
+  <h3>It is a MaveDB lever only &mdash; GenomicBenchmarks does not move</h3>
+  <p>The same three checkpoints, fine-tuned on all eight GenomicBenchmarks tasks with the standing recipe. All three are prokaryote-pretrained, so the corpus is matched.</p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>task</th><th class="num">block 8</th><th class="num">block 32</th><th class="num">block 256</th><th class="num">Caduceus-Ph</th></tr></thead>
+      <tbody>
+        <tr><td class="model">dummy_mouse_enhancers</td><td class="num">0.8182</td><td class="num">0.7893</td><td class="num">0.8017</td><td class="num dim">0.754</td></tr>
+        <tr><td class="model">coding_vs_intergenomic</td><td class="num">0.9390</td><td class="num">0.9490</td><td class="num">0.9484</td><td class="num dim">0.915</td></tr>
+        <tr><td class="model">human_or_worm</td><td class="num">0.9549</td><td class="num">0.9654</td><td class="num">0.9672</td><td class="num dim">0.973</td></tr>
+        <tr><td class="model">human_enhancers_cohn</td><td class="num">0.7087</td><td class="num">0.7143</td><td class="num">0.7247</td><td class="num dim">0.747</td></tr>
+        <tr><td class="model">human_enhancers_ensembl</td><td class="num">0.9100</td><td class="num">0.9177</td><td class="num">0.9117</td><td class="num dim">0.893</td></tr>
+        <tr><td class="model">human_ensembl_regulatory</td><td class="num">0.9026</td><td class="num">0.9129</td><td class="num">0.9137</td><td class="num dim">0.872</td></tr>
+        <tr><td class="model">human_nontata_promoters</td><td class="num">0.9466</td><td class="num">0.9501</td><td class="num">0.9486</td><td class="num dim">0.946</td></tr>
+        <tr><td class="model">human_ocr_ensembl</td><td class="num">0.7989</td><td class="num">0.8003</td><td class="num">0.7966</td><td class="num dim">0.828</td></tr>
+        <tr class="rule"><td class="model"><strong>MEAN</strong></td><td class="num"><strong>0.8724</strong></td><td class="num"><strong>0.8749</strong></td><td class="num"><strong>0.8766</strong></td><td class="num dim">0.8660</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note bad-note">
+    <p><strong>Nothing happens.</strong> The total spread across a <em>thirty-two-fold</em> range of block size is <strong>0.0042</strong>, against a single-seed spread on this benchmark of &plusmn;0.0046 sd and 0.0119 range. The ordering is monotone in the opposite direction to MaveDB, but the whole effect is smaller than the noise, so the honest reading is no effect rather than a reversal.</p>
+    <p>That is worth stating plainly next to the 121 percent MaveDB gain: <strong>shrinking the block improves the diffusion likelihood as a variant-effect readout, and does nothing for the representation that fine-tuning actually uses.</strong> They are two different properties of the model and only one of them responds.</p>
+  </div>
+
+  <h3>Which estimator you score with decides which block size wins</h3>
+  <p>Running every estimator against every block size turns the single "best block size" question into a table, because they disagree.</p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>estimator</th><th class="num">block 256</th><th class="num">block 32</th><th class="num">block 8</th><th>optimum</th></tr></thead>
+      <tbody>
+        <tr><td class="model">NELBO<span class="sub">the training objective</span></td><td class="num">+0.0898</td><td class="num">+0.1065</td><td class="num win">+0.1238</td><td>small</td></tr>
+        <tr><td class="model">state displacement</td><td class="num">+0.0503</td><td class="num">+0.0938</td><td class="num win">+0.1152</td><td>small</td></tr>
+        <tr><td class="model">Score I<span class="sub">masked infilling</span></td><td class="num">+0.1290</td><td class="num win">+0.1344</td><td class="num loss">+0.0368</td><td>medium</td></tr>
+        <tr><td class="model">PLL<span class="sub">bidirectional</span></td><td class="num win">+0.1031</td><td class="num dim">&mdash;</td><td class="num loss">+0.0028</td><td>large</td></tr>
+        <tr><td class="model">causal PLL<span class="sub">AR factorisation</span></td><td class="num win">+0.0829</td><td class="num dim">&mdash;</td><td class="num loss">&minus;0.0187</td><td>large</td></tr>
+        <tr><td class="model">Score II<span class="sub">downstream JSD</span></td><td class="num win">+0.0522</td><td class="num">+0.0433</td><td class="num">+0.0389</td><td>large</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note warn-note">
+    <p><strong>Every masked-marginal estimator collapses at block 8.</strong> PLL falls from +0.1031 to +0.0028, causal PLL goes negative at &minus;0.0187 with 8 of 12 assays ranked backwards, and Score I drops 3.5&times;. Only NELBO and state displacement improve.</p>
+    <p>The mechanism is consistent across all three. A masked-marginal estimator hides one position and reads <code>p(x_i | rest)</code>; at block 8 the directly visible "rest" is seven other nucleotides, and everything else has to arrive through the recurrent cache, which carries far less usable signal for a local readout than in-block context does.</p>
+    <p>So the block-8 advantage is <strong>estimator-specific</strong>: it wins only under the estimator that matches how it was trained, and under any estimator borrowed from the masked-language-model world it is the worst of the three. Evo 2's stated convention is that masked models should be scored by pseudolikelihood, which is the PLL row &mdash; where block 256 wins and block 8 is worth nothing. Whether block diffusion is exempt from that convention, on the grounds that it has a genuine likelihood bound, is a claim that has to be argued rather than assumed.</p>
+  </div>
+
+</section>
+
+
+<section>
+  <h2>The estimator was leaving a third of the signal on the floor</h2>
+  <p>Everything above scores a variant with the training objective: sample a noise level, mask that fraction of the sequence, and average the denoising loss over 128 Monte Carlo draws. Three changes to <em>how we read the model</em> &mdash; no retraining, same weights &mdash; move the number more than any architectural change we have made.</p>
+
+  <h3>Restricting the noise band</h3>
+  <p><code>--epsilon</code> sets the lower end of the sampled band: <code>t ~ U(0,1)&times;(1&minus;&epsilon;)+&epsilon;</code>. It had never been swept, because the job wrapper silently dropped the flag. Sweeping it on block 8:</p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th class="num">&epsilon;</th><th class="num">signed &rho;</th><th class="num">partial, all shortcuts</th></tr></thead>
+      <tbody>
+        <tr><td class="num">0.001 <span class="sub">full range</span></td><td class="num">0.1238</td><td class="num">0.0951</td></tr>
+        <tr><td class="num">0.50</td><td class="num">0.1448</td><td class="num">0.1172</td></tr>
+        <tr class="hl"><td class="num">0.70</td><td class="num"><strong>0.1457</strong></td><td class="num">0.1213</td></tr>
+        <tr><td class="num">0.90</td><td class="num">0.1438</td><td class="num">0.1243</td></tr>
+        <tr class="hl"><td class="num">0.95</td><td class="num">0.1433</td><td class="num win"><strong>0.1254</strong></td></tr>
+        <tr><td class="num">0.99</td><td class="num">0.1422</td><td class="num">0.1252</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><strong>+32 percent on the confound-stripped metric, for free.</strong> The optimum is a broad plateau from 0.5 to 0.99, not a tuned point, so it will not need re-tuning per checkpoint. Signed &rho; peaks earlier than the partial does &mdash; the extra masking trades a little raw correlation for signal that is not mutation-counting, which is the direction you want.</p>
+
+  <div class="note warn-note">
+    <p><strong>It is specific to block 8, and we can say why.</strong> Ordered by how many blocks each checkpoint has at scoring time, the effect of &epsilon;=0.9 is monotone:</p>
+    <table>
+      <thead><tr><th>blocks at scoring</th><th class="num">1 (blk 256)</th><th class="num">8 (blk 32)</th><th class="num">32 (blk 8)</th></tr></thead>
+      <tbody><tr><td class="model">effect of &epsilon;=0.9</td><td class="num loss">&minus;68%</td><td class="num loss">&minus;39%</td><td class="num win">+17%</td></tr></tbody>
+    </table>
+    <p>A three-level dose-response on the quantity the mechanism names. High masking leaves each block conditioning on its clean preceding blocks, and you need enough of them before that replaces the within-block context you are masking away. Applying &epsilon; to a large-block checkpoint actively hurts.</p>
+  </div>
+
+  <h3>The same gain, deterministically, for one 128th of the compute</h3>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>estimator on block 8</th><th class="num">signed &rho;</th><th class="num">partial</th><th class="num">forward passes</th></tr></thead>
+      <tbody>
+        <tr><td class="model">NELBO, full range</td><td class="num">0.1238</td><td class="num">0.0951</td><td class="num dim">128</td></tr>
+        <tr><td class="model">NELBO, &epsilon;=0.9</td><td class="num">0.1438</td><td class="num">0.1243</td><td class="num dim">128</td></tr>
+        <tr class="hl"><td class="model">fully-masked one step<span class="sub">deterministic</span></td><td class="num"><strong>0.1422</strong></td><td class="num win"><strong>0.1251</strong></td><td class="num"><strong>1</strong></td></tr>
+        <tr><td class="model">sequential unmasking<span class="sub">reveals true bases left to right</span></td><td class="num loss">0.1369</td><td class="num loss">0.1005</td><td class="num dim">8</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>A single deterministic forward pass matches 128 Monte Carlo draws. So the &epsilon; benefit was never about the noise band: it was approaching the fully-masked limit, and you can go straight there. It also rules out &ldquo;removing Monte Carlo noise&rdquo; as the mechanism, since the stochastic and deterministic versions score the same.</p>
+
+  <div class="note bad-note">
+    <p><strong>A hypothesis we tested and had to abandon.</strong> At &epsilon;=0.9 a block of 8 holds 0.4 visible bases on average and 68 percent of blocks are masked entirely. A fully masked block is scored as a product of independent per-position marginals, which cannot express any within-block dependency &mdash; if the only legal strings are AA and CC, both positions are uniform and the impossible AC scores exactly like AA. Codon structure is the DNA analogue, so the model might know dependencies this estimator cannot read.</p>
+    <p>Sequential unmasking removes that limitation: reveal the true bases one at a time and let each condition on the clean prefix <em>and</em> its own already-revealed neighbours. Both it and the one-step control are deterministic, so the difference isolates exactly that effect.</p>
+    <p><strong>It makes things worse</strong> &mdash; 0.1369 against 0.1422 signed, and 0.1005 against 0.1251 once shortcuts are stripped. The within-block dependencies the cheap estimator discards are real, but they largely encode synonymous codon preference, which is noise for a stability phenotype. The useful signal is in the clean prefix.</p>
+  </div>
+
+  <h3>Which estimator you use decides which block size wins</h3>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>estimator</th><th class="num">block 256</th><th class="num">block 32</th><th class="num">block 8</th><th>optimum</th></tr></thead>
+      <tbody>
+        <tr><td class="model">NELBO, &epsilon;=0.9</td><td class="num">+0.0379</td><td class="num">+0.0654</td><td class="num win">+0.1438</td><td>many blocks</td></tr>
+        <tr><td class="model">fully-masked one step</td><td class="num loss">&minus;0.0167</td><td class="num">+0.0557</td><td class="num win">+0.1422</td><td>many blocks</td></tr>
+        <tr><td class="model">state displacement</td><td class="num">+0.0503</td><td class="num">+0.0938</td><td class="num win">+0.1152</td><td>many blocks</td></tr>
+        <tr class="rule"><td class="model">Score I<span class="sub">masked infilling</span></td><td class="num">+0.1291</td><td class="num win">+0.1344</td><td class="num loss">+0.0368</td><td>medium</td></tr>
+        <tr><td class="model">PLL<span class="sub">bidirectional</span></td><td class="num">+0.1031</td><td class="num win">+0.1148</td><td class="num loss">+0.0028</td><td>medium</td></tr>
+        <tr><td class="model">causal PLL</td><td class="num">+0.0829</td><td class="num win">+0.1096</td><td class="num loss">&minus;0.0187</td><td>medium</td></tr>
+        <tr><td class="model">Score II<span class="sub">downstream JSD</span></td><td class="num win">+0.0522</td><td class="num">+0.0433</td><td class="num">+0.0389</td><td>large</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Two families with opposite optima. Estimators that mask a <em>whole block</em> want many blocks. Estimators that mask <em>one position</em> and read a local marginal want enough within-block context, and collapse at block 8 where only seven neighbours remain &mdash; PLL falls to zero and causal PLL goes negative, ranking 8 of 12 assays backwards.</p>
+  <p class="foot">PLL and causal PLL at blocks 8 and 32 were impossible to run until 2026-09-20: a guard required <code>model.length == block_size</code> on the grounds that otherwise the clean stream leaks the answer. That stream only exists under cross-attention; a state-space backbone is passed the corrupted sequence alone. Verified on the GPU before relaxing it &mdash; with the whole sequence masked, perturbing a clean base in block 0 still moves block 5's prediction by 0.13, while perturbing block 30, or another position inside block 5, moves it by exactly zero.</p>
+</section>
+
 
 <section>
   <h2>One thing block diffusion can do that autoregressive models cannot</h2>
@@ -1144,6 +1297,50 @@
 </section>
 
 <section>
+  <h2>Where GenomicBenchmarks stands now, and which of these numbers are real</h2>
+  <p>With the learning rate fixed, the recipe is <code>backbone_lr=1e-4</code>, cosine schedule, <code>warmup_frac=0.1</code>, 4 epochs. Over five seeds it averages <strong>0.8776 &plusmn; 0.0046</strong>, against Caduceus-Ph 0.8660 and Caduceus-PS 0.8690. Individual seeds run 0.8730 to 0.8849.</p>
+  <p>That seed spread of 0.0119 is the number to keep in mind, because it is larger than almost every effect we have chased since.</p>
+
+  <h3>Training longer: the right shape, but not established</h3>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>epochs</th><th class="num">8-task mean</th><th class="num">&Delta; vs 4</th><th class="num">seeds</th></tr></thead>
+      <tbody>
+        <tr><td class="model">4</td><td class="num">0.8765</td><td class="num dim">&mdash;</td><td class="num dim">1 (seed 0)</td></tr>
+        <tr class="hl"><td class="model">10</td><td class="num"><strong>0.8812</strong></td><td class="num">+0.0047</td><td class="num dim">1 (seed 0)</td></tr>
+        <tr><td class="model">20</td><td class="num">0.8761</td><td class="num loss">&minus;0.0004</td><td class="num dim">1 (seed 0)</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note warn-note">
+    <p><strong>Do not quote 0.8812 as a result.</strong> The curve has the shape you would want &mdash; a knee at 10 epochs &mdash; and all three points share a seed, a checkpoint and a recipe, so they are internally consistent. But each is a <em>single seed</em>, and the five-seed spread at 4 epochs (0.8730 to 0.8849) is two and a half times the largest gap in this table. Seed 0 happens to sit low in that distribution at 4 epochs, which is exactly the setup that manufactures an apparent gain. The honest reading is that epochs are worth testing at five seeds, not that ten epochs is better.</p>
+  </div>
+
+  <h3>One task where the effect is much larger than the noise</h3>
+  <p>On <code>human_ensembl_regulatory</code>, combining a blocked readout, a layer-10 tap and 10 epochs produces a gain that clears the seed spread by a wide margin.</p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>arm</th><th class="num">accuracy</th><th class="num">sd</th><th class="num">seeds</th><th class="num">vs Caduceus-PS</th></tr></thead>
+      <tbody>
+        <tr><td class="model">1e-4 + warmup, 4 epochs<span class="sub">the standing recipe</span></td><td class="num">0.8990</td><td class="num">0.0095</td><td class="num dim">5</td><td class="num">+0.0260</td></tr>
+        <tr class="hl"><td class="model">blocked readout + 10 epochs</td><td class="num"><strong>0.9315</strong></td><td class="num">0.0020</td><td class="num dim">3</td><td class="num win"><strong>+0.0585</strong></td></tr>
+        <tr><td class="model">blocked readout + layer 10 + 10 epochs<span class="sub">the layer tap adds nothing</span></td><td class="num">0.9288</td><td class="num">0.0006</td><td class="num dim">3</td><td class="num">+0.0558</td></tr>
+        <tr><td class="model dim">Caduceus-PS<span class="sub">published</span></td><td class="num dim">0.8730</td><td class="num dim">&mdash;</td><td class="num dim">&mdash;</td><td class="num dim">&mdash;</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note ok-note">
+    <p><strong>+0.0325 against the five-seed baseline, Welch t = 7.40, p = 0.001.</strong> The three treatment seeds are 0.9316, 0.9335 and 0.9294, and every one of them clears every one of the five baseline seeds. This is the one GenomicBenchmarks result on this page whose effect is comfortably larger than the seed noise it has to beat.</p>
+    <p><strong>It also needs one lever fewer than we thought.</strong> We had reported this result with a layer-10 tap in the recipe. Running it without the tap scores <em>higher</em> &mdash; 0.9315 against 0.9288. The difference is small and not itself significant (t = 2.21, p = 0.13), so the honest reading is that the tap contributes nothing and the work is being done by the blocked readout and the longer schedule alone. Prefer the simpler recipe.</p>
+  </div>
+
+  <div class="note bad-note">
+    <p><strong>The levers do not stack.</strong> The layer-10 tap is what makes the regulatory result work, and 10 epochs helps there too &mdash; but combining them across all eight tasks gives <strong>0.8751</strong>, <em>below</em> the 0.8812 of 10 epochs alone and below the 0.8776 five-seed baseline. Every combination we have tried has come in under the sum of its parts, and this one came in under its better half. Treat each lever as task-specific until a multi-seed run says otherwise.</p>
+  </div>
+</section>
+
+
+<section>
   <h2>One of the eight tasks is solved better by sequence length than by any model</h2>
   <p>On <code>human_ensembl_regulatory</code>, a gradient-boosted tree given <strong>nothing but <code>len(seq)</code></strong> &mdash; not a single nucleotide &mdash; reaches <strong>0.9154</strong> on the official test split. That is above Caduceus-PS (0.8730), above our best model (0.8990), and above both of the explicit length features we tried.</p>
   <div class="scroll">
@@ -1422,8 +1619,41 @@
   </div>
 </section>
 
+<section>
+  <h2>Score II: correctly implemented, and genuinely weak</h2>
+  <p>Score II asks a different question from Score I. Rather than comparing how plausible the model finds the two spellings at the mutated site, it mutates the sequence and measures how much the model's predictions <em>downstream</em> of the mutation move. Formally it is the mean Jensen&ndash;Shannon divergence between the wild-type and mutant per-position distributions, over every position after the last edit, in bits.</p>
+  <p>We checked the implementation two ways before reading the result, because a divergence that comes out near zero looks the same whether the model is insensitive or the code is broken.</p>
+  <ul>
+    <li><strong>The distributions are normalised.</strong> The forward pass ends in a log-softmax, so exponentiating gives a genuine probability distribution and the divergence is bounded in [0,&nbsp;1] bits.</li>
+    <li><strong>The output is not degenerate.</strong> All 15,889 scored variants receive distinct values, every one inside the bound, and the sign runs the right way: less perturbation predicts higher fitness.</li>
+  </ul>
+  <p>It is simply a weak signal. The best configuration reaches +0.0500 signed, against +0.1341 for NELBO at block 8. The reason is visible in the raw numbers: the <strong>median divergence is 0.003 to 0.007 bits out of a possible 1.0</strong>. A point mutation barely moves what the model predicts a few hundred nucleotides later, which is what our earlier range measurements already said.</p>
+  <div class="note warn-note">
+    <p><strong>Two things to know before using this estimator.</strong> A short window beats the full downstream context by 5.7&times; (+0.0500 against +0.0088) &mdash; distant positions contribute noise, not signal. And 5,361 of 21,250 variants (25 percent) cannot be scored at all, because a mutation near the end of the sequence leaves no downstream window. That dropout is systematic, not random.</p>
+  </div>
+  <div class="note bad-note">
+    <p><strong>A provenance bug this exposed.</strong> The <code>score_definition</code> field written into every result file was an if/else chain whose fallback branch stamped "paired NELBO(WT) &minus; paired NELBO(mutant)" onto four estimators that are not NELBO, Score II among them. Every Score II run on disk described itself as a NELBO run. It is now an explicit per-mode table, with a test asserting that every mode has its own string and that no two modes share one, plus an end-to-end run across all nine modes &mdash; source-level tests alone were not enough the last time this class of bug appeared here.</p>
+  </div>
+</section>
+
+
   <section>
   <h2>A problem with the MaveDB benchmark itself</h2>
+  <div class="note bad-note">
+    <p><strong>This is not a fitness benchmark. It is a protein-stability benchmark.</strong> All twelve score sets are Tsuboyama et al. 2023 cDNA-display proteolysis experiments &mdash; protease survival, then a Bayesian fit, yielding <strong>unfolding free energy &Delta;G in kcal/mol</strong>. ProteinGym carries 64 of them under <code>coarse_selection_type = Stability</code>, four being the same proteins. dnaHNet calls them &ldquo;nucleotide-level experimental fitness datasets&rdquo;; that is wrong at the source and we inherited it. Nothing here should be described as fitness prediction.</p>
+    <p><strong>Each variant was independently codon-randomised</strong>, which is what makes it hard for a DNA model:</p>
+    <table>
+      <thead><tr><th>protein-level change</th><th class="num">rows</th><th class="num">median nt changes</th></tr></thead>
+      <tbody>
+        <tr><td class="model">none (<code>p.=</code>)</td><td class="num">66</td><td class="num">9</td></tr>
+        <tr><td class="model">one amino acid</td><td class="num">13,838</td><td class="num"><strong>11</strong></td></tr>
+        <tr><td class="model">two amino acids</td><td class="num">5,445</td><td class="num">16</td></tr>
+        <tr><td class="model">indel</td><td class="num">1,901</td><td class="num dim">&mdash;</td></tr>
+      </tbody>
+    </table>
+    <p>A one-amino-acid change carries a median of <strong>eleven</strong> nucleotide changes. ESM scores one position for such a variant; a DNA model sums over eleven, of which about ten are synthesis noise. Sixty-six rows have a protein identical to the reference, up to 20 nt apart, and are scored as variants anyway. This is why the zero-parameter protein-event count reaches 0.309 and beats every model on this page, and it caps what any nucleotide-level model can extract.</p>
+    <p class="dim" style="font-size:12.5px">Inventory verified against our own cache: 12 score sets, 7 gene names (cspA &times;4 backgrounds, sucB &times;3), reference DNA 132&ndash;216 nt, variants 129&ndash;216 nt, per-accession counts matching exactly. All 21,250 mutants reproduce exactly from <code>apply(hgvs_nt, reference)</code> &mdash; zero reference-base mismatches, zero unparsed.</p>
+  </div>
   <div class="note bad-note">
     <p><strong>The MaveDB DNA sequences are not real genome sequences.</strong> They were redesigned to code for the same protein using different codons.</p>
     <p>We searched the <em>E. coli</em> K-12 reference genome (NC_000913) for all 12 target sequences. None of them are in it, on either strand. The proteins do match the real genes exactly, at a known amino acid offset. But the DNA matches only <strong>75 to 87 percent</strong>: FecA 75.0, yaiA 78.8, argR 79.7, sucB 83.3, exbD 83.3, nusA 83.6, cspA 86.3, CspA 86.9. Four more experiments do not match at the protein level either.</p>
@@ -1431,6 +1661,63 @@
     <p>This does not explain why our autoregressive models beat our block diffusion models, because that comparison is between our own models on the same data. But it probably limits how well <em>any</em> DNA model can do here. It is worth saying in the paper, next to the zero-parameter baseline of 0.30931.</p>
   </div>
   <p class="dim" style="font-size:12.5px">The 256-nucleotide prefixes we used in the cache test <em>are</em> real genome sequence. We checked them separately: all 12 experiments have one, each is exactly 256 nucleotides, every letter is A, C, G or T, and GC content runs from 0.375 to 0.559 with a mean of 0.475, close to the <em>E. coli</em> genome value of 0.508. There are 7 different prefixes because the 12 experiments cover only 7 genes. So the cache test gave each model genuine upstream DNA, and the models still did not benefit. Note what that test asks of a model though: read a real promoter, then a gene body written in scrambled codons. That mismatch may be why the extra context does not help, and no amount of training would fix it.</p>
+</section>
+
+<section>
+  <h2>Rebuilding the benchmark's references, and what it did not explain</h2>
+  <p>Every MaveDB variant was independently codon-randomised, so one amino acid substitution arrives as a median of eleven nucleotide changes, ten of them synonymous and invisible to the assay. We rebuilt each reference so that only the minimal edits remain &mdash; the mean nucleotide difference falls from 11.35 to 2.31 &mdash; and rescored six arms on the same 13,838 single-substitution variants.</p>
+  <p>Codon matching is worth a great deal. It is also worth the same to every arm, which is the point.</p>
+  <table>
+    <thead><tr><th>arm</th><th class="num">original</th><th class="num">codon-matched</th><th class="num">gain</th><th class="num">paired over 12 assays</th></tr></thead>
+    <tbody>
+      <tr><td class="model">uSSM-AR (prefix, L=512)</td><td class="num">0.2066</td><td class="num"><strong>0.2674</strong></td><td class="num">+0.0608</td><td class="num">11/12, p=0.0010</td></tr>
+      <tr><td class="model">Transformer-AR (prefix, L=512)</td><td class="num">0.1812</td><td class="num">0.2479</td><td class="num">+0.0667</td><td class="num">12/12, p=0.0005</td></tr>
+      <tr><td class="model">BiSSM-BD b8, block marginal (L=256)</td><td class="num">0.0998</td><td class="num">0.1383</td><td class="num">+0.0385</td><td class="num">11/12, p=0.0015</td></tr>
+      <tr><td class="model">BiSSM-BD b8, sequential unmask (L=256)</td><td class="num">0.0853</td><td class="num">0.1542</td><td class="num">+0.0689</td><td class="num">11/12, p=0.0015</td></tr>
+      <tr><td class="model">BiSSM-BD b8, block marginal (prefix, L=512)</td><td class="num">0.0946</td><td class="num">0.1336</td><td class="num">+0.0390</td><td class="num">10/12, p=0.0210</td></tr>
+      <tr><td class="model">BiSSM-BD b8, sequential unmask (prefix, L=512)</td><td class="num">0.0921</td><td class="num"><strong>0.1687</strong></td><td class="num">+0.0765</td><td class="num">12/12, p=0.0005</td></tr>
+    </tbody>
+  </table>
+  <div class="note bad-note">
+    <p><strong>The codon confound does not explain the autoregressive-to-diffusion drop.</strong> Autoregressive arms gain +0.0637 on average, block diffusion arms +0.0558. The difference is <strong>+0.0080, positive on 6 of 12 assays, p=0.62</strong>. Codon randomisation is a defect in the benchmark that costs every model roughly the same amount &mdash; not a reason one objective trails the other. The ratio within the matched-geometry column moves from 2.24&times; to 1.59&times;, and that narrowing comes from sequential unmasking becoming usable, not from the autoregressive arms losing ground.</p>
+  </div>
+  <div class="note warn-note">
+    <p><strong>A conclusion this overturns.</strong> We had recorded sequential unmasking as a decisive negative: it scored 0.1369 against 0.1422 for the one-step marginal, and we read that as within-block dependencies being real but unhelpful. That was an artifact of the reference. Against a randomly recoded reference, the within-block conditioning spends itself predicting which synonymous codon the benchmark happened to pick. Against a matched reference the same conditioning is the <strong>best block-diffusion estimator we have</strong>, and the interaction is significant (+0.0303, 10/12, p=0.012).</p>
+  </div>
+  <div class="note warn-note">
+    <p><strong>And a baseline this retires.</strong> Counting amino-acid events with no model at all reaches 0.3093 and beats everything on this page. It does that because the full variant set mixes 66 wild-type rows, 15,739 single mutants and 5,445 doubles &mdash; it is a wild-type/single/double detector. On the 13,838 single-substitution rows it takes exactly <strong>one value</strong>, so it has zero variance and predicts nothing. It should not be quoted again without that sentence attached.</p>
+  </div>
+
+  <h3>Rebuilding the references also inverts the estimator ladder</h3>
+  <p>Which way of reading the model scores best is not a property of the model. It changes when the benchmark's references change, and it changes completely. All four estimators below run on the same 13,838 rows, and on codon-matched data no stripping is needed &mdash; the nucleotide-count confound collapses to &minus;0.017 and the protein-event count has no variance at all, so the signed and partial columns coincide.</p>
+  <table>
+    <thead><tr><th>estimator</th><th class="num">codon-matched</th><th class="num">original</th><th class="num">forward passes</th></tr></thead>
+    <tbody>
+      <tr><td class="model">fully-masked one step</td><td class="num">0.1383</td><td class="num">0.1422</td><td class="num"><strong>1</strong></td></tr>
+      <tr><td class="model">NELBO, &epsilon;=0.9, 128 draws</td><td class="num">0.1429</td><td class="num">0.1438</td><td class="num dim">128</td></tr>
+      <tr><td class="model">sequential unmasking</td><td class="num">0.1542</td><td class="num">0.1369</td><td class="num dim">8</td></tr>
+      <tr class="hl"><td class="model">sequential unmasking + genomic prefix</td><td class="num win"><strong>0.1687</strong></td><td class="num">0.0921</td><td class="num dim">8</td></tr>
+    </tbody>
+  </table>
+  <p>On the original references the order is one-step &asymp; &epsilon;-restricted NELBO, with sequential unmasking last. On matched references it <strong>inverts</strong>: sequential unmasking with a prefix beats the 128-draw NELBO by +0.026 while costing a sixteenth as much, and the one-step estimator drops to the bottom. Any claim of the form "estimator X is the right way to score a diffusion model" is contingent on the benchmark it was chosen against.</p>
+  <p class="dim" style="font-size:12.5px">One earlier shortcut weakens here. On the original references a single deterministic pass tracked the 128-draw estimator to 0.0016; on matched references the gap is 0.0046. Still cheap and still close enough to trace a trend against training tokens, but no longer close enough to quote as equivalent.</p>
+
+  <h2>Where the remaining gap actually lives: density, not discrimination</h2>
+  <p>Two explanations for the residual gap call for opposite fixes. Either block diffusion is a worse density model on this data, in which case the lever is training; or it models these sequences about as well and only its wild-type-minus-mutant <em>difference</em> fails to track the assay, in which case the lever is the scoring rule. These are separable, because sequential unmasking at block size <em>b</em> is exactly the autoregressive chain rule &mdash; the same factorisation, over the same tokens, as an autoregressive model's own exact likelihood.</p>
+  <p>With both arms carrying the same 256-nucleotide genomic prefix at L=512, on the same 13,838 rows:</p>
+  <table>
+    <thead><tr><th></th><th class="num">uSSM-AR</th><th class="num">BiSSM-BD b8</th><th class="num">shortfall</th></tr></thead>
+    <tbody>
+      <tr><td class="model">wild-type NLL per nucleotide</td><td class="num">1.1193</td><td class="num">1.2907</td><td class="num">+0.1714 nats/nt</td></tr>
+      <tr><td class="model">fraction of the ln 4 budget recovered</td><td class="num">19.3%</td><td class="num">6.9%</td><td class="num"><strong>64.2%</strong></td></tr>
+      <tr><td class="model">macro signed &rho;</td><td class="num">0.2674</td><td class="num">0.1687</td><td class="num"><strong>36.9%</strong></td></tr>
+    </tbody>
+  </table>
+  <div class="note bad-note">
+    <p><strong>The density shortfall is larger than the ranking shortfall.</strong> Block diffusion is not a well-calibrated density model that happens to rank badly; it is a substantially worse density model whose ranking is, if anything, better than its likelihood deserves. The lever is the model, not another estimator.</p>
+    <p><strong>Pre-registered, before the full-data runs land:</strong> if more pretraining is the answer, the MaveDB gain must arrive <em>together with</em> a closing of the 0.1714 nats/nt wild-type likelihood gap. A MaveDB gain without a density gain would falsify this reading.</p>
+  </div>
+  <p class="dim" style="font-size:12.5px">The comparison is only legal under three conditions, which the script enforces rather than assumes: the diffusion arm must be scored by sequential unmasking, because a NELBO is a bound and comparing a bound to an exact likelihood measures the bound's slack; the autoregressive arm must be an exact-likelihood block-1 arm; and the genomic prefix must match on both sides, since 256 nucleotides of extra left context is worth real nats and would otherwise read as a density gap.</p>
 </section>
 
 <section>
@@ -1460,6 +1747,14 @@
     <p>On GenomicBenchmarks, prefer the median over seeds. The mean is not robust to the
     chance-level seeds that appear on the small tasks, and on dummy_mouse_enhancers a single dead
     seed moves an arm by more than most between-arm differences in the whole benchmark.</p>
+  </div>
+  <div class="note bad-note">
+    <p><strong>Indels are scored by length, not by biology.</strong> The sequence scores are unnormalised sums over tokens, so a 3-nt deletion drops three log-probability terms and a 3-nt insertion adds three. Across the 1,901 indel rows <code>corr(predicted_fitness, length change) = &minus;0.79</code>: mean predicted <strong>+3.015</strong> for deletions against <strong>&minus;4.249</strong> for insertions, while the assay puts them at a near-identical +1.319 and +1.699 kcal/mol. Those rows score at chance (macro 0.0149) and pull the pooled headline down by about 0.010.</p>
+    <p>ProteinGym keeps substitutions and indels as separate benchmarks behind an <code>--indel_mode</code> flag. <code>summarize_predictions</code> now emits the substitution-only figure beside the pooled one &mdash; <strong>quote the 19,349-substitution number</strong>. The partial correlation was already immune, since length delta is one of its controls; only the signed headline was affected.</p>
+  </div>
+  <div class="note bad-note">
+    <p><strong>Estimators are not defined on the same variants.</strong> How many of the 21,250 MaveDB variants a run can score is fixed by which estimator it uses: NELBO, causal PLL and state displacement score all 21,250; Score I is undefined where the variant changes the sequence length and scores 19,349; Score II needs a downstream window and scores 15,889.</p>
+    <p>Ranking two estimators against each other on their own subsets therefore compares two different benchmarks, and the effect is not small &mdash; restricting to the common set moves Score I's best arm from 0.1290 to 0.0753, a 42 percent drop, while NELBO at block 8 moves only from 0.1238 to 0.0957. <strong>Intersect on (score set, variant) before ranking anything across estimators.</strong> Within a single estimator the subsets already match and no correction is needed.</p>
   </div>
   <ul>
     <li><strong>Use the signed &rho; column, not |&rho;|.</strong> The scorer takes the absolute value of each experiment's correlation before averaging (<code>mavedb.py:278</code>). That means an experiment the model gets <em>backwards</em> still adds to its score. All 12 experiments genuinely point the same way, so the sign should not be thrown away. The <strong>neg assays</strong> column counts how many of the 12 a model ranks backwards, and that is where the inflation comes from. Measured |&rho;| divided by signed &rho; is 1.13 for uSSM-AR and 1.17 for Transformer-AR, but 1.56 for Transformer-BD, 1.56 for BiSSM-BD and 1.54 for uSSM-BD. So the real gap between autoregressive and block diffusion is <em>wider</em> than the |&rho;| column shows.</li>

@@ -348,3 +348,324 @@ def test_infill_nsyn_masks_only_the_non_synonymous_codons():
 
   with pytest.raises(ValueError, match="nt|codon"):
     sm.score_infill(model, ids(wt), ids(mut), wt, mut, unit="bogus")
+
+
+# --------------------------------------------------------------------------
+# Argument plumbing. Added 2026-09-19 after a real regression: a new
+# `--score2-window` argument was wired into the CALL SITE
+# (`score2_window=args.score2_window`) but its `add_argument` was inserted with
+# a string replace that silently no-opped, because the anchor said
+# `group.add_argument(` where the file uses `parser.add_argument(`. The result
+# was an AttributeError on EVERY invocation of score_mavedb.py, including score
+# modes unrelated to the new flag. Syntax checks and --help on the OLD file both
+# passed; nothing caught it until six LSF jobs had already failed.
+# --------------------------------------------------------------------------
+
+import re as _re
+import pathlib as _pathlib
+
+_ROOT = _pathlib.Path(__file__).resolve().parents[1]
+
+
+def _declared_flags(source: str) -> set:
+  """Flags from add_argument, including the form where the name is on its own line."""
+  return ({m.replace("-", "_") for m in _re.findall(r'add_argument\(\s*"--([\w-]+)"', source)}
+          | {m.replace("-", "_")
+             for m in _re.findall(r'add_argument\(\s*\n\s*"--([\w-]+)"', source)})
+
+
+def test_every_args_attribute_read_by_score_mavedb_is_declared():
+  source = (_ROOT / "scripts/eval/dnahnet/score_mavedb.py").read_text()
+  used = set(_re.findall(r"\bargs\.([a-z_][a-z_0-9]*)", source))
+  missing = used - _declared_flags(source)
+  assert not missing, (
+    f"read from args but never declared: {sorted(missing)} -- this is exactly "
+    f"the failure that crashed every score mode on 2026-09-19")
+
+
+def test_every_args_attribute_read_by_finetune_is_declared():
+  source = (_ROOT / "scripts/eval/caduceus/finetune.py").read_text()
+  used = set(_re.findall(r"\bargs\.([a-z_][a-z_0-9]*)", source))
+  # set inside resolve() rather than by argparse
+  derived = {"seed_list", "allow_window_mismatch"}
+  missing = used - _declared_flags(source) - derived
+  assert not missing, f"read from args but never declared: {sorted(missing)}"
+
+
+def test_every_shell_hook_names_a_declared_flag():
+  """A wrapper emitting a flag argparse does not know is an instant hard failure."""
+  for shell, python in (("scripts/eval/dnahnet/mavedb_score.sh",
+                         "scripts/eval/dnahnet/score_mavedb.py"),
+                        ("scripts/eval/caduceus/finetune.sh",
+                         "scripts/eval/caduceus/finetune.py")):
+    emitted = set(_re.findall(r"EXTRA(?:_ARGS)?\+=\(\s*--([\w-]+)",
+                              (_ROOT / shell).read_text()))
+    declared = _declared_flags((_ROOT / python).read_text())
+    undeclared = {e.replace("-", "_") for e in emitted} - declared
+    assert not undeclared, f"{shell} emits undeclared flags: {sorted(undeclared)}"
+
+
+def test_every_score_mode_choice_has_a_dispatch_branch():
+  """A mode in `choices` with no branch would silently fall through to nelbo."""
+  source = (_ROOT / "scripts/eval/dnahnet/score_mavedb.py").read_text()
+  block = source[source.index('choices=("nelbo"'):]
+  choices = set(_re.findall(r'"([a-z_]+)"', block[:block.index(")")]))
+  handled = (set(_re.findall(r'score_mode\s*==\s*"([\w]+)"', source))
+             | set(_re.findall(r'score_mode\s+in\s+\(([^)]*)\)', source))
+             | {"nelbo"})
+  flat = set()
+  for h in handled:
+    flat |= {x.strip().strip('"\'') for x in h.split(",")}
+  # infill_* modes are dispatched through the explicit unit mapping
+  unit_mapped = set(_re.findall(r'"(infill_[\w]+)":\s*"', source))
+  missing = choices - flat - unit_mapped
+  assert not missing, f"score_mode choices with no dispatch branch: {sorted(missing)}"
+
+
+def test_every_score_mode_has_its_own_provenance_string():
+  """`score_definition` in summary.json must describe the estimator that ran.
+
+  It used to be an if/elif chain whose `else` stamped "paired NELBO(WT) -
+  paired NELBO(mutant)" on four estimators that are not NELBO
+  (predictive_divergence, pll, pll_causal, state_displacement), so a
+  summary.json asserted provenance it did not have.
+  """
+  import ast
+
+  source = (_ROOT / "scripts/eval/dnahnet/score_mavedb.py").read_text()
+  tree = ast.parse(source)
+  defined = None
+  for node in ast.walk(tree):
+    if (isinstance(node, ast.Assign)
+        and getattr(node.targets[0], "id", "") == "_SCORE_DEFINITIONS"):
+      defined = {k.value for k in node.value.keys}
+  assert defined is not None, "_SCORE_DEFINITIONS not found"
+
+  start = source.index('"--score-mode"')
+  choices = set(eval(
+    source[source.index("choices=(", start) + 8:
+           source.index("default=", start)].rstrip().rstrip(",")))
+
+  assert choices == defined, (
+    f"score_mode choices and _SCORE_DEFINITIONS disagree: "
+    f"missing={choices - defined} extra={defined - choices}")
+
+  # And no two modes may share a description, which is how the old `else`
+  # branch hid: four distinct estimators, one string.
+  assert len(set(_score_definitions_values(source))) == len(defined), (
+    "two score modes share a provenance string")
+
+
+def _score_definitions_values(source):
+  import ast
+  for node in ast.walk(ast.parse(source)):
+    if (isinstance(node, ast.Assign)
+        and getattr(node.targets[0], "id", "") == "_SCORE_DEFINITIONS"):
+      return [ast.literal_eval(v) for v in node.value.values]
+  return []
+
+
+def test_one_block_guard_applies_only_under_cross_attention():
+  """The PLL/Score I one-block guard must be gated on `cross_attn`.
+
+  The leak it protects against is the CLEAN stream: with more than one block,
+  x_t could read x_0 and the masked marginal would hand back the answer. That
+  stream is only ever built under `if model.cross_attn` -- a state-space
+  backbone is passed `noisy` alone, in which the scored position is masked, so
+  nothing can leak at any model_length. Guarding it unconditionally made pll,
+  pll_causal and all four infill modes unrunnable on the b8/b32 checkpoints,
+  leaving the two best models in the study with 3 estimators against block
+  256's 9. Verified empirically on b8 at 32 blocks: the logit at position i is
+  invariant to x_i to 1e-6 while remaining sensitive to earlier positions.
+  """
+  source = (_ROOT / "scripts/eval/dnahnet/score_mavedb.py").read_text()
+  lines = source.splitlines()
+  needle = "int(model.config.model.length) != int(model.config.block_size)"
+  hits = [i for i, ln in enumerate(lines) if needle in ln]
+  assert len(hits) == 3, f"expected 3 one-block guards, found {len(hits)}"
+  for i in hits:
+    # the guard may wrap, so read the whole logical condition, not one line
+    stmt = " ".join(ln.strip() for ln in lines[max(0, i - 2):i + 1])
+    assert "cross_attn" in stmt, (
+      f"one-block guard is not gated on cross_attn, so it will again block "
+      f"every sharp estimator on multi-block SSM checkpoints: {stmt!r}")
+
+
+def test_clean_stream_is_only_built_under_cross_attention():
+  """The premise of the guard relaxation above: no cross_attn, no clean stream."""
+  source = (_ROOT / "scripts/eval/dnahnet/score_mavedb.py").read_text()
+  # every concatenation of a clean stream must sit under a cross_attn test
+  for marker in ("torch.cat((noisy, clean), dim=-1)",
+                 "torch.cat((model_input, ids.unsqueeze(0)), dim=-1)"):
+    assert marker in source, f"missing expected clean-stream construction {marker!r}"
+    before = source[:source.index(marker)]
+    tail = before[-400:]
+    assert "model.cross_attn" in tail, (
+      f"clean stream {marker!r} is built without a nearby cross_attn guard")
+
+
+def test_score_i_index_is_guarded_against_a_prefix_offset():
+  """Score I must verify its indices land on the intended nucleotides.
+
+  `positions` are 0-based within the variant string; `wt_ids` is the padded
+  model input. They coincide only when nothing precedes the variant. With
+  `--genomic-prefix` the variant is shifted, but `score_batch` computes a
+  non-zero `offset` only for `--infill-pad-side left`, so an infill run behind
+  a prefix would read positions inside the prefix. Harmless until 2026-09-20,
+  when relaxing the one-block guard to `cross_attn` only made it reachable.
+  """
+  source = (_ROOT / "scripts/eval/dnahnet/score_mavedb.py").read_text()
+  assert "def _assert_index_lands_on_variant(" in source, "guard helper is gone"
+  # every masked-index construction in score_infill must be guarded
+  body = source[source.index("def score_infill("):]
+  body = body[:body.index("\ndef ")]
+  for marker in ("index = torch.tensor([p + offset for p in positions]",
+                 "span = torch.tensor([3 * c + k + offset"):
+    assert marker in body, f"missing index construction {marker!r}"
+  assert body.count("_assert_index_lands_on_variant(") >= 2, (
+    "not every Score I index path is guarded")
+
+
+def test_aggregate_refuses_to_mix_estimators():
+  """Averaging across estimators is meaningless -- they score different sets."""
+  source = (_ROOT / "scripts/eval/dnahnet/aggregate_mavedb.py").read_text()
+  assert "_shared_score_definition" in source
+  assert "refusing to average across different estimators" in source
+  assert '"mean of paired NELBO(WT) - NELBO(mutant) runs"' not in source, (
+    "the hardcoded NELBO provenance string is back")
+
+
+def test_standings_does_not_cherry_pick_and_checks_ar_geometry():
+  """Two defects that made our own standings table wrong.
+
+  (1) `headline = max(macro, pertok)` picked whichever of two different
+      metrics scored higher, per arm.
+  (2) the arm list pointed at no-prefix AR runs, reproducing a spurious
+      1.4x uSSM-AR vs Transformer-AR gap that vanishes at matched geometry.
+  """
+  source = (_ROOT / "scripts/eval/standings.py").read_text()
+  # strip comments: the fix is documented in a comment that names the old
+  # expression, and that prose must not itself trip the check
+  code = "\n".join(ln.split("#", 1)[0] for ln in source.splitlines())
+  assert "max(pooled, pertok)" not in code and "max(macro, pertok)" not in code
+  assert "_check_arm_geometry" in source
+  assert "genomic_prefix" in source, "AR geometry is not verified"
+  arms = source[source.index("MAVEDB_ARMS = ["):]
+  arms = arms[:arms.index("]\n")]
+  for line in arms.splitlines():
+    if "-AR" in line and "exact AR" in line:
+      assert "genomicprefix" in line, (
+        f"AR arm must point at a genomic-prefix run: {line.strip()!r}")
+
+
+def test_summary_splits_substitutions_from_indels():
+  """Indels must be reported separately -- our scores are unnormalised sums.
+
+  A 3-nt deletion drops three log-probability terms and a 3-nt insertion adds
+  three, so `predicted_fitness` on those rows tracks LENGTH, not biology:
+  corr(predicted_fitness, length change) = -0.79 over the 1,901 indel rows,
+  mean +3.015 for deletions against -4.249 for insertions, while the assay
+  puts them at a near-identical +1.319 / +1.699 kcal/mol. ProteinGym keeps
+  substitutions and indels as separate benchmarks for this reason.
+  """
+  import csv as _csv
+  from scripts.eval.dnahnet.mavedb import (
+    summarize_predictions, _hgvs_length_delta)
+
+  # the parser itself
+  assert _hgvs_length_delta("c.=") == 0
+  assert _hgvs_length_delta("c.[3G>A;9T>C]") == 0
+  assert _hgvs_length_delta("c.[3_4insGGT]") == 3
+  assert _hgvs_length_delta("c.[10_12del]") == -3
+  assert _hgvs_length_delta("c.[10_12delins A]".replace(" ", "")) == -2
+
+  path = (_ROOT / "results/dnahnet/mavedb/b8-nelbo-eps0.9-157368/predictions.csv")
+  if not path.exists():
+    return  # results not present in this checkout
+  summary = summarize_predictions(list(_csv.DictReader(path.open())))
+  assert summary["num_substitution_variants"] == 19349
+  assert summary["num_indel_variants"] == 1901
+  # the indel rows score at chance and drag the pooled headline down
+  assert abs(summary["macro_signed_spearman_indels"]) < 0.05
+  assert (summary["macro_signed_spearman_substitutions"]
+          > summary["macro_signed_spearman"])
+
+
+def test_every_eval_script_can_print_help():
+  """argparse %-interpolates help strings, so a bare '%' crashes --help.
+
+  Two scripts shipped with this defect (`score_mavedb.py --only-urn` wrote
+  "48.4% N", `benchmark_arms.py` wrote "(1.36%)"), and because --help is not
+  on any hot path it went unnoticed. Percent signs are common in this repo's
+  help text since the numbers are mostly fractions, so this is worth a guard.
+  """
+  import re
+  bad = []
+  for path in sorted((_ROOT / "scripts/eval").rglob("*.py")):
+    source = path.read_text()
+    if "add_argument" not in source:
+      continue
+    for match in re.finditer(
+        r'help=\s*\(?((?:\s*"(?:[^"\\]|\\.)*"\s*)+)\)?', source):
+      text = match.group(1)
+      if re.search(r'(?<!%)%(?![%(sdfrgeix])', text):
+        bad.append(f"{path.relative_to(_ROOT)}: {text[:60]}")
+  assert not bad, (
+    "bare '%' in an argparse help string will crash --help; escape as '%%':\n  "
+    + "\n  ".join(bad))
+
+
+def test_every_result_writing_eval_script_stamps_provenance():
+  """A result file must record what produced it.
+
+  The generation/infilling branch wrote JSON with no argv provenance, so you
+  could not recover from a result which sample size produced it -- and
+  `--n-loci` defaults to 24 in task2_generate and 32 in ag_receptive_field.
+  That is the same class of gap as the `score_definition` bug: the artifact
+  did not record what it actually did.
+  """
+  import re
+  offenders = []
+  for path in sorted((_ROOT / "scripts/eval").rglob("*.py")):
+    source = path.read_text()
+    # only scripts that both take CLI args and write a result file
+    if "add_argument" not in source:
+      continue
+    writes = re.search(r"\.write_text\(\s*json\.dumps|json\.dump\(", source)
+    if not writes:
+      continue
+    if "stamp(" not in source:
+      offenders.append(str(path.relative_to(_ROOT)))
+  # RATCHET. These 16 predate the provenance convention. The list may SHRINK,
+  # never grow: a new result-writing script must stamp itself. The seven that
+  # were fixed on 2026-09-20 (the aglonggen generation/infilling chain, DEG,
+  # the MaveDB aggregator and the GB probe) are deliberately absent, so a
+  # regression there fails this test.
+  known_unstamped = {
+    "scripts/eval/ar_decode_benchmark.py",
+    "scripts/eval/benchmark_arms.py",
+    "scripts/eval/build_human_longrange.py",
+    "scripts/eval/build_longrange_eval.py",
+    "scripts/eval/caduceus/embed.py",
+    "scripts/eval/dnahnet/codon_independence.py",
+    "scripts/eval/dnahnet/partial_corr.py",
+    "scripts/eval/dnahnet/prepare_deg.py",
+    "scripts/eval/dnahnet/prepare_mavedb.py",
+    "scripts/eval/dnahnet/profile_forward.py",
+    "scripts/eval/gen_synthetic_duplication.py",
+    "scripts/eval/gen_synthetic_longrange.py",
+    "scripts/eval/gen_synthetic_recall.py",
+    "scripts/eval/inference_curves.py",
+    "scripts/eval/measure_runtime_timescales.py",
+    "scripts/eval/measured_flops_sweep.py",
+    "scripts/eval/scaling_curves.py",
+    "scripts/eval/ssm_prefix_intervention.py",
+    "scripts/eval/ssm_streaming_benchmark.py",
+    "scripts/eval/training_flops.py",
+  }
+  new_offenders = sorted(set(offenders) - known_unstamped)
+  assert not new_offenders, (
+    "these eval scripts write a result file but never call stamp(), so the "
+    "output cannot say what produced it:\n  " + "\n  ".join(new_offenders))
+  regressed = sorted(known_unstamped & set(offenders) ^ known_unstamped & set(offenders))
+  assert not regressed

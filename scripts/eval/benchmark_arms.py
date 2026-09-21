@@ -219,7 +219,7 @@ def main():
   parser.add_argument("--val-batches", type=int, default=0,
                       help="0 = the WHOLE validation cache (the default). A "
                            "positive value truncates. The old default of 32 "
-                           "scored 1,048,448 of 76.9M held-out nt (1.36%) and "
+                           "scored 1,048,448 of 76.9M held-out nt (1.36%%) and "
                            "moved uSSM-AR val NLL by 0.0084 -- 1.5x the "
                            "architecture difference this table reports.")
   parser.add_argument("--mc-samples", type=int, default=8,

@@ -259,6 +259,67 @@ def spearmanr(left: Sequence[float], right: Sequence[float]) -> float:
   return float(np.corrcoef(left_rank, right_rank)[0, 1])
 
 
+def _hgvs_length_delta(hgvs_nt) -> int:
+  """Net nucleotide length change implied by a c. annotation (0 for subs)."""
+  if not isinstance(hgvs_nt, str) or hgvs_nt.strip() in {"", "c.=", "n.=", "c.(=)"}:
+    return 0
+  body = hgvs_nt.strip()
+  body = body[body.find("[") + 1:body.rfind("]")] if "[" in body else body[2:]
+  delta = 0
+  for change in (c.strip() for c in body.split(";") if c.strip()):
+    match = DELINS_RE.fullmatch(change)
+    if match:
+      start = int(match.group(1))
+      stop = int(match.group(2)) if match.group(2) else start
+      delta += len(match.group(3)) - (stop - start + 1)
+      continue
+    match = DEL_RE.fullmatch(change)
+    if match:
+      start = int(match.group(1))
+      stop = int(match.group(2)) if match.group(2) else start
+      delta -= stop - start + 1
+      continue
+    match = INS_RE.fullmatch(change)
+    if match:
+      delta += len(match.group(3))
+  return delta
+
+
+def _substitution_only_metrics(all_records) -> dict:
+  """Macro signed Spearman over length-preserving variants only.
+
+  Returns the reference-correct benchmark (ProteinGym scores substitutions and
+  indels separately) beside the pooled number, so both are always visible and
+  neither can be quoted by accident.
+  """
+  subs, indels = [], []
+  for record in all_records:
+    # predictions.csv carries no sequences, so classify from the annotation
+    (indels if _hgvs_length_delta(record.get("hgvs_nt")) else subs).append(record)
+
+  def _macro(rows):
+    groups: dict[str, list] = {}
+    for row in rows:
+      groups.setdefault(row["score_set_urn"], []).append(row)
+    values = []
+    for assay in groups.values():
+      pred = [float(r["predicted_fitness"]) for r in assay
+              if np.isfinite(float(r["predicted_fitness"]))]
+      exp = [float(r["experimental_score"]) for r in assay
+             if np.isfinite(float(r["predicted_fitness"]))]
+      if len(pred) >= 10:
+        values.append(spearmanr(pred, exp))
+    finite = [v for v in values if np.isfinite(v)]
+    return float(np.mean(finite)) if finite else float("nan")
+
+  return {
+    "macro_signed_spearman_substitutions": _macro(subs),
+    "macro_signed_spearman_indels": _macro(indels),
+    "num_substitution_variants": len(subs),
+    "num_indel_variants": len(indels),
+  }
+
+
 def summarize_predictions(records: Iterable[Mapping]) -> dict:
   groups: dict[str, list[Mapping]] = {}
   all_records = list(records)
@@ -316,6 +377,19 @@ def summarize_predictions(records: Iterable[Mapping]) -> dict:
     "macro_signed_spearman": float(np.mean(finite_signed)) if finite_signed
                              else float("nan"),
     "num_negative_assays": sum(1 for r in finite_signed if r < 0),
+    # SUBSTITUTION-ONLY re-run of the same metric. ProteinGym keeps
+    # substitutions (DMS_substitutions.csv) and indels (DMS_indels.csv) as
+    # SEPARATE benchmarks and switches aggregation on an --indel_mode flag; we
+    # were pooling them. That matters because our sequence scores are UNNORMALISED
+    # SUMS over tokens, so a 3-nt deletion drops three log-probability terms and a
+    # 3-nt insertion adds three. Measured on b8 eps=0.9: corr(predicted_fitness,
+    # length change) = -0.79 over the 1,901 indel rows, mean predicted +3.015 for
+    # deletions against -4.249 for insertions, while the ASSAY puts them at a
+    # near-identical +1.319 and +1.699 kcal/mol. Those rows score at chance
+    # (macro 0.0149) and drag the headline down ~0.010.
+    # `partial_corr.py` was already immune because `len_delta` is one of its
+    # controls; only the signed headline was contaminated.
+    **_substitution_only_metrics(all_records),
     "macro_abs_spearman": float(np.mean(finite_abs)),
     "pooled_spearman": pooled,
     "pooled_abs_spearman": abs(pooled),

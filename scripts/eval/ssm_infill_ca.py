@@ -35,6 +35,7 @@ from omegaconf import OmegaConf
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 sys.path.insert(0, str(REPO))
+from scripts.eval.provenance import stamp  # noqa: E402
 
 import dataloader  # noqa: E402
 from scripts.eval.dnahnet.score_mavedb import load_checkpoint_model  # noqa: E402
@@ -270,6 +271,7 @@ def main():
   # and the rf10 measurement -- the whole point of the run -- survived only as
   # text in its stdout. Same fixed-filename clobber that cost 68 of 69 generation
   # runs. So ALSO write a label-stamped copy, which no later arm can take.
+  stamp(summary, args)
   _atomic_json(args.output_dir / "summary.json", summary)
   if args.label:
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(args.label))
