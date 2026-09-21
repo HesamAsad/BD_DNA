@@ -10,6 +10,38 @@ the obvious ones.
 
 ---
 
+## 0. Where everything lives
+
+All paths in this document are relative to the repository root:
+
+```
+REPO=/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms
+```
+
+So `scripts/eval/...` means `$REPO/scripts/eval/...`. The absolute paths for the
+things you need first:
+
+| what | absolute path |
+|---|---|
+| repository root | `/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms` |
+| python interpreter | `/software/cellgen/team361/ha11/envs/nichejepa/bin/python` |
+| released loci + real/dinuc records | `/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/results/aglonggen/task2_gen_cosfinal_bissm.json` |
+| the scorer | `/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/scripts/eval/aglonggen/task2_score.py` |
+| the validator | `/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/scripts/eval/aglonggen/validate_task2_submission.py` |
+| reference genome | `/lustre/scratch126/cellgen/lotfollahi/ha11/bd3lms/data/hg38/hg38.ml.fa` |
+
+**Prerequisites, worth checking before you start:**
+
+- Both `/lustre/scratch126` and `/software` are **shared cluster filesystems**,
+  so this only works from a node on the same cluster (`tiger22`). There is no
+  copy of this outside it.
+- You need to be in the **`team361` unix group**. The repository itself is
+  world-readable, but everything this document points you at is group-readable (`-rw-rw-r--`) rather than world-readable. Check with `id -nG | tr ' ' '\n' | grep team361`.
+- Run from `$REPO`, not from a copy. Each script derives the repo root from
+  its own location (`Path(__file__).resolve().parents[N]`, with N depending
+  on how deep the script sits) and resolves sibling data paths from it, so
+  moving a script out of its directory breaks those lookups silently.
+
 ## 1. The task
 
 Take a real 16,384 nt human locus. Mask a contiguous interior span, commit both
