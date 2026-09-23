@@ -230,8 +230,12 @@ is real.
 
 ## 7. The numbers to beat
 
-Median `mse_RNA_SEQ`, our bidirectional SSM (`hg_bissm_cos/best.ckpt`), 2,400
-records:
+Our bidirectional SSM (`hg_bissm_cos/best.ckpt`), 2,400 records. The scorer
+writes both of the RNA-seq metrics below into every row, so you get both for
+free.
+
+**Whole window.** Median `mse_RNA_SEQ`, over all 16,384 nt of the AlphaGenome
+output (flanks included):
 
 | gap nt | real | ca | mismatch | **denovo** | dinuc |
 |---|---|---|---|---|---|
@@ -239,6 +243,17 @@ records:
 | 512 | 0.0000 | 0.1507 | 0.1263 | **0.1313** | 0.0783 |
 | 1024 | 0.0000 | 0.3536 | 0.3094 | **0.3103** | 0.1882 |
 | 4096 | 0.0000 | 1.2593 | 1.7782 | **1.4099** | 1.0155 |
+
+**Near the right flank.** Median `posmse_RNA_SEQ_0`: the same standardised
+RNA-seq error, restricted to the 64 nt of the gap that touch the right flank.
+This is the primary endpoint in the report (its Table 3):
+
+| gap nt | real | ca | mismatch | **denovo** | dinuc |
+|---|---|---|---|---|---|
+| 256 | 0.0000 | 0.1010 | 0.1406 | **0.1427** | 0.0670 |
+| 512 | 0.0000 | 0.1983 | 0.2665 | **0.2120** | 0.1117 |
+| 1024 | 0.0000 | 0.4519 | 0.5128 | **0.4293** | 0.2766 |
+| 4096 | 0.0000 | 0.9807 | 1.2860 | **0.8030** | 0.7650 |
 
 **`denovo` is your column.** Lower is better; `real` is the floor by
 construction and `dinuc` is the composition-matched control.
